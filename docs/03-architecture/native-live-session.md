@@ -1,6 +1,6 @@
 # Native live session 통합 계약
 
-상태: 구현 착수 · 2026-10-16 · E01/E02/E03/E08
+상태: 구현·실제 Mac window 검증 성공 · 2026-10-16 · E01/E02/E03/E08
 
 ## 이번 체크포인트
 
@@ -49,3 +49,5 @@ native package는 window 기능을 포함하도록 확장하고 사용 안내·m
 | CLI·package 통합 | `crates/daedalus-cli/**`, scripts/package·notice와 해당 tests, CI, Cargo.lock | 앞선 API를 소비하며 공통 파일은 단독 편집 |
 
 조정자는 Markdown 계약·통합 리뷰·독립 검증·commit/PR를 담당한다. source 파일·test·CI는 모두 Luna xhigh가 작성한다. 구현 계약은 [실행 통합](runtime-control-and-presentation.md)과 [구현 체크리스트](../04-plan/implementation-checklist.md)를 구체화한다.
+
+실제 Mac 입력·종료·package와 최종 회귀 근거는 [작업 기록](../06-worklog/2026-10-16-native-live-session.md)에 남긴다. 이 계약의 한 청크 검증을 무한 지형이나 전체 엔진 완료로 확대하지 않는다.

@@ -76,6 +76,8 @@ For manual QA, observe loading animation and advancing tick/generation in the ti
 
 `--capture-output /tmp/daedalus-live.png` captures the final owned scene after the window exits. It is an offscreen render, not proof of an interactive window or its overlay. Physical-window screenshots and the session report provide separate evidence. Frame interval samples measure CPU/present spacing; they do not certify GPU completion latency or 144 fps. Mac evidence does not establish browser, Windows, mobile, or console support. The [live session contract](docs/03-architecture/native-live-session.md) defines ownership and failure behavior.
 
+The 2026-10-16 coordinator check passed all 102 all-feature CPU tests, formatting, and Clippy, plus the separately requested real Metal capture test. Actual Mac window input verified camera movement/orbit, authority ECS movement during terrain loading, supersession, resize, and close during a job. A clean window-enabled release archive also passed extracted CPU smoke and a real window/time-limit run. The [live checkpoint record](docs/06-worklog/2026-10-16-native-live-session.md) contains the exact source, environment, report counters, and scope limits.
+
 ## Local CLI packaging and future releases
 
 Python 3.11 or newer is required for the packaging scripts. On a native macOS arm64 or Linux x64 host, run:

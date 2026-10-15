@@ -76,4 +76,6 @@ C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-b
 - [x] 권한 ECS 명령의 적용 결과를 동일 session snapshot으로 표시.
 - [x] bounded background generation·meshing·revision/generation 검사·stale 거부.
 - [x] 실제 loading 중 input·presentation 지속을 Mac 입력과 실행 report로 확인.
-- [ ] 포화·취소·종료·frame interval·회귀 검사 및 window 포함 local package 검증.
+- [x] 포화·취소·종료·frame interval·회귀 검사 및 window 포함 local package 검증.
+
+통과 근거와 실제 수치는 [작업 기록](../06-worklog/2026-10-16-native-live-session.md)에 둔다. 이는 한 청크 native 통합 체크포인트이며 전체 E01~E08 품질 게이트의 완료가 아니다.

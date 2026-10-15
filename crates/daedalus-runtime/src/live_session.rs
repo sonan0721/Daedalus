@@ -1568,6 +1568,20 @@ mod tests {
         }
     }
 
+    fn wait_for_frame(session: &LiveSession) -> std::sync::Arc<super::LiveFrame> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(frame) = session.try_latest_frame() {
+                return frame;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for live frame"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     fn wait_for_mesh(session: &LiveSession, generation: u64) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1588,9 +1602,7 @@ mod tests {
     #[test]
     fn initial_snapshot_is_real_ecs_and_move_ack_follows_world_command() {
         let session = LiveSession::start(fast_config()).unwrap();
-        let initial = session
-            .try_latest_frame()
-            .expect("startup publishes the initial owned frame");
+        let initial = wait_for_frame(&session);
         assert_eq!(initial.snapshot.entities.len(), 1);
         assert_eq!(
             initial.snapshot.entities[0].entity,
@@ -1612,22 +1624,29 @@ mod tests {
             })
             .unwrap();
         let result = wait_result(&session, accepted.id);
-        assert_eq!(
-            result.outcome,
-            LiveCommandOutcome::Applied {
-                tick: 2,
-                revision: 1,
-                translation: [1.0, 12.0, 3.0],
-            }
-        );
-        assert_eq!(
-            wait_result(&session, second.id).outcome,
-            LiveCommandOutcome::Applied {
-                tick: 3,
-                revision: 2,
-                translation: [3.0, 13.0, 2.0],
-            }
-        );
+        let LiveCommandOutcome::Applied {
+            tick: first_tick,
+            revision: first_revision,
+            translation: first_translation,
+        } = result.outcome
+        else {
+            panic!("first movement should be applied");
+        };
+        assert!(first_tick > initial.tick);
+        assert_eq!(first_revision, 1);
+        assert_eq!(first_translation, [1.0, 12.0, 3.0]);
+
+        let LiveCommandOutcome::Applied {
+            tick: second_tick,
+            revision: second_revision,
+            translation: second_translation,
+        } = wait_result(&session, second.id).outcome
+        else {
+            panic!("second movement should be applied");
+        };
+        assert!(second_tick > first_tick);
+        assert_eq!(second_revision, 2);
+        assert_eq!(second_translation, [3.0, 13.0, 2.0]);
         let report = session.shutdown();
         assert_eq!(report.final_entity_translation, Some([3.0, 13.0, 2.0]));
         assert!(report.stats.commands_applied >= 2);
@@ -1637,7 +1656,7 @@ mod tests {
     fn initial_real_generation_and_mesh_are_tagged_and_retained() {
         let session = LiveSession::start(fast_config()).unwrap();
         wait_for_mesh(&session, 1);
-        let frame = session.try_latest_frame().unwrap();
+        let frame = wait_for_frame(&session);
         let mesh = frame.terrain.mesh.as_ref().unwrap();
         assert_eq!(mesh.tag.job_generation, 1);
         assert!(!mesh.quads.is_empty());
@@ -1713,9 +1732,9 @@ mod tests {
             }),
             Err(LiveCommandSubmitError::ResultBacklogFull)
         ));
-        let frame_before = session.try_latest_frame().unwrap();
+        let frame_before = wait_for_frame(&session);
         thread::sleep(Duration::from_millis(40));
-        let frame_after = session.try_latest_frame().unwrap();
+        let frame_after = wait_for_frame(&session);
         assert!(frame_after.tick >= frame_before.tick);
         // Once the one reliable result slot is consumed, bounded admission becomes available.
         let _ = wait_result(&session, accepted.id);

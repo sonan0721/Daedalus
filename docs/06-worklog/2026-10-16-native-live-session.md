@@ -1,6 +1,6 @@
 # Native live session 통합과 작업 파이프라인
 
-상태: Mac 실제 창 검증 성공 · 전체 회귀·패키징 검증 중 · 2026-10-16 · E01/E02/E03/E08 · 사용자 A-038
+상태: Mac 실제 창·전체 회귀·local package·첫 PR CI 성공 · 2026-10-16 · E01/E02/E03/E08 · 사용자 A-038/A-039
 
 ## 이 기록을 만든 이유
 
@@ -27,7 +27,23 @@ CI는 window 경로를 포함하는 all-features 검사와 공식 SHA에 고정�
 - 문서 검사와 Python 36건 성공: 문서 8, notice 14, packaging 14.
 - .NET SDK 10.0.402 Release build: 경고 0·오류 0. 실제 Rust-backed host self-test와 managed/native 2개 scenario 성공.
 - macOS arm64 window 의존성 notice strict 수집 성공: resolved dependency 187개. 경로는 ignored `dist/live-evidence/notices/`이며 원본 프로젝트에 외부 에셋을 추가하지 않았다.
-- renderer CPU 14건, runtime unit/integration 22건과 각 담당자의 focused Clippy 성공. 최종 workspace 회귀·GPU test·local archive·PR 결과는 완료 후 추가한다.
+- renderer CPU 14건, runtime unit/integration 22건, CLI 12건과 각 담당자의 focused Clippy 성공.
+- 조정자의 workspace all-features check/test/Clippy·fmt 성공: CPU 102건 성공, 기본 비활성 hardware 2건. renderer의 추가 test-fixture 검사도 이 숫자에 포함된다.
+- 별도 요청한 실제 Metal GPU regression 성공: 513×289 padded-row readback·PNG decode 검증. 출력 `dist/live-evidence/gpu-regression.png`.
+
+## 로컬 배포 단위와 PR
+
+source `8679c5d4df58cf3c8d25893f8b828802f0f23d2f`의 clean tree에서 기본 `python3 scripts/package_cli.py`가 release `window` package를 생성했다. compiler build log는 기존 공유 cache를 사용한 8.34초였으며 전체 packaging 시간이나 CI 개선 배율로 해석하지 않는다. 출력은 ignored `dist/local/daedalus-0.1.0-aarch64-apple-darwin-8679c5d4df58-clean-20261015T233153Z-837ae14a9f6b4d8c996cd36ad003a70d/`다.
+
+별도 `--verify-archive`도 성공했고 manifest는 `dirty: false`, `cargo_features: ["window"]`, target `aarch64-apple-darwin`을 기록했다. binary SHA-256은 `b8eecf82951a25a8446090525f289b9d70cdc551182611dda598dc294ef9630c`다. package 실행 파일의 version JSON은 window/capture를 true로 보고했다.
+
+동일 package 실행 파일의 `view --seconds 3`도 exit 0·270 frames·자동 time limit 종료·terrain generation 1 완료·pending result 0·last error 없음으로 성공했다. `dist/live-evidence/packaged-view.json`을 남겼다. CPU archive smoke와 실제 GPU/window smoke를 별도로 수행했다.
+
+[PR #5](https://github.com/sonan0721/Daedalus/pull/5)의 첫 source checkpoint `8679c5d`에서 [docs](https://github.com/sonan0721/Daedalus/actions/runs/38824114972), [all-features Rust](https://github.com/sonan0721/Daedalus/actions/runs/38824114970), [managed/native](https://github.com/sonan0721/Daedalus/actions/runs/38824115009), [macOS/Linux package](https://github.com/sonan0721/Daedalus/actions/runs/38824114945)가 모두 성공했다. publish job은 PR이므로 skipped이며 태그·공개 Release는 생성하지 않았다.
+
+두 PR archive를 실제 다운로드해 재검증했다. GitHub PR checkout은 head 자체가 아니라 base와 합친 synthetic merge commit `3fdc327c923961cc6b3cc0c1322c6a2426c8022c`다. GitHub API의 해당 merge SHA와 양쪽 manifest의 exact commit을 대조했다. Mac은 추출한 CPU executable smoke까지, Linux는 이 Mac에서 실행하지 않고 metadata·hash·archive 검증까지 수행했다. Linux executable smoke는 Linux CI에서 성공했다. package cache는 macOS 약 204MB·Linux 약 279MB 저장을 GitHub API로 확인했으며 cache 적중을 이유로 검사를 생략하지 않는다.
+
+마지막 보완은 runtime 시험의 시간 의존성을 줄였다. OS가 thread를 늦게 실행해도 고정 tick 2/3을 가정하지 않고 initial frame 이후·두 입력의 적용 순서·정확한 revision과 누적 위치를 검사한다. transient mailbox contention도 bounded retry로 처리한다. production 동작은 바꾸지 않았고 조정자가 전체 CPU 102건·Clippy·fmt를 다시 통과시켰다. 최종 PR head의 필수 체크도 병합 전에 확인한다.
 
 ## 실제 Mac window 검증
 

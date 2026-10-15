@@ -50,6 +50,8 @@ CI는 read-only contents 권한으로 실행하고 checkout Action을 확인한 
 
 native window feature가 실제 CLI 경로에 추가되므로 Rust CI의 check/test/clippy도 all-features로 검사한다. 공식 `actions/cache`의 실제 v6.1.0 commit `55cc8345863c7cc4c66a329aec7e433d2d1c52a9`과 node24 action metadata를 확인했다. registry/git source와 target 출력만 OS·architecture·작업 단계·toolchain/manifest/lock 기준으로 분리해 캐시하고 credentials/config는 포함하지 않는다. 캐시가 적중해도 `--locked`·CPU 테스트·압축 해제 후 실행을 생략하지 않는다. 시간 절약 효과는 실제 CI 실행 이후에만 수치로 기록한다. [공식 cache Action](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
 
+[Native live PR #5](https://github.com/sonan0721/Daedalus/pull/5)의 첫 검증에서 required 3개와 두 native package가 모두 통과했다. package cache가 실제 저장된 것도 확인했다. PR artifact의 exact commit은 GitHub가 checkout한 synthetic merge SHA이며 head SHA와 구분한다. 실제 Mac 입력·archive 다운로드 검증은 [작업 기록](../06-worklog/2026-10-16-native-live-session.md)에 기록한다.
+
 ## 보안·지원
 
 private vulnerability reporting을 활성화하고 API의 `enabled: true`를 확인했다. 민감한 제보는 [SECURITY](../../SECURITY.md)의 비공개 경로를 사용한다. 일반 질문·버그·설계 제안은 이슈 양식을 사용한다. 릴리스가 없으므로 지원 중인 엔진 버전이나 응답 SLA를 발명하지 않는다.

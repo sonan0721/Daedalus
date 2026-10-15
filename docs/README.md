@@ -52,6 +52,7 @@
 | [워터폴 마스터플랜](04-plan/waterfall-masterplan.md) | 단계별 산출물·게이트·되돌림 규칙 정의 |
 | [검증·성능 기준](04-plan/validation-and-performance.md) | 정확성·지연·화질·플랫폼·서버 테스트 설계 |
 | [위험 등록부](04-plan/risk-register.md) | 의존성·웹·스코프·수명·품질 위험과 대응 조건 기록 |
+| [GitHub 운영·검증](04-plan/github-workflow.md) | 실제 적용한 브랜치 규칙·PR·CI·1인 유지보수 절차 기록 |
 | [ADR 기록](05-decisions/README.md) | 확정 결정과 제안의 변경 이력 관리 |
 | [ADR-0001](05-decisions/0001-engine-identity-and-scope.md) | 독립 엔진·엔진 전용 저장소·구현 전 문서화 확정 |
 | [ADR-0002](05-decisions/0002-runtime-boundaries.md) | Rust/wgpu 기준선·실행 격리·명령·자원 예산의 방향 채택 |

@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible problem in the repository or its documented behavior.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Daedalus is in its planning and design stage and does not have a runnable engine yet. For a security vulnerability, do not post details here; see [SECURITY.md](https://github.com/sonan0721/Daedalus/blob/main/SECURITY.md).
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and where you saw it.
+      placeholder: A concise description of the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include exact steps, inputs, or links needed to see the problem.
+      placeholder: |
+        1. Open ...
+        2. Follow ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, tool versions, or commit when relevant.
+      placeholder: "For example: macOS 15, Python 3.13, commit abc1234"
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked that this is not a public report of a security vulnerability.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: false

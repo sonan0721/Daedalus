@@ -1,0 +1,50 @@
+name: Design proposal
+description: Propose an engine goal, requirement, architecture choice, or tradeoff.
+title: "[Proposal]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Daedalus is an engine-only project in its planning and design stage. Explain the engine need this proposal addresses. Small test fixtures or scenes may support a specific engine check; sample games, demos, and cloned games are outside the current scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or need
+      description: What user, engine, or development need should be addressed?
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal and success conditions
+      description: What outcome should the engine or project support, and how could we tell it works?
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and tradeoffs
+      description: Include relevant platforms, performance needs, maintenance costs, or other limits.
+    validations:
+      required: false
+  - type: textarea
+    id: options
+    attributes:
+      label: Options considered
+      description: What alternatives did you consider, and why might this proposal fit?
+    validations:
+      required: false
+  - type: textarea
+    id: validation
+    attributes:
+      label: How could this be validated?
+      description: If you propose fixtures or test scenes, describe the narrow engine behavior they would test.
+    validations:
+      required: false
+  - type: textarea
+    id: open_questions
+    attributes:
+      label: Open questions
+      description: What needs discussion or research before the proposal can be decided?
+    validations:
+      required: false

@@ -1,6 +1,6 @@
 # Daedalus CLI 로컬 빌드·태그 릴리스
 
-상태: 로컬 package·archive 실행 검증, 태그 CI 구성의 PR 검증 진행 · 2026-10-16
+상태: 로컬 package·native PR dry build 확인, 태그 publish 미실행 · 2026-10-16
 
 ## 사용자 요구
 
@@ -18,9 +18,11 @@ Rust 의존성의 package ID·버전·license 선언·source checksum과 배포 
 
 ## 버전과 로컬 관리
 
-`daedalus --version`은 실제 crate SemVer를 표시한다. build manifest에는 schema version, CLI version, exact Git commit, dirty 여부, target triple, Cargo profile, feature 목록, Rust toolchain, binary SHA-256, build 식별자를 남긴다. 조회하지 못한 값은 임의로 채우지 않는다. dirty 빌드는 로컬에서 허용하되 공개 릴리스 후보와 구분한다.
+`daedalus --version`은 실제 crate SemVer를 표시한다. build manifest에는 schema version, CLI version, exact Git commit, dirty 여부, target triple, Cargo profile, feature 목록, Rust toolchain, binary SHA-256, build 식별자를 남긴다. 조회하지 못한 값은 임의로 채우지 않는다. build 전후 HEAD를 비교해 변경 시 중단하며 dirty 여부는 양쪽 결과를 합친다. dirty 빌드는 로컬에서 허용하되 공개 릴리스 후보와 구분하고 tag 후보는 build 후에도 clean이어야 한다. 이는 source snapshot이나 byte-for-byte 재현 빌드 증명과 다르다.
 
-로컬 packaging 명령은 `--locked`로 native release build를 수행하고 격리된 ignored 디렉터리 아래 산출물을 보관한다. 여러 빌드를 식별할 수 있게 이름·manifest를 연결하고 기존 산출물을 조용히 덮어쓰지 않는다. 프로젝트 source·로그·토큰·개인 경로·임의 사용자 파일을 archive에 포함하지 않는다. 빌드물은 Git에 커밋하지 않는다.
+로컬 packaging 명령은 `--locked`로 native release build를 수행하고 격리된 ignored 디렉터리 아래 산출물을 보관한다. 여러 빌드를 식별할 수 있게 이름·manifest를 연결하고 기존 산출물을 조용히 덮어쓰지 않는다. archive entry와 manifest에는 개인 경로를 쓰지 않고 프로젝트 source·로그·토큰·임의 사용자 파일을 자동 포함하지 않는다. 빌드물은 Git에 커밋하지 않는다.
+
+배포용 Rust compiler 경로는 `--remap-path-prefix`로 repository·Cargo/Rustup cache·build home을 중립 prefix에 대응시킨다. 사용자의 encoded Rust flags 우선순위와 공백 구분 `RUSTFLAGS` 의미를 보존해 build subprocess에만 적용하고 실제 개인 경로는 manifest에 쓰지 않는다. 이 방식은 Cargo config의 `rustflags`보다 환경 변수를 우선하므로 별도 config flags가 필요한 사용자는 environment로 전달한다. compiler 생성 경로를 정규화하는 범위이며 외부 도구·임의 문자열·서명 정보까지 전부 제거한다는 보장은 아니다. [Rust 경로 remapping](https://doc.rust-lang.org/rustc/remap-source-paths.html), [Cargo flags 우선순위](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags)
 
 archive에서 꺼낸 실행 파일로 `--version`과 CPU inspect smoke를 실행한다. macOS 실행 권한도 보존한다. SHA-256은 무결성 비교이며 code signing/notarization을 대신하지 않는다. 초기 unsigned 배포와 서명된 사용자 배포의 품질 게이트를 구분한다. SDK/framework-dependent host의 부속 packaging은 E04 결과와 연결해 후속 확장한다.
 

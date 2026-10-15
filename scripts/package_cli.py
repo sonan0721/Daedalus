@@ -19,7 +19,7 @@ import tomllib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from collect_cli_notices import NoticeCollectionError, collect_cli_notices
 
@@ -38,6 +38,20 @@ ARCHIVE_MANIFEST = "build-manifest.json"
 ARCHIVE_THIRD_PARTY_NOTICES = "THIRD_PARTY_NOTICES.txt"
 ARCHIVE_DEPENDENCY_INVENTORY = "dependency-inventory.json"
 ARCHIVE_LICENSES = ("LICENSE-MIT", "LICENSE-APACHE")
+RUST_PATH_REMAP_POLICY = {
+    "policy_version": 1,
+    "prefixes": [
+        {"scope": "build-home", "remapped_prefix": "/daedalus/build-home"},
+        {"scope": "cargo-home", "remapped_prefix": "/daedalus/cargo"},
+        {"scope": "rustup-home", "remapped_prefix": "/daedalus/rustup"},
+        {"scope": "repository", "remapped_prefix": "/daedalus/source"},
+    ],
+    "rustflags_policy": (
+        "CARGO_ENCODED_RUSTFLAGS takes precedence, including when empty; otherwise RUSTFLAGS "
+        "is split on whitespace. Packaging remap flags are appended in a build-only environment "
+        "and override Cargo configuration build.rustflags."
+    ),
+}
 SEMVER_PATTERN = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -68,6 +82,7 @@ def run_command(
     command: Sequence[str | os.PathLike[str]],
     *,
     cwd: Path,
+    env: Mapping[str, str] | None = None,
     capture_output: bool = False,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -77,6 +92,7 @@ def run_command(
         result = subprocess.run(
             [os.fspath(part) for part in command],
             cwd=cwd,
+            env=env,
             check=False,
             capture_output=capture_output,
             text=True,
@@ -168,6 +184,56 @@ def make_build_id() -> tuple[str, str]:
     return build_id, timestamp
 
 
+def _absolute_build_path(path: str | Path, repository: Path) -> Path:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = repository / candidate
+    return Path(os.path.abspath(candidate))
+
+
+def _build_environment(repository: Path) -> dict[str, str]:
+    """Add neutral Rust path mappings while retaining Cargo's environment-flag precedence."""
+
+    environment = os.environ.copy()
+    repository = repository.resolve()
+    home_value = environment.get("HOME") or str(Path.home())
+    home = _absolute_build_path(home_value, repository)
+    cargo_home = _absolute_build_path(
+        environment.get("CARGO_HOME") or home / ".cargo", repository
+    )
+    rustup_home = _absolute_build_path(
+        environment.get("RUSTUP_HOME") or home / ".rustup", repository
+    )
+
+    # rustc uses the last matching prefix. Keep the broad home mapping first, followed by
+    # cache and checkout mappings so paths nested under HOME receive their stable labels.
+    roots = [
+        (home, "/daedalus/build-home"),
+        (cargo_home, "/daedalus/cargo"),
+        (rustup_home, "/daedalus/rustup"),
+        (repository, "/daedalus/source"),
+    ]
+    roots.sort(key=lambda entry: len(entry[0].parts))
+
+    encoded_flags = environment.get("CARGO_ENCODED_RUSTFLAGS")
+    if encoded_flags is not None:
+        # Cargo treats an explicitly empty encoded value as an empty flag list and gives it
+        # precedence over RUSTFLAGS. A non-empty value uses U+001F as its argument separator.
+        existing_flags = encoded_flags.split("\x1f") if encoded_flags else []
+    else:
+        # Cargo's RUSTFLAGS contract is whitespace splitting, not shell evaluation or quoting.
+        existing_flags = environment.get("RUSTFLAGS", "").split()
+
+    remap_flags: list[str] = []
+    for source, destination in roots:
+        source_text = str(source)
+        if "=" in source_text or "\x1f" in source_text:
+            raise PackageError("build path cannot be represented safely in Rust remap flags")
+        remap_flags.extend(("--remap-path-prefix", f"{source_text}={destination}"))
+    environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(existing_flags + remap_flags)
+    return environment
+
+
 def build_cli(repository: Path, target: str, cargo_executable: str = "cargo") -> Path:
     command = [
         cargo_executable,
@@ -183,7 +249,7 @@ def build_cli(repository: Path, target: str, cargo_executable: str = "cargo") ->
         "--target",
         target,
     ]
-    run_command(command, cwd=repository)
+    run_command(command, cwd=repository, env=_build_environment(repository))
     binary_path = repository / "target" / target / "release" / ARCHIVE_BINARY
     if not binary_path.is_file() or binary_path.is_symlink():
         raise PackageError("Cargo succeeded but the expected daedalus CLI binary is missing")
@@ -276,6 +342,7 @@ def make_manifest(
         "target_triple": target,
         "cargo_profile": "release",
         "cargo_features": list(PACKAGE_FEATURES),
+        "rust_path_remapping": RUST_PATH_REMAP_POLICY,
         "rust_toolchain": rust_toolchain,
         "binary_name": ARCHIVE_BINARY,
         "binary_sha256": binary_sha256,
@@ -475,6 +542,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         "target_triple",
         "cargo_profile",
         "cargo_features",
+        "rust_path_remapping",
         "rust_toolchain",
         "binary_name",
         "binary_sha256",
@@ -500,6 +568,8 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         raise PackageError("CLI package manifest target is unsupported")
     if manifest["cargo_profile"] != "release" or manifest["cargo_features"] != list(PACKAGE_FEATURES):
         raise PackageError("CLI package manifest profile or feature list is invalid")
+    if manifest["rust_path_remapping"] != RUST_PATH_REMAP_POLICY:
+        raise PackageError("CLI package manifest Rust path-remapping policy is invalid")
     if manifest["binary_name"] != ARCHIVE_BINARY:
         raise PackageError("CLI package manifest binary name is invalid")
     if not isinstance(manifest["binary_sha256"], str) or not re.fullmatch(
@@ -707,6 +777,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise PackageError("tagged package builds require a clean Git worktree")
         build_id, build_timestamp_utc = make_build_id()
         binary_path = build_cli(repository, target)
+        post_build_commit, post_build_dirty = read_git_identity(repository)
+        if post_build_commit != commit:
+            raise PackageError("Git HEAD changed while building; refusing to package a different source revision")
+        if arguments.tag is not None and post_build_dirty:
+            raise PackageError("tagged package builds require a clean Git worktree after building")
+        dirty = dirty or post_build_dirty
         output_directory = arguments.out
         if output_directory is None:
             output_directory = _default_output_directory(

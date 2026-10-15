@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -110,6 +111,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual(manifest["target_triple"], TARGET)
         self.assertEqual(manifest["cargo_profile"], "release")
         self.assertEqual(manifest["cargo_features"], ["capture"])
+        self.assertEqual(manifest["rust_path_remapping"], package_cli.RUST_PATH_REMAP_POLICY)
         self.assertEqual(manifest["build_id"], BUILD_ID)
         self.assertEqual(manifest["binary_name"], "daedalus")
         self.assertEqual(len(manifest["third_party_notices_sha256"]), 64)
@@ -142,6 +144,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertIn("not a binary-symbol SBOM", inventory["feature_resolution"])
         self.assertIn("Daedalus CLI third-party notices", notices)
         self.assertNotIn(str(REPOSITORY), notices)
+        self.assertNotIn(str(REPOSITORY), json.dumps(manifest))
 
         checksum_fields = package.checksum.read_text(encoding="ascii").strip().split()
         self.assertEqual(checksum_fields[1], package.archive.name)
@@ -222,6 +225,102 @@ class PackageCliTests(unittest.TestCase):
             ],
         )
 
+    def test_build_cli_remaps_source_paths_and_preserves_cargo_flag_precedence(self) -> None:
+        home = self.root / "build home with spaces"
+        repository = home / "workspace" / "Daedalus"
+        cargo_home = home / "cargo cache"
+        rustup_home = home / "rustup cache"
+        repository.mkdir(parents=True)
+        cargo_home.mkdir()
+        rustup_home.mkdir()
+        binary = repository / "target" / TARGET / "release" / "daedalus"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"controlled build output")
+
+        cargo_stub = self.root / "cargo recorder"
+        cargo_stub.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['PACKAGE_TEST_LOG']).write_text(json.dumps({"
+            "'arguments': sys.argv[1:], "
+            "'encoded': os.environ.get('CARGO_ENCODED_RUSTFLAGS'), "
+            "'rustflags': os.environ.get('RUSTFLAGS')}))\n",
+            encoding="utf-8",
+        )
+        cargo_stub.chmod(0o755)
+
+        cases = (
+            {
+                "CARGO_ENCODED_RUSTFLAGS": "--cfg\x1ffeature=\"two words\"",
+                "RUSTFLAGS": "--cfg ignored_by_encoded",
+                "expected_flags": ["--cfg", 'feature="two words"'],
+            },
+            {
+                "CARGO_ENCODED_RUSTFLAGS": "",
+                "RUSTFLAGS": "--cfg ignored_by_empty_encoded",
+                "expected_flags": [],
+            },
+            {
+                "RUSTFLAGS": "-C opt-level=2 --cfg whitespace_split",
+                "expected_flags": ["-C", "opt-level=2", "--cfg", "whitespace_split"],
+            },
+        )
+        log_path = self.root / "cargo-environment.json"
+        for index, case in enumerate(cases):
+            with self.subTest(index=index):
+                environment = {
+                    "HOME": str(home),
+                    "CARGO_HOME": str(cargo_home),
+                    "RUSTUP_HOME": str(rustup_home),
+                    "PACKAGE_TEST_LOG": str(log_path),
+                }
+                environment.update(
+                    {
+                        key: value
+                        for key, value in case.items()
+                        if key in {"CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"}
+                    }
+                )
+                with patch.dict(os.environ, environment):
+                    if "CARGO_ENCODED_RUSTFLAGS" not in case:
+                        os.environ.pop("CARGO_ENCODED_RUSTFLAGS", None)
+                    package_cli.build_cli(repository, TARGET, os.fspath(cargo_stub))
+
+                captured = json.loads(log_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    captured["arguments"],
+                    [
+                        "build",
+                        "--release",
+                        "-p",
+                        "daedalus-cli",
+                        "--features",
+                        "capture",
+                        "--locked",
+                        "--target-dir",
+                        str(repository / "target"),
+                        "--target",
+                        TARGET,
+                    ],
+                )
+                self.assertEqual(captured["rustflags"], case.get("RUSTFLAGS"))
+                self.assertEqual(
+                    captured["encoded"].split("\x1f")[: len(case["expected_flags"])],
+                    case["expected_flags"],
+                )
+                remaps = captured["encoded"].split("\x1f")[len(case["expected_flags"]) :]
+                expected_remaps = [
+                    "--remap-path-prefix",
+                    f"{home}=/daedalus/build-home",
+                    "--remap-path-prefix",
+                    f"{cargo_home}=/daedalus/cargo",
+                    "--remap-path-prefix",
+                    f"{rustup_home}=/daedalus/rustup",
+                    "--remap-path-prefix",
+                    f"{repository.resolve()}=/daedalus/source",
+                ]
+                self.assertEqual(remaps, expected_remaps)
+
     def test_tagged_build_rejects_dirty_worktree_before_build(self) -> None:
         output_directory = self.root / "tagged-package"
         errors = StringIO()
@@ -239,6 +338,100 @@ class PackageCliTests(unittest.TestCase):
         self.assertIn("clean Git worktree", errors.getvalue())
         build.assert_not_called()
         self.assertFalse(output_directory.exists())
+
+    def test_build_rejects_git_head_change_before_packaging(self) -> None:
+        errors = StringIO()
+        package = package_cli.PackagePaths(
+            self.root, self.root / "archive", self.root / "checksum", {}
+        )
+        with (
+            patch.object(package_cli, "read_rust_identity", return_value=RUST_TOOLCHAIN),
+            patch.object(
+                package_cli,
+                "read_git_identity",
+                side_effect=[(COMMIT, False), ("b" * 40, False)],
+            ) as read_git,
+            patch.object(package_cli, "build_cli", return_value=self.binary) as build,
+            patch.object(package_cli, "create_package", return_value=package) as create,
+            redirect_stderr(errors),
+        ):
+            result = package_cli.main(
+                ["--target", TARGET, "--out", str(self.root / "changed-head-package")]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("HEAD changed while building", errors.getvalue())
+        self.assertEqual(read_git.call_count, 2)
+        build.assert_called_once()
+        create.assert_not_called()
+
+    def test_tagged_build_rejects_post_build_dirtiness(self) -> None:
+        errors = StringIO()
+        package = package_cli.PackagePaths(
+            self.root, self.root / "archive", self.root / "checksum", {}
+        )
+        with (
+            patch.object(package_cli, "read_rust_identity", return_value=RUST_TOOLCHAIN),
+            patch.object(
+                package_cli,
+                "read_git_identity",
+                side_effect=[(COMMIT, False), (COMMIT, True)],
+            ) as read_git,
+            patch.object(package_cli, "build_cli", return_value=self.binary) as build,
+            patch.object(package_cli, "create_package", return_value=package) as create,
+            redirect_stderr(errors),
+        ):
+            result = package_cli.main(
+                [
+                    "--tag",
+                    f"v{VERSION}",
+                    "--target",
+                    TARGET,
+                    "--out",
+                    str(self.root / "post-dirty-tagged-package"),
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("clean Git worktree after building", errors.getvalue())
+        self.assertEqual(read_git.call_count, 2)
+        build.assert_called_once()
+        create.assert_not_called()
+
+    def test_local_package_dirty_flag_or_covers_before_and_after_build(self) -> None:
+        package = package_cli.PackagePaths(
+            self.root, self.root / "archive", self.root / "checksum", {}
+        )
+        for index, (initially_dirty, dirty_after_build) in enumerate(
+            ((False, True), (True, False))
+        ):
+            with self.subTest(initially_dirty=initially_dirty, dirty_after_build=dirty_after_build):
+                with (
+                    patch.object(package_cli, "read_rust_identity", return_value=RUST_TOOLCHAIN),
+                    patch.object(
+                        package_cli,
+                        "read_git_identity",
+                        side_effect=[
+                            (COMMIT, initially_dirty),
+                            (COMMIT, dirty_after_build),
+                        ],
+                    ),
+                    patch.object(package_cli, "build_cli", return_value=self.binary),
+                    patch.object(
+                        package_cli, "create_package", return_value=package
+                    ) as create,
+                ):
+                    result = package_cli.main(
+                        [
+                            "--target",
+                            TARGET,
+                            "--out",
+                            str(self.root / f"local-dirty-{index}"),
+                        ]
+                    )
+
+                self.assertEqual(result, 0)
+                self.assertTrue(create.call_args.kwargs["dirty"])
 
     def test_release_workflow_handles_prerelease_metadata_and_explicit_repo(self) -> None:
         workflow = (REPOSITORY / ".github" / "workflows" / "release.yml").read_text(

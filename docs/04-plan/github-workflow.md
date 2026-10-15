@@ -30,7 +30,7 @@ git diff --check
 
 [엔진 구현 PR#3](https://github.com/sonan0721/Daedalus/pull/3)은 `docs`, `rust`, `managed native integration` 성공 뒤 squash 병합했다. 병합 commit은 `ec5d9c15374ac222706ab1185b3b96c2a46790c1`이다. 병합 전 마지막 검증은 [문서](https://github.com/sonan0721/Daedalus/actions/runs/38756044859), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38756051150), [실제 native bridge와 .NET 연결](https://github.com/sonan0721/Daedalus/actions/runs/38756045045)에서 확인할 수 있다. 실제 엔진·GPU·managed 검증 명령은 루트 [TESTING](../../TESTING.md)에 유지한다. 필수 보호 체크 3개는 workflow 추가와 별도로 GitHub API에 적용하고 조회했다.
 
-CLI 로컬 package와 후속 tag 기반 공개 배포는 [배포 계약](../03-architecture/cli-build-and-release.md)에 따라 추가한다. 현재 태그와 GitHub Release는 생성하지 않는다. PR dry build artifact는 공개 릴리스와 구분한다.
+CLI 로컬 package와 후속 tag 기반 공개 배포는 [배포 계약](../03-architecture/cli-build-and-release.md)과 `release` workflow로 구성한다. [PR#4](https://github.com/sonan0721/Daedalus/pull/4)의 첫 macOS arm64·Linux x64 native dry build가 성공했고 [E08 기록](../06-worklog/2026-10-16-cli-packaging.md)에 source checkpoint와 후속 보완을 남겼다. PR artifact는 공개 Release가 아니며 tag publish는 아직 실행하지 않았다. 현재 태그와 GitHub Release는 생성하지 않는다.
 
 CI는 read-only contents 권한으로 실행하고 checkout Action을 확인한 commit SHA에 고정했다. 공개 PR이 권한 있는 `pull_request_target` 경로에서 코드를 실행하는 구성을 사용하지 않는다. [GitHub Actions 공식 보안 문서](https://docs.github.com/en/actions/reference/security/secure-use)
 

@@ -85,6 +85,8 @@ The `release` workflow performs native packaging on macOS arm64 and Linux x64 fo
 
 The package and notice tests are included in the Python discovery command above. They exercise malformed/mismatched tags, archive integrity, failed builds, overwrite rejection, dependency provenance, and the publish command through a local stub rather than publishing a real release.
 
+The packaging checkpoints on 2026-10-16 include 36 Python tests (8 documentation, 14 notice collection, 14 packaging), a real local macOS archive and GPU capture, and PR native builds on macOS 15 arm64 and Ubuntu 24.04 x64. Follow-ups normalize compiler source paths through a build-only remapping environment and compare Git identity before/after compilation. The manifest records its fixed neutral policy without personal paths. The exact source checkpoints, artifact verification, and latest PR checks are linked in the [packaging record](docs/06-worklog/2026-10-16-cli-packaging.md). These runner checks do not establish compatibility with every older OS or Linux distribution.
+
 ## Managed/native integration
 
 Use the pinned .NET SDK 10.0.402 with C# 14. `global.json` disables SDK roll-forward; ensure the intended `dotnet` is on PATH as described in [managed/README.md](managed/README.md).

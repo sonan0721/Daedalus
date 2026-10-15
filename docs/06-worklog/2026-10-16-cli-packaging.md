@@ -1,6 +1,6 @@
 # E08 CLI 로컬 패키징·태그 배포 검증
 
-상태: 로컬 strict package·실제 CLI/GPU 확인, PR CI 검증 진행 · 2026-10-16
+상태: 로컬 strict package·실제 CLI/GPU·native PR dry build 확인, tag publish 미실행 · 2026-10-16
 
 ## 목적과 범위
 
@@ -41,7 +41,15 @@ target/aarch64-apple-darwin/release/daedalus inspect --entities 2
 
 조정자가 이 archive를 별도로 `--verify-archive`에 전달해 checksum·embedded hashes·압축 해제 후 `--version`/CPU `inspect` 성공을 확인했다. 같은 manifest의 실행 파일로 320×180 실제 capture를 실행해 Apple M3 Pro/Metal에서 RGBA 230,400 bytes의 PNG를 얻고 이미지를 확인했다. 작은 재질 fixture이며 일반 scene importer·완성된 게임 화면의 증거가 아니다.
 
-PR CI의 실제 결과는 완료 후 아래에 기록한다.
+[PR#4](https://github.com/sonan0721/Daedalus/pull/4)의 첫 source checkpoint `c35a7ab4e302e13d96355ce7993610ccc2970ecf`에서 [macOS·Linux package](https://github.com/sonan0721/Daedalus/actions/runs/38759136059), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38759136026), [managed](https://github.com/sonan0721/Daedalus/actions/runs/38759136320), [문서](https://github.com/sonan0721/Daedalus/actions/runs/38759135543)가 모두 성공했다. 공개 publish job은 PR 조건에 따라 skipped였다. Linux native CPU smoke는 Ubuntu 24.04 runner에서 실행했고 조정자는 artifact를 내려받아 `--metadata-only`로 checksum·embedded hashes·실제 PR merge commit 일치를 별도 확인했다. Mac에서 Linux binary를 실행했다고 기록하지 않는다.
+
+최종 archive 리뷰에서 Rust panic source 경로에 빌드 Mac의 절대 경로가 포함된 것을 발견해 배포용 compiler remapping과 환경 변수 회귀 검사를 보완했다. 이 수정 후 Python 전체 33건(문서 8·수집 14·package 11)이 통과했고 build-only 환경의 encoded flags 우선순위·공백 포함 경로·프로세스 전역 환경 불변을 확인했다. Cargo config rustflags보다 우선하는 환경 변수를 사용한다는 제한도 manifest와 계약에 기록했다.
+
+보완 package의 build ID는 `20261015T152422Z-73e56846111242a190fe2e403f3c6b7f`, archive SHA-256은 `14d33258093f5f7665a2e4759d0d5cfa24ffafb3d3f6c2f2b5693af442905959`다. source `c35a7ab4e302e13d96355ce7993610ccc2970ecf`, `dirty: true`인 후속 검증 산출물이다. 조정자의 별도 archive 검사·압축 해제 후 실행도 통과했다. 실제 binary의 `strings`에는 확인 대상 build-home 절대 경로가 없고 의존성 위치는 `/daedalus/cargo/...`로 표시됐다. 이 검사는 모든 arbitrary 문자열의 제거 인증이 아니다.
+
+빌드 중 HEAD 변경·수정 사항의 발생도 검사하도록 build 전후 Git 확인을 추가했다. HEAD 변경 시 output 생성 전에 중단하고, 로컬 dirty는 전후 결과를 합치며 tag build는 양쪽 clean을 요구한다. 이 세 회귀 경우를 추가한 뒤 조정자의 전체 Python 검사는 36건(문서 8·수집 14·package 14) 통과했다.
+
+최종 source의 CI 상태와 병합 기록은 [PR#4 checks](https://github.com/sonan0721/Daedalus/pull/4/checks)에서 추적한다. PR에서 tag publish가 실행된 것으로 해석하지 않는다. 후속 clean 로컬 빌드는 매번 생성되는 manifest로 source·hash를 확인하며, 문서 수정 때마다 예전 build ID를 최신 산출물이라고 덮어쓰지 않는다.
 
 ## 남은 경계
 

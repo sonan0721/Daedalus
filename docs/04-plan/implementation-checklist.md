@@ -67,3 +67,13 @@ C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-b
 ## E08 CLI 배포 후속
 
 사용자 추가 요구에 따라 [CLI 빌드·태그 릴리스](../03-architecture/cli-build-and-release.md)를 구현한다. 현재 로컬 versioned binary·manifest·checksum을 만들고 관리하며, future `v<version>` push 자동 배포를 구성한다. 지금 태그·공개 Release는 만들지 않는다. PR packaging·실제 태그 publish를 별도 근거로 기록한다.
+
+## E01·E02·E03·E08 native live checkpoint
+
+사용자 A-038에 따라 [native live session 계약](../03-architecture/native-live-session.md)을 구현한다. 아래 게이트는 코드 생성만으로 완료하지 않는다.
+
+- [ ] CLI 한 명령으로 실제 native window 실행·camera·resize·종료.
+- [ ] 권한 ECS 명령의 적용 결과를 동일 session snapshot으로 표시.
+- [ ] bounded background generation·meshing·revision/generation 검사·stale 거부.
+- [ ] 실제 loading 중 input·presentation 지속을 Mac 입력과 실행 report로 확인.
+- [ ] 포화·취소·종료·frame interval·회귀 검사 및 window 포함 local package 검증.

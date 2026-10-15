@@ -43,6 +43,7 @@
 | A-035 | 구현 착수 | 설계 문서 기반으로 Luna xhigh에게 코딩을 맡겨 엔진 구축 진행 요청 | ADR-0004·구현 체크리스트에 따라 모듈 계약·구현·실제 검증 진행 |
 | A-036 | .NET 설치 | 콘솔 명령을 받아 직접 설치했고 설치 완료 전달 | 로컬 SDK10.0.402·CoreCLR10.0.13 확인. 시스템의 오래된 dotnet과 구분 |
 | A-037 | CLI 배포 | 지금은 CLI를 로컬 빌드·버전 관리. 향후 release tag에서 GitHub Release에 배포 요청 | versioned package·manifest·checksum·태그 자동화 구성. 현재 태그·공개 Release는 발행하지 않음 |
+| A-038 | 다음 체크포인트 착수 | 실제 창·월드·청크 작업·로딩 중 입력을 연결하는 다음 작업을 이어서 시작하도록 요청 | native live session 계약에 따라 Luna xhigh 구현·실제 Mac 입력·종료·측정 검증 진행 |
 
 ## 진행 중인 2차 질문
 

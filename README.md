@@ -2,7 +2,7 @@
 
 **An independent, code-first game engine being designed for demanding 2D and 3D worlds.**
 
-Daedalus aims to combine a Rust core, an AI-friendly scripting interface, responsive loading and streaming, modern GPU rendering, and authoritative dedicated servers. C#, TypeScript, and Luau are under evaluation for scripting. Development is driven through code, CLI, MCP, and a visible runtime window.
+Daedalus aims to combine a Rust core, responsive loading and streaming, modern GPU rendering, and authoritative dedicated servers. The selected gameplay and PC mod SDK baseline is C# 14 with .NET 10 LTS/CoreCLR. Rust gameplay can be compiled into a game build, and C++ libraries can be integrated through explicit native adapters. Development is driven through code, CLI, MCP, and a visible runtime window.
 
 **Status: research and architecture. There is no runnable engine, renderer, game, or published performance result yet.** This repository currently contains engine specifications, decision records, and contribution infrastructure. Sample game development is outside the current scope.
 
@@ -15,6 +15,7 @@ Daedalus aims to combine a Rust core, an AI-friendly scripting interface, respon
 - Plan multiplayer and persistence from the beginning, targeting dedicated multiplayer sessions of about 30 players; activity and network budgets remain to be specified.
 - Support stylized and physically based art through an extensible material and rendering architecture. Art references express intended quality, not shipped feature parity.
 - Target 144 fps or higher under a defined workload and quality profile; preserve game functionality, save semantics, and scripting API across native and web exports, while allowing device-specific graphics settings.
+- Design live playtesting and C# logic reload as separate capabilities. Downloadable mods focus on desktop PC first; equivalent dynamic mod loading on web or mobile is not part of that initial contract.
 
 These are design objectives. Dependency choices and measurable quality targets are still under investigation.
 
@@ -28,6 +29,8 @@ These are design objectives. Dependency choices and measurable quality targets a
 | [Questionnaire and answers](docs/01-discovery/answer-log.md) | User decisions and remaining uncertainties |
 | [Original proposal audit](docs/02-research/claim-audit.md) | Claims requiring correction or measurement |
 | [Architecture overview](docs/03-architecture/system-context.md) | Module boundaries and platform responsibilities |
+| [Gameplay and mod SDK](docs/03-architecture/gameplay-and-mod-sdk.md) | C# wrapping, compiled Rust gameplay, and C++ integration |
+| [Autopilot and live testing](docs/03-architecture/autopilot-and-live-testing.md) | Control a running session, verify results, and inject new C# logic |
 | [Goals](docs/04-plan/goal-map.md) | Bounded research and implementation objectives |
 | [Waterfall masterplan](docs/04-plan/waterfall-masterplan.md) | Deliverables, dependencies, and exit gates |
 

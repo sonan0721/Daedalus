@@ -1,6 +1,6 @@
 # 다이달로스 문서 지도
 
-작성일: 2026-10-15 · 라운드: R01 · 단계: 구현 전 조사·설계
+작성일: 2026-10-15 · 라운드: R01~R02 · 단계: 구현 전 조사·설계
 
 ## 문서 읽는 순서
 
@@ -34,12 +34,15 @@
 | [원안 주장 검증](02-research/claim-audit.md) | 144Hz 보장·전체 ECS 복사·핫리로드 수치 등의 오해를 정리 |
 | [스택 선택지](02-research/stack-options.md) | 독립 엔진 관점에서 부품별 이점·결합 비용·실험 기준 비교 |
 | [스크립트 언어 비교](02-research/scripting-language-comparison.md) | C#·TS·Luau의 작성 경험·실행·reload·플랫폼 비용과 실제 사례 비교 |
+| [Unity Lua·오토파일럿 조사](02-research/unity-lua-and-autopilot.md) | 과거 Lua 도입 경험을 플레이 제어·코드 교체·런타임 제약으로 나누어 검토 |
 | [상용 엔진에서 배울 점](02-research/commercial-engine-lessons.md) | 공개 발표에서 확인한 원칙과 추정을 분리 |
 | [조사 백로그](02-research/research-backlog.md) | 다음 조사 질문·산출물·종료 조건 지정 |
 | [시스템 경계](03-architecture/system-context.md) | 엔진 모듈·의존성·공통 데이터 계약 설계 |
 | [스케줄러·소유권](03-architecture/scheduler-and-ownership.md) | 스레드 역할·스냅샷 수명·과부하·종료 계약 설계 |
 | [플랫폼·웹](03-architecture/platform-and-web.md) | macOS·브라우저 우선 설계와 후속 포팅 경계 |
-| [스크립트·핫리로드](03-architecture/scripting-and-hot-reload.md) | Rust/TS 경계·상태 보존·실패 복구·타이밍 정의 |
+| [스크립트·핫리로드](03-architecture/scripting-and-hot-reload.md) | Rust/C# 경계·상태 보존·실패 복구·타이밍 정의 |
+| [게임플레이·모드 SDK](03-architecture/gameplay-and-mod-sdk.md) | C# wrapping·Rust 게임 작성·C++ FFI·PC 플러그인의 소유권과 검증 계약 |
+| [오토파일럿·실행 중 테스트](03-architecture/autopilot-and-live-testing.md) | 플레이 조작·관찰·검증과 새 C# 로직 주입을 각각 명세 |
 | [렌더·헤드리스](03-architecture/rendering-and-headless.md) | PBR/스타일라이즈드 렌더 확장과 비동기 캡처 |
 | [복셀 스트리밍](03-architecture/voxel-streaming.md) | 청크 생성·메시·조명·충돌·저장 버전 정합성 |
 | [2D 타일 시뮬레이션](03-architecture/tile-simulation.md) | 유체·조명·파괴 지형의 병렬 계산과 보존 규칙 |
@@ -56,7 +59,9 @@
 | [ADR 기록](05-decisions/README.md) | 확정 결정과 제안의 변경 이력 관리 |
 | [ADR-0001](05-decisions/0001-engine-identity-and-scope.md) | 독립 엔진·엔진 전용 저장소·구현 전 문서화 확정 |
 | [ADR-0002](05-decisions/0002-runtime-boundaries.md) | Rust/wgpu 기준선·실행 격리·명령·자원 예산의 방향 채택 |
+| [ADR-0003](05-decisions/0003-csharp-and-native-gameplay.md) | C# 14/.NET 10/CoreCLR·빌드형 Rust 게임플레이·C++ 통합·오토파일럿 결정 |
 | [R01 작업 기록](06-worklog/2026-10-15-r01.md) | 작성 문서별 목적·확인 범위·검증·후속 과제 기록 |
+| [R02 스크립팅 작업 기록](06-worklog/2026-10-15-r02-scripting.md) | 언어·모드 범위 변경, 새 문서별 목적과 남은 통합 조사 기록 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

@@ -32,7 +32,9 @@
 ## W2. 근거 조사·아키텍처 기준선
 
 - [ ] ECS·작업·GPU·스크립트·물리·UI·오디오·네트워크의 version/features/BOM 비교.
-- [ ] C#·TS·Luau 실행·reload·웹 경로와 최소 실험 범위 정리.
+- [x] C# 주 SDK·.NET 10/CoreCLR 계열, Rust 빌드형 게임플레이·C++ 통합 경계 결정: ADR-0003.
+- [ ] C# host·패키징·SDK/ABI·module 수명·지원 edit·웹 실행 경로와 최소 실험 명세.
+- [ ] 오토파일럿의 입력·관찰·조건 대기·capture와 새 로직 주입 프로토콜 구체화.
 - [ ] 스레드/worker·read/write·DAG·snapshot 회수·GPU 수명·포화·취소·종료 계약.
 - [ ] 복셀·타일·유체·빛·충돌·저장·복제 revision 정합성.
 - [ ] 렌더·재질·시간적 효과·UI/IME·캐릭터·오디오·내비 상세 명세.
@@ -51,9 +53,9 @@
 
 ## W4. 스크립트·에셋·최소 GPU 검증
 
-- [ ] I03: 선택한 공식 script API·진단·stateful reload.
+- [ ] I03: C# SDK·진단·stateful reload, 빌드형 Rust 등록, 실행 중 오토파일럿 제어.
 - [ ] I04: 에셋 cook/load·2D/3D 기본 렌더·오프스크린·캡처.
-- [ ] 이전 세대 callback·reload 실패·GPU readback·자원 회수 시험.
+- [ ] 이전 세대 callback·reload 실패·입력 취소·tick/capture 연결·FFI·GPU readback·자원 회수 시험.
 
 **Exit W4:** 엔진 fixture의 상태·이미지·manifest가 재현 가능하고, reload·capture가 표시·입력을 장기 대기시키지 않는다. 샘플 게임은 만들지 않는다.
 

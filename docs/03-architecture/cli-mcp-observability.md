@@ -18,9 +18,12 @@ CLI와 MCP가 각각 ECS를 직접 만지는 별도 구현이 되지 않게, eng
 | capture | 고정 tick·camera·품질·이미지·연속 프레임 | 파일/참조·hash·manifest·실패 이유 |
 | profile | trace·frame·queue·job·GPU·memory | 측정 환경·기간·분위수·원시 자료 |
 | validate | 엔진 fixture·상태 invariant·시각 비교 | 기대값·실제값·재현 command·exit code |
+| autopilot | 실제 입력·UI 조작·조건 대기·검증·capture 연결 | session·request ID·적용 tick·표시 frame·재현 trace |
 | build/export | native package·web HTML/Wasm·asset cook | versioned manifest·파일·필수 배포 조건 |
 
 실제 command spelling은 후속 API 명세에서 정한다. README에 현재 존재하지 않는 `engine-cli` 명령을 실행 가능한 기능으로 안내하지 않는다.
+
+오토파일럿은 같은 세션의 플레이 제어와 새 C# 게임 로직 주입을 모두 다룬다. 기존 동작의 테스트 절차를 바꿀 때마다 게임 코드를 reload하지 않는다. 입력/action 경로·clock·취소·캡처·서버 권한의 세부 계약은 [실행 중 테스트](autopilot-and-live-testing.md)에 둔다. Lua VM은 이 기능의 필수 의존성이 아니다.
 
 ## 요청과 오류
 

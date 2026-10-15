@@ -1,6 +1,6 @@
 # 1차 자료 등록부
 
-확인일: 2026-10-15 · R01 · 상태: 문서 조사. 빌드·통합·성능 검증은 수행하지 않음.
+확인일: 2026-10-15 · R01~R02 · 상태: 문서 조사. 빌드·통합·성능 검증은 수행하지 않음.
 
 ## 자료 사용 규칙
 
@@ -54,6 +54,23 @@
 | S44 | [Tencent PuerTS](https://github.com/Tencent/puerts) | Unity/Unreal script·host bridge·backend 비교 | 실제 엔진 통합 경로. 특정 상용 게임 사용은 별도 근거 필요 |
 | S45 | [Cocos의 TS 선택 설명](https://www.cocos.com/en/post/84d2f3b46b8baf9d28b497f803e7f46d) | 제작사 설명·선택 이유 | 도입 근거·주장. 다이달로스 144fps 근거 아님 |
 | S46 | [Bitburner source](https://github.com/bitburner-official/bitburner-src) / [manifest](https://raw.githubusercontent.com/bitburner-official/bitburner-src/dev/package.json) | 배포된 게임·TS 기반 소스·도구 | TS 게임의 실제 사례. 하이엔드 3D 성능 증거 아님 |
+| S47 | [C# 14](https://learn.microsoft.com/en-us/dotnet/csharp/whats-new/csharp-14) | 최신 정식 C#·.NET 10 지원 명시 | 언어 버전 기준. 엔진 host·성능 검증 자료 아님 |
+| S48 | [C# 15 preview](https://learn.microsoft.com/en-us/dotnet/csharp/whats-new/csharp-15) | C# 15/.NET 11 preview 상태 | preview를 정식 기준선으로 혼동하지 않음 |
+| S49 | [C# 버전 대응](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-versioning) | framework별 기본 언어 버전·설정 | C# 10과 .NET 10 구분, 재현 가능한 compiler 설정 |
+| S50 | [.NET 지원 정책](https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core) | .NET 10 LTS·2028-11-14 지원 종료 | major 기준선과 servicing 근거. 조회 페이지의 과거 patch를 오늘 최신이라고 쓰지 않음 |
+| S51 | [.NET SIMD](https://learn.microsoft.com/en-us/dotnet/standard/simd) | Numerics·가속 조건·vector 지원 | CPU/runtime 조건과 batch 자료 배치 설계. 자체 벤치마크 아님 |
+| S52 | [.NET 플러그인](https://learn.microsoft.com/en-us/dotnet/core/tutorials/creating-app-with-plugin-support) | AssemblyLoadContext·dependency resolver·불신 코드 경고 | 모드 의존성·type identity·신뢰 경계. ALC를 sandbox로 간주하지 않음 |
+| S53 | [.NET unloadability](https://learn.microsoft.com/en-us/dotnet/standard/assembly/unloadability) | collectible ALC·협조적 unload·외부 참조 | 반복 reload 회수·callback/job 정리. 즉시 종료 보장 아님 |
+| S54 | [Unity 6.3 scripting backends](https://docs.unity3d.com/6000.3/Documentation/Manual/scripting-backends.html) | Mono·IL2CPP 설명 | 사용자 경험의 버전 맥락. 과거 프로젝트 backend를 확인한 것은 아님 |
+| S55 | [UnityTest 1.4 문서](https://docs.unity3d.com/Packages/com.unity.test-framework@1.4/manual/reference-attribute-unitytest.html) | Play Mode coroutine·yield 기반 테스트 | C# 자동 테스트 가능성. 사용자의 설치 package 버전이나 실행 중 새 소스 주입 지원 증거 아님 |
+| S56 | [xLua README](https://github.com/Tencent/xLua/blob/master/README_EN.md) | C#/Lua 호출·VM·문자열 평가·예제 | 임베디드 제어 통로의 사례. 사용자 프로젝트의 채택 증거 아님 |
+| S57 | [xLua Hotfix](https://github.com/Tencent/xLua/blob/master/Assets/XLua/Doc/Hotfix_EN.md) | 생성·주입 사전 조건·대체 API·제약 | hotfix와 일반 테스트 명령 구분. 무제한 코드 교체 아님 |
+| S58 | [Unity compilation/reload](https://docs.unity.com/en-us/engine/6000.6/manual/scripting/compilation-and-code-reload) | 코드 수정·Play mode 등과 reload 관계의 일반 설명 | 6.6 참고 문서. Unity 6.3 프로젝트의 정확한 설정·지연을 증명하지 않음 |
+| S59 | [Steam Workshop](https://partner.steamgames.com/doc/features/workshop) | 게임의 Workshop 통합·배포 기능 안내 | 배포 adapter 비교. 런타임·hot-reload·플러그인 API를 대신하지 않음 |
+| S60 | [.NET native library loading](https://learn.microsoft.com/en-us/dotnet/standard/native-interop/native-library-loading) | 플랫폼별 native library 이름·검색·resolver | 모드 native dependency·타깃 진단 설계 |
+| S61 | [Rust external ABI](https://doc.rust-lang.org/reference/items/external-blocks.html#abi) | Rust ABI 안정성 미보장·C ABI 타깃 의미 | build-time Rust API와 binary plugin ABI 구분 |
+| S62 | [Rust FFI](https://doc.rust-lang.org/nomicon/ffi.html) | C 경계·소유권·unsafe·callback·unwind | C++ 어댑터의 계약·검증. Rust 안전성이 foreign 코드를 자동 보증하지 않음 |
+| S63 | [CXX](https://cxx.rs/) | Rust/C++ bridge의 목적·경계 | 통합 후보. 채택 버전·타깃·실제 엔진 통합은 미검증 |
 
 ## 조사 실패·부족 기록
 

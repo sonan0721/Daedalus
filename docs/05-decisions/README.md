@@ -13,8 +13,9 @@
 | --- | --- | --- |
 | [0001](0001-engine-identity-and-scope.md) | 채택 | 독립 엔진·엔진 전용 저장소·문서 우선·공개 및 코딩 위임 |
 | [0002](0002-runtime-boundaries.md) | 채택: 방향 | Rust/wgpu 기준선·분리된 실행·명령·유한 자원·플랫폼 의미 |
+| [0003](0003-csharp-and-native-gameplay.md) | 채택 | C# 14/.NET 10/CoreCLR 주 SDK·빌드형 Rust 게임플레이·C++ 어댑터·오토파일럿 |
 
-스크립트 언어는 [비교 문서](../02-research/scripting-language-comparison.md)와 사용자 토론으로 결정한다. 현재 TypeScript strict가 조정자의 권고이며, 사용자 확정 전에는 채택 ADR로 기록하지 않는다. 런타임·ECS·큐 알고리즘의 세부 구현도 아직 미선정이다.
+스크립트 언어는 사용자와 최종 검토 후 C#으로 선택했다. 초기 TypeScript strict 권고는 ADR-0003으로 대체한다. Rust 코어·C++ 부품 통합과 Rust 게임 작성 경로를 유지하되 Rust는 재빌드, C#은 hot-reload로 반영한다. host 진입점·패키징·ECS·큐 알고리즘 등의 세부 구현은 아직 미선정이다.
 
 ## 기록 형식
 

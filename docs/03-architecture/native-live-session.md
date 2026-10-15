@@ -21,9 +21,13 @@ renderer는 runtime을 의존하거나 live ECS를 읽지 않는다. runtime의 
 
 world 이동은 simulation이 권한 command로 적용하고 실제 snapshot을 통해 화면에 반영한다. queue 수락과 tick 적용을 구분하고 결과 전달에도 상한을 둔다. 표시 state는 coalesce할 수 있지만 command 결과를 성공으로 조작하거나 조용히 버리지 않는다. 오래된 terrain generation은 취소·거부하고 이전 mesh를 유지한다. 동시 job·미수집 결과·state queue·mesh output을 모두 제한한다.
 
+같은 entity에 tick 전 여러 이동 입력이 들어와도 delta가 덮어써지거나 같은 revision을 잘못 공유하지 않게 처리한다. 종료 시 bridge가 아직 읽지 않은 결과도 유한한 shutdown report로 회수해 수락한 command의 최종 outcome을 추적한다. simulation state 게시도 실제 변경과 fixed tick을 기준으로 하고, polling만으로 새 sequence를 만들어 동일 geometry를 반복 전달하지 않는다.
+
 작은 청크가 너무 빨리 끝나는 경우 부하 검증은 실제 생성·meshing의 제한된 반복 횟수를 늘려 수행한다. 반복 수는 CLI에 명시하고 인위적 sleep을 실제 지형 처리 시간으로 표시하지 않는다. 반복 사이 취소를 확인한다. 무한 지형·거주성·전체 VRAM residency는 별도 작업이다.
 
 window callback에서 simulation·worker·readback·파일 쓰기·thread join을 기다리지 않는다. 초기 adapter/device/surface 설정의 startup 비용은 측정 범위를 구분한다. 창 종료 뒤 bridge·simulation 협조 종료와 join을 수행하고 실패 원인·종료 시간을 보고한다. 자동 종료 시간 옵션은 검사에만 사용하며 기본 실행은 사용자 종료까지 유지한다.
+
+CLI가 소유한 presentation bridge나 runtime이 실패하면 window가 오류로 종료되게 한다. legacy renderer의 sender-disconnect 동작은 별도이며, CLI는 오류 종료 옵션을 명시한다. queue가 가득 찬 상태에서 마지막 진단 message를 전달하지 못해도 무한히 빈 창을 유지하지 않는다.
 
 ## 관측과 검증
 

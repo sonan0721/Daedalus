@@ -1,6 +1,6 @@
 # 다이달로스 문서 지도
 
-작성일: 2026-10-15 · 라운드: R01~R02 · 단계: 구현 전 조사·설계
+작성일: 2026-10-15 · 라운드: R01~R02 / E01 이후 · 단계: 설계와 모듈별 구현·검증
 
 ## 문서 읽는 순서
 
@@ -16,7 +16,7 @@
 | 조사 확인 | 연결된 1차 자료의 해당 내용까지 확인 |
 | 설계 제안 | 다이달로스에 적용하기 위한 작성자의 제안 |
 | 미결 | 답변·비교·실험이 더 필요 |
-| 실측 | 환경·입력·명령·결과가 있는 실행 근거. 현재 엔진 실측은 없음 |
+| 실측 | 환경·입력·명령·결과가 있는 실행 근거. 초기 CPU·Metal 검증은 작업 기록 참조 |
 
 문서에 수치가 있어도 `제안`이면 계약이나 달성 결과가 아니다. 아키텍처 문서는 사용자 확정 요구를 반영한 초안이다. 기본 읽기 단위는 개별 파일이며 하나의 거대한 명세서에 모든 판단을 숨기지 않는다.
 
@@ -52,6 +52,7 @@
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |
 | [네트워크·영속화](03-architecture/networking-and-persistence.md) | 서버 권한·관심 영역·월드 변경·복구 설계 |
 | [CLI·MCP·관측](03-architecture/cli-mcp-observability.md) | AI가 관찰·제어·검증하는 구조화된 엔진 인터페이스 |
+| [실행·제어·표시 통합](03-architecture/runtime-control-and-presentation.md) | 지속 세션·CPU 예산·CLI 캡처·독립 창 실행의 다음 통합 계약 |
 | [릴리스·공개 API](03-architecture/releases-and-public-api.md) | 엔진·API·저장·네트워크 버전과 HTML/Wasm export의 경계 |
 | [목표 지도](04-plan/goal-map.md) | 조사와 구현을 각각 끝낼 수 있는 goal로 분해 |
 | [워터폴 마스터플랜](04-plan/waterfall-masterplan.md) | 단계별 산출물·게이트·되돌림 규칙 정의 |

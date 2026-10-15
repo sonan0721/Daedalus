@@ -56,6 +56,10 @@
 
 C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-bridge.md), 실제 물리·오디오 연결은 [backend 계약](../03-architecture/physics-and-audio-runtime.md)을 따른다. 각 작업의 코드 시작 전 해당 소유자와 범위·버전·테스트를 공유한다. 물리·오디오·GUI·CoreCLR이 없어도 코어 CPU 검사는 실행 가능하게 모듈을 분리한다.
 
+## E01·E02·E08 실행 통합
+
+[실행·제어·표시 계약](../03-architecture/runtime-control-and-presentation.md)에 따라 process CPU 예산이 있는 병렬 ECS, 같은 세션의 bounded JSONL 제어, 콘텐츠 검증·실제 GPU capture CLI를 연결한다. 창은 macOS main thread에서 실행하고 simulation·worker 완료를 callback에서 기다리지 않는다. 첫 독립 라이브러리 커밋과 이 통합의 검증을 분리한다.
+
 ## 기록할 근거
 
 각 작업에 실제 변경 파일·선택 버전·환경·명령·결과·artifact·남은 제한을 기록한다. 현재 실행 가능한 명령은 루트 TESTING에 갱신하고, CI와 테스트 코드는 Luna xhigh가 작성한다. 이 문서의 미완료 체크를 코드 파일 생성만으로 완료 처리하지 않는다.

@@ -55,6 +55,7 @@
 | [CLI·MCP·관측](03-architecture/cli-mcp-observability.md) | AI가 관찰·제어·검증하는 구조화된 엔진 인터페이스 |
 | [실행·제어·표시 통합](03-architecture/runtime-control-and-presentation.md) | 지속 세션·CPU 예산·CLI 캡처·독립 창 실행의 다음 통합 계약 |
 | [릴리스·공개 API](03-architecture/releases-and-public-api.md) | 엔진·API·저장·네트워크 버전과 HTML/Wasm export의 경계 |
+| [CLI 빌드·태그 릴리스](03-architecture/cli-build-and-release.md) | 로컬 실행 파일 관리와 후속 tag push 기반 GitHub Release 자동화 계약 |
 | [목표 지도](04-plan/goal-map.md) | 조사와 구현을 각각 끝낼 수 있는 goal로 분해 |
 | [워터폴 마스터플랜](04-plan/waterfall-masterplan.md) | 단계별 산출물·게이트·되돌림 규칙 정의 |
 | [엔진 구현 체크리스트](04-plan/implementation-checklist.md) | 착수 승인 이후 모듈별 구현·실제 검증·남은 품질 게이트 추적 |

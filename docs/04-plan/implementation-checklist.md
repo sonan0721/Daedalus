@@ -63,3 +63,7 @@ C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-b
 ## 기록할 근거
 
 각 작업에 실제 변경 파일·선택 버전·환경·명령·결과·artifact·남은 제한을 기록한다. 현재 실행 가능한 명령은 루트 TESTING에 갱신하고, CI와 테스트 코드는 Luna xhigh가 작성한다. 이 문서의 미완료 체크를 코드 파일 생성만으로 완료 처리하지 않는다.
+
+## E08 CLI 배포 후속
+
+사용자 추가 요구에 따라 [CLI 빌드·태그 릴리스](../03-architecture/cli-build-and-release.md)를 구현한다. 현재 로컬 versioned binary·manifest·checksum을 만들고 관리하며, future `v<version>` push 자동 배포를 구성한다. 지금 태그·공개 Release는 만들지 않는다. PR packaging·실제 태그 publish를 별도 근거로 기록한다.

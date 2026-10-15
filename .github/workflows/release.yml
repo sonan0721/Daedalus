@@ -1,0 +1,195 @@
+name: release
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daedalus-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify native runner target
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          actual_target="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ "$actual_target" != "$EXPECTED_TARGET" ]]; then
+            echo "runner host $actual_target does not match requested native target $EXPECTED_TARGET" >&2
+            exit 1
+          fi
+          python3 --version
+
+      - name: Test package creation and release metadata checks
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_package_cli.py' -v
+          python3 -m unittest discover -s scripts -p 'test_collect_cli_notices.py' -v
+
+      - name: Verify tagged source is on main history
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          if [[ "$tag_commit" != "$RELEASE_COMMIT" ]]; then
+            echo "tag does not resolve to the event commit" >&2
+            exit 1
+          fi
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+
+      - name: Build and package native CLI
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          package_args=(--target "$EXPECTED_TARGET" --out "dist/release-package/$EXPECTED_TARGET")
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/* ]]; then
+            package_args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          python3 scripts/package_cli.py "${package_args[@]}"
+
+      - name: Prepare CI artifact files
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          package_dir="dist/release-package/$EXPECTED_TARGET"
+          artifact_dir="dist/release-artifact"
+          mkdir -p "$artifact_dir"
+          shopt -s nullglob
+          archives=("$package_dir"/*.tar.gz)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            echo "expected exactly one packaged archive" >&2
+            exit 1
+          fi
+          cp "${archives[0]}" "$artifact_dir/"
+          cp "${archives[0]}.sha256" "$artifact_dir/"
+          cp "$package_dir/build-manifest.json" "$artifact_dir/"
+
+      - name: Upload native package for inspection or publication
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: daedalus-cli-${{ matrix.target }}
+          path: dist/release-artifact/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_COMMIT: ${{ github.sha }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Download all native packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: daedalus-cli-*
+          path: downloaded-artifacts
+
+      - name: Verify complete package set and release metadata
+        run: |
+          set -euo pipefail
+          expected_version="${RELEASE_TAG#v}"
+          expected_targets=(aarch64-apple-darwin x86_64-unknown-linux-gnu)
+          release_assets="release-assets"
+          mkdir -p "$release_assets"
+          for target in "${expected_targets[@]}"; do
+            artifact_dir="downloaded-artifacts/daedalus-cli-$target"
+            shopt -s nullglob
+            archives=("$artifact_dir"/daedalus-"$expected_version"-"$target"-*.tar.gz)
+            manifests=("$artifact_dir"/build-manifest.json)
+            if [[ ${#archives[@]} -ne 1 || ${#manifests[@]} -ne 1 ]]; then
+              echo "missing or ambiguous archive/manifest for $target" >&2
+              exit 1
+            fi
+            archive="${archives[0]}"
+            archive_name="$(basename "$archive")"
+            checksum="$artifact_dir/$archive_name.sha256"
+            if [[ ! -f "$checksum" ]]; then
+              echo "missing checksum sidecar for $archive_name" >&2
+              exit 1
+            fi
+            (
+              cd "$artifact_dir"
+              sha256sum --check "$(basename "$checksum")"
+            )
+            embedded_manifest="$release_assets/.${target}.manifest.json"
+            tar -xOzf "$archive" build-manifest.json > "$embedded_manifest"
+            cmp "${manifests[0]}" "$embedded_manifest"
+            jq -e \
+              --arg version "$expected_version" \
+              --arg commit "$RELEASE_COMMIT" \
+              --arg target "$target" \
+              '.schema_version == 1 and .cli_version == $version and .exact_commit == $commit and .dirty == false and .target_triple == $target and .cargo_profile == "release" and (.cargo_features | index("capture") != null) and (.third_party_notices_sha256 | test("^[0-9a-f]{64}$")) and (.dependency_inventory_sha256 | test("^[0-9a-f]{64}$"))' \
+              "${manifests[0]}" > /dev/null
+            cp "$archive" "$release_assets/"
+            cp "$checksum" "$release_assets/"
+            cp "$manifests[0]" "$release_assets/daedalus-$expected_version-$target-build-manifest.json"
+            rm "$embedded_manifest"
+          done
+          if [[ "$(find "$release_assets" -maxdepth 1 -type f | wc -l | tr -d ' ')" -ne 6 ]]; then
+            echo "release asset set must contain two archives, two manifests, and two checksums" >&2
+            exit 1
+          fi
+
+      - name: Refuse to replace an existing GitHub Release
+        run: |
+          set -euo pipefail
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/release-lookup.json" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPOSITORY/releases/tags/$RELEASE_TAG")"
+          if [[ "$status" == "200" ]]; then
+            echo "release $RELEASE_TAG already exists; refusing to overwrite assets" >&2
+            exit 1
+          fi
+          if [[ "$status" != "404" ]]; then
+            echo "could not safely check existing release state (HTTP $status)" >&2
+            exit 1
+          fi
+
+      - name: Publish verified release assets
+        run: |
+          set -euo pipefail
+          release_args=("$RELEASE_TAG" release-assets/* --verify-tag --title "Daedalus $RELEASE_TAG" --generate-notes)
+          release_version="${RELEASE_TAG#v}"
+          release_precedence_version="${release_version%%+*}"
+          if [[ "$release_precedence_version" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "${release_args[@]}" --repo "$REPOSITORY"

@@ -1,6 +1,6 @@
 # Daedalus CLI 로컬 빌드·태그 릴리스
 
-상태: 사용자 확정 배포 방향 + 구현 계약 · 2026-10-15
+상태: 로컬 package·archive 실행 검증, 태그 CI 구성의 PR 검증 진행 · 2026-10-16
 
 ## 사용자 요구
 
@@ -11,6 +11,8 @@
 초기 배포 단위는 타깃별 native CLI 실행 파일, 원본 엔진 라이선스, 사용 안내, JSON build manifest, archive·SHA-256이다. 최초 검증 범위는 이 Mac의 `aarch64-apple-darwin`이다. GitHub 빌드는 macOS-arm64·Linux-x64부터 실제 빌드/실행 상태를 검증하고 확대한다. Windows·web·mobile 산출물 이름만 만들어 지원으로 표시하지 않는다.
 
 Rust 의존성의 package ID·버전·license 선언·source checksum과 배포 package 안의 license/notice 텍스트를 inventory와 함께 모은다. metadata의 CLI 도달 graph와 feature/target 조건을 기록하며, 보수적인 포함 목록을 실제 binary symbol 수준 SBOM이라고 부르지 않는다. 빠진 license 원문은 공개 tag package에서 명시적 오류로 처리하고, arbitrary 사용자 경로를 자동 수집하지 않는다. 자동 수집이 모든 법적 의무 검토를 대신한다고 주장하지 않는다.
+
+2026-10-16 보완: 고정된 배포 crate와 upstream commit 모두 별도 license 파일 없이 Cargo의 표준 SPDX 선언만 제공하는 경우가 있다. Cargo는 `license`를 package가 배포되는 라이선스의 SPDX expression으로 정의한다. 이런 확인된 package는 checksum·선언 파일의 pinned URL·SPDX 식별자를 묶어 명시적으로 등록하고, 고정한 공식 SPDX license-list-data의 해당 reference text를 함께 제공할 수 있다. 이를 `declared_spdx_reference`로 표시해 upstream 원문과 구분하며 author/year/copyright holder를 만들어 채우지 않는다. 임의 expression의 자동 추정·미등록 누락·버전 변경은 여전히 오류다. 이는 알려진 선언을 보존하는 packaging 정책이며 법적 적합성 보증이 아니다. [Cargo license 의미](https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields), [공식 SPDX 목록](https://github.com/spdx/license-list-data)
 
 기본 CPU 제어 경로와 capture/window feature를 manifest에 기록한다. 릴리스 CLI의 capture feature는 실제 renderer를 포함해야 하고 GPU 부재의 오류 계약을 유지한다. 실행 파일 하나를 배포했다고 C# SDK·CoreCLR runtime·외부 에셋·게임 export가 모두 포함됐다고 하지 않는다. 초기 archive의 실제 포함 범위를 사용 안내에 명시한다.
 
@@ -38,5 +40,7 @@ PR 또는 수동 build 검증은 읽기 권한으로만 수행하며 공개 Rele
 4. 최초 실제 태그 발행 시에만 Release asset의 플랫폼·checksum·다운로드 후 실행까지 기록한다. 현재 공개 Release는 만들지 않는다.
 
 동일 소스를 동일 명령으로 다시 빌드하는 절차와 byte-for-byte reproducible build 증명은 다르다. 처음부터 후자를 달성했다고 표시하지 않는다. 자동 업데이트·패키지 매니저·Homebrew tap·코드 서명은 이 초기 작업의 완료 주장에 포함하지 않는다.
+
+실제 실행 결과와 미검증 범위는 [E08 작업 기록](../06-worklog/2026-10-16-cli-packaging.md)에 남긴다.
 
 근거: [GitHub push 이벤트](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push), [hosted runner 목록](https://docs.github.com/en/actions/reference/runners/github-hosted-runners), [gh release create](https://cli.github.com/manual/gh_release_create), [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html). 조회일2026-10-15. workflow와 실제 실행 로그가 최종 플랫폼 근거다.

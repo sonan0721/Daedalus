@@ -1,0 +1,543 @@
+{
+  "overrides": [
+    {
+      "declaration_evidence": {
+        "path": "evidence/block-0.1.6-Cargo.toml",
+        "sha256": "24df2f33b48c9e756a4f864f882c1ab07a159b6c2b790f45af2e8162499b6719",
+        "source_url": "https://raw.githubusercontent.com/SSheldon/rust-block/47178790cfc9d4a8b092051d8b413b78bd31254a/Cargo.toml",
+        "upstream_path": "Cargo.toml"
+      },
+      "evidence_kind": "declared_spdx_reference",
+      "license_expression": "MIT",
+      "name": "block",
+      "package_path_in_repository": ".",
+      "reference": {
+        "files": [
+          {
+            "path": "references/MIT.txt",
+            "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MIT.txt",
+            "upstream_path": "text/MIT.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a",
+      "source_commit": "47178790cfc9d4a8b092051d8b413b78bd31254a",
+      "source_repository": "http://github.com/SSheldon/rust-block",
+      "version": "0.1.6"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/4fc083f1c6d6784577e38b0ee8dbd344481e2fd2/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "block2",
+      "package_path_in_repository": "crates/block2",
+      "source_checksum_sha256": "2c132eebf10f5cad5289222520a4a058514204aed6d791f1cf4fe8088b82d15f",
+      "source_commit": "4fc083f1c6d6784577e38b0ee8dbd344481e2fd2",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.5.1"
+    },
+    {
+      "declaration_evidence": {
+        "path": "evidence/dispatch-0.2.0-Cargo.toml",
+        "sha256": "05c60b829931ef7f1f130735843c11f5cf9cc69546eca5fc941d014781c68e31",
+        "source_url": "https://raw.githubusercontent.com/SSheldon/rust-dispatch/82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748/Cargo.toml",
+        "upstream_path": "Cargo.toml"
+      },
+      "evidence_kind": "declared_spdx_reference",
+      "license_expression": "MIT",
+      "name": "dispatch",
+      "package_path_in_repository": ".",
+      "reference": {
+        "files": [
+          {
+            "path": "references/MIT.txt",
+            "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MIT.txt",
+            "upstream_path": "text/MIT.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "bd0c93bb4b0c6d9b77f4435b0ae98c24d17f1c45b2ff844c6151a07256ca923b",
+      "source_commit": "82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748",
+      "source_repository": "http://github.com/SSheldon/rust-dispatch",
+      "version": "0.2.0"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/gpu-alloc/COPYING",
+          "sha256": "12121dfa588677007848ab922a45a1e3248868f6ff063598fceb3141d7897314",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-alloc/61020bdcb4eb04fca6bbf748aeb9570e859236e0/COPYING",
+          "upstream_path": "COPYING"
+        },
+        {
+          "path": "texts/gpu-alloc/LICENSE-APACHE",
+          "sha256": "58317934bf818c379e4215fad7e8dfb6812edff32c9557b8b039343f69711e08",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-alloc/61020bdcb4eb04fca6bbf748aeb9570e859236e0/license/APACHE",
+          "upstream_path": "license/APACHE"
+        },
+        {
+          "path": "texts/gpu-alloc/LICENSE-MIT",
+          "sha256": "f774bf68151714985324d90adbd59e8f271b7ba518608d871b6ba16464692879",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-alloc/61020bdcb4eb04fca6bbf748aeb9570e859236e0/license/MIT",
+          "upstream_path": "license/MIT"
+        }
+      ],
+      "license_expression": "MIT OR Apache-2.0",
+      "name": "gpu-alloc",
+      "package_path_in_repository": "gpu-alloc",
+      "reference": {
+        "files": [
+          {
+            "path": "references/Apache-2.0.txt",
+            "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/Apache-2.0.txt",
+            "upstream_path": "text/Apache-2.0.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "45cf04b2726f02df5508c6de726acdc90cdf97ac771a9a0ffd8ba10a6e696bf9",
+      "source_commit": "61020bdcb4eb04fca6bbf748aeb9570e859236e0",
+      "source_repository": "https://github.com/zakarumych/gpu-alloc",
+      "version": "0.6.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/gpu-alloc/COPYING",
+          "sha256": "12121dfa588677007848ab922a45a1e3248868f6ff063598fceb3141d7897314",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-alloc/7ddd1fe576fcfc503347eb97e476a47581479f22/COPYING",
+          "upstream_path": "COPYING"
+        },
+        {
+          "path": "texts/gpu-alloc/LICENSE-APACHE",
+          "sha256": "58317934bf818c379e4215fad7e8dfb6812edff32c9557b8b039343f69711e08",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-alloc/7ddd1fe576fcfc503347eb97e476a47581479f22/license/APACHE",
+          "upstream_path": "license/APACHE"
+        },
+        {
+          "path": "texts/gpu-alloc/LICENSE-MIT",
+          "sha256": "f774bf68151714985324d90adbd59e8f271b7ba518608d871b6ba16464692879",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-alloc/7ddd1fe576fcfc503347eb97e476a47581479f22/license/MIT",
+          "upstream_path": "license/MIT"
+        }
+      ],
+      "license_expression": "MIT OR Apache-2.0",
+      "name": "gpu-alloc-types",
+      "package_path_in_repository": "types",
+      "reference": {
+        "files": [
+          {
+            "path": "references/Apache-2.0.txt",
+            "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/Apache-2.0.txt",
+            "upstream_path": "text/Apache-2.0.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "b2bbed164dd10ed526c2e4fe3e721ca4a71c61730e5aafac6844b417b3227058",
+      "source_commit": "7ddd1fe576fcfc503347eb97e476a47581479f22",
+      "source_repository": "https://github.com/zakarumych/gpu-alloc",
+      "version": "0.3.1"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/gpu-descriptor/COPYING",
+          "sha256": "f72143f7e9d9fb8bd336b139fa22f825a299591c29f2f7338c5566347b137613",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a/COPYING",
+          "upstream_path": "COPYING"
+        },
+        {
+          "path": "texts/gpu-descriptor/LICENSE-APACHE",
+          "sha256": "6bec8c944a6d4251be50ac86bb4ca360bcce5aea472505dee2800e160bf1cdbf",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a/license/APACHE",
+          "upstream_path": "license/APACHE"
+        },
+        {
+          "path": "texts/gpu-descriptor/LICENSE-MIT",
+          "sha256": "5226e27d5fbc683db56c52853cdb9d15b69abadb525a60f95c862c2dbd77cdc8",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a/license/MIT",
+          "upstream_path": "license/MIT"
+        }
+      ],
+      "license_expression": "MIT OR Apache-2.0",
+      "name": "gpu-descriptor",
+      "package_path_in_repository": "gpu-descriptor",
+      "reference": {
+        "files": [
+          {
+            "path": "references/Apache-2.0.txt",
+            "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/Apache-2.0.txt",
+            "upstream_path": "text/Apache-2.0.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "b89c83349105e3732062a895becfc71a8f921bb71ecbbdd8ff99263e3b53a0ca",
+      "source_commit": "bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a",
+      "source_repository": "https://github.com/zakarumych/gpu-descriptor",
+      "version": "0.3.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/gpu-descriptor/COPYING",
+          "sha256": "f72143f7e9d9fb8bd336b139fa22f825a299591c29f2f7338c5566347b137613",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/9f2fb9546591322e7b77ee1e79385e01effd85e4/COPYING",
+          "upstream_path": "COPYING"
+        },
+        {
+          "path": "texts/gpu-descriptor/LICENSE-APACHE",
+          "sha256": "6bec8c944a6d4251be50ac86bb4ca360bcce5aea472505dee2800e160bf1cdbf",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/9f2fb9546591322e7b77ee1e79385e01effd85e4/license/APACHE",
+          "upstream_path": "license/APACHE"
+        },
+        {
+          "path": "texts/gpu-descriptor/LICENSE-MIT",
+          "sha256": "5226e27d5fbc683db56c52853cdb9d15b69abadb525a60f95c862c2dbd77cdc8",
+          "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/9f2fb9546591322e7b77ee1e79385e01effd85e4/license/MIT",
+          "upstream_path": "license/MIT"
+        }
+      ],
+      "license_expression": "MIT OR Apache-2.0",
+      "name": "gpu-descriptor-types",
+      "package_path_in_repository": "types",
+      "reference": {
+        "files": [
+          {
+            "path": "references/Apache-2.0.txt",
+            "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/Apache-2.0.txt",
+            "upstream_path": "text/Apache-2.0.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "fdf242682df893b86f33a73828fb09ca4b2d3bb6cc95249707fc684d27484b91",
+      "source_commit": "9f2fb9546591322e7b77ee1e79385e01effd85e4",
+      "source_repository": "https://github.com/zakarumych/gpu-descriptor",
+      "version": "0.2.0"
+    },
+    {
+      "declaration_evidence": {
+        "path": "evidence/hexf-parse-0.2.1-Cargo.toml",
+        "sha256": "4a56dbdbc12054fd33b7a2634a45cbbe6fe12f5e6f4081002cbfa527f7220c70",
+        "source_url": "https://raw.githubusercontent.com/lifthrasiir/hexf/4225763d744183d720f575ae96d04161b4d08ea0/parse/Cargo.toml",
+        "upstream_path": "parse/Cargo.toml"
+      },
+      "evidence_kind": "declared_spdx_reference",
+      "license_expression": "CC0-1.0",
+      "name": "hexf-parse",
+      "package_path_in_repository": "parse",
+      "reference": {
+        "files": [
+          {
+            "path": "references/CC0-1.0.txt",
+            "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/CC0-1.0.txt",
+            "upstream_path": "text/CC0-1.0.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df",
+      "source_commit": "4225763d744183d720f575ae96d04161b4d08ea0",
+      "source_repository": "https://github.com/lifthrasiir/hexf",
+      "version": "0.2.1"
+    },
+    {
+      "declaration_evidence": {
+        "path": "evidence/malloc_buf-0.0.6-Cargo.toml",
+        "sha256": "1c70c91688d9850272e43cee9b189ffe3fe667151d7caf576a36a720f8b28194",
+        "source_url": "https://raw.githubusercontent.com/SSheldon/malloc_buf/a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9/Cargo.toml",
+        "upstream_path": "Cargo.toml"
+      },
+      "evidence_kind": "declared_spdx_reference",
+      "license_expression": "MIT",
+      "name": "malloc_buf",
+      "package_path_in_repository": ".",
+      "reference": {
+        "files": [
+          {
+            "path": "references/MIT.txt",
+            "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MIT.txt",
+            "upstream_path": "text/MIT.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb",
+      "source_commit": "a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9",
+      "source_repository": "https://github.com/SSheldon/malloc_buf",
+      "version": "0.0.6"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/4fc083f1c6d6784577e38b0ee8dbd344481e2fd2/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc-sys",
+      "package_path_in_repository": "crates/objc-sys",
+      "source_checksum_sha256": "cdb91bdd390c7ce1a8607f35f3ca7151b65afc0ff5ff3b34fa350f7d7c7e4310",
+      "source_commit": "4fc083f1c6d6784577e38b0ee8dbd344481e2fd2",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.3.5"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/5237cbf081d04ef75a1f6a207b4018e7c1ae7438/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2",
+      "package_path_in_repository": "crates/objc2",
+      "source_checksum_sha256": "19d5490aaf8f1d7cf7688dfa9b0ce07900e168852c45cd2c03f534dfd27cfd0b",
+      "source_commit": "5237cbf081d04ef75a1f6a207b4018e7c1ae7438",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.5.3"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2-app-kit",
+      "package_path_in_repository": "framework-crates/objc2-app-kit",
+      "source_checksum_sha256": "e4e89ad9e3d7d297152b17d39ed92cd50ca8063a89a9fa569046d41568891eff",
+      "source_commit": "e282618be4c3a3b9542957e0c8540e9588472ce8",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.2.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2-core-data",
+      "package_path_in_repository": "framework-crates/objc2-core-data",
+      "source_checksum_sha256": "617fbf49e071c178c0b24c080767db52958f716d9eabdf0890523aeae54773ef",
+      "source_commit": "e282618be4c3a3b9542957e0c8540e9588472ce8",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.2.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2-core-image",
+      "package_path_in_repository": "framework-crates/objc2-core-image",
+      "source_checksum_sha256": "55260963a527c99f1819c4f8e3b47fe04f9650694ef348ffd2227e8196d34c80",
+      "source_commit": "e282618be4c3a3b9542957e0c8540e9588472ce8",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.2.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2-encode/LICENSE.md",
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+          "upstream_path": "LICENSE.md"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2-encode",
+      "package_path_in_repository": "crates/objc2-encode",
+      "reference": {
+        "files": [
+          {
+            "path": "references/MIT.txt",
+            "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+            "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MIT.txt",
+            "upstream_path": "text/MIT.txt"
+          }
+        ],
+        "source_commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+        "source_repository": "https://github.com/spdx/license-list-data"
+      },
+      "source_checksum_sha256": "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33",
+      "source_commit": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "4.1.0"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2-foundation",
+      "package_path_in_repository": "framework-crates/objc2-foundation",
+      "source_checksum_sha256": "0ee638a5da3799329310ad4cfa62fbf045d5f56e3ef5ba4149e7452dcf89d5a8",
+      "source_commit": "e282618be4c3a3b9542957e0c8540e9588472ce8",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.2.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2-metal",
+      "package_path_in_repository": "framework-crates/objc2-metal",
+      "source_checksum_sha256": "dd0cba1276f6023976a406a14ffa85e1fdd19df6b0f737b063b95f6c8c7aadd6",
+      "source_commit": "e282618be4c3a3b9542957e0c8540e9588472ce8",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.2.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/objc2/LICENSE.txt",
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt",
+          "upstream_path": "LICENSE.txt"
+        }
+      ],
+      "license_expression": "MIT",
+      "name": "objc2-quartz-core",
+      "package_path_in_repository": "framework-crates/objc2-quartz-core",
+      "source_checksum_sha256": "e42bee7bff906b14b167da2bac5efe6b6a07e6f7c0a21a7308d40c960242dc7a",
+      "source_commit": "e282618be4c3a3b9542957e0c8540e9588472ce8",
+      "source_repository": "https://github.com/madsmtm/objc2",
+      "version": "0.2.2"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/profiling/LICENSE-APACHE",
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "upstream_path": "LICENSE-APACHE"
+        },
+        {
+          "path": "texts/profiling/LICENSE-MIT",
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "upstream_path": "LICENSE-MIT"
+        }
+      ],
+      "license_expression": "MIT OR Apache-2.0",
+      "name": "profiling",
+      "package_path_in_repository": "profiling",
+      "source_checksum_sha256": "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5",
+      "source_commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+      "source_repository": "https://github.com/aclysma/profiling",
+      "version": "1.0.18"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/profiling/LICENSE-APACHE",
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "upstream_path": "LICENSE-APACHE"
+        },
+        {
+          "path": "texts/profiling/LICENSE-MIT",
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "upstream_path": "LICENSE-MIT"
+        }
+      ],
+      "license_expression": "MIT OR Apache-2.0",
+      "name": "profiling-procmacros",
+      "package_path_in_repository": "profiling-procmacros",
+      "source_checksum_sha256": "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb",
+      "source_commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+      "source_repository": "https://github.com/aclysma/profiling",
+      "version": "1.0.18"
+    },
+    {
+      "evidence_kind": "upstream_text",
+      "files": [
+        {
+          "path": "texts/rspirv/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source_url": "https://raw.githubusercontent.com/gfx-rs/rspirv/e91a5debc10c395b36db7721dfff6326d697a1e2/LICENSE",
+          "upstream_path": "LICENSE"
+        }
+      ],
+      "license_expression": "Apache-2.0",
+      "name": "spirv",
+      "package_path_in_repository": "spirv",
+      "source_checksum_sha256": "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844",
+      "source_commit": "e91a5debc10c395b36db7721dfff6326d697a1e2",
+      "source_repository": "https://github.com/gfx-rs/rspirv",
+      "version": "0.3.0+sdk-1.3.268.0"
+    }
+  ],
+  "schema_version": 1
+}

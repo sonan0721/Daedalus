@@ -63,6 +63,28 @@ It renders a small material/depth fixture through a real wgpu adapter, reads bac
 
 The native window path compiles and has bounded input/message queues, local camera controls, and an independent animated loading overlay. Interactive window behavior has not yet been manually verified. Mac Metal offscreen evidence does not establish browser, Windows, mobile, or console support.
 
+## Local CLI packaging and future releases
+
+Python 3.11 or newer is required for the packaging scripts. On a native macOS arm64 or Linux x64 host, run:
+
+```sh
+python3 scripts/package_cli.py
+```
+
+The script builds `daedalus-cli` in the release profile with `--locked --features capture`, creates a new versioned directory under ignored `dist/local/`, and prints the archive, checksum, and manifest paths. It refuses to overwrite an existing output directory. The manifest records the exact commit, dirty state, native target, features, toolchain, build ID, and hashes of the executable, notices, and dependency inventory. The archive contains no .NET runtime or managed SDK.
+
+Recheck a generated archive using its printed path:
+
+```sh
+python3 scripts/package_cli.py --verify-archive /path/to/daedalus-package.tar.gz
+```
+
+Verification checks the archive SHA-256, entry names and types, embedded manifest and file hashes, executable permissions, and extracted CLI `--version` and CPU `inspect`. This does not exercise GPU capture; use the separate real GPU check above. The dependency inventory is a conservative Cargo graph with recorded target/features, not a binary-symbol SBOM. Missing license texts fail packaging unless an exact package/checksum has explicitly curated upstream or declared-SPDX evidence; canonical reference texts are labeled separately from upstream originals.
+
+The `release` workflow performs native packaging on macOS arm64 and Linux x64 for PRs and manual runs with read-only repository permissions. A future pushed `v<CLI SemVer>` tag must match the crate version, resolve to a commit in main history, and build cleanly on both targets before the publish job creates a GitHub Release. Only that job receives write permission. Tag publication, signing/notarization, Windows packaging, and managed runtime distribution have not been verified by a PR dry build. No tag or public release is created as part of the initial setup.
+
+The package and notice tests are included in the Python discovery command above. They exercise malformed/mismatched tags, archive integrity, failed builds, overwrite rejection, dependency provenance, and the publish command through a local stub rather than publishing a real release.
+
 ## Managed/native integration
 
 Use the pinned .NET SDK 10.0.402 with C# 14. `global.json` disables SDK roll-forward; ensure the intended `dotnet` is on PATH as described in [managed/README.md](managed/README.md).

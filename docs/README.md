@@ -73,6 +73,7 @@
 | [E04 C# 연결 검증](06-worklog/2026-10-15-e04-managed.md) | 실제 Rust state·명령 ACK·모듈 교체·실패 복구·context 회수 근거 |
 | [E06 물리·오디오 검증](06-worklog/2026-10-15-e06-physics-audio.md) | Jolt/Rapier 실제 충돌과 Kira PCM·장치 probe의 실행 근거 |
 | [첫 실행 통합 checkpoint](06-worklog/2026-10-15-runtime-integration.md) | 10개 crate·CPU80건·C# 실제 연결·CLI 제어·추가 리뷰 수정 근거 |
+| [E08 CLI 패키징 검증](06-worklog/2026-10-16-cli-packaging.md) | 로컬 native 실행 파일·의존성 notice·archive 검증과 후속 tag 배포의 구분 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

@@ -1,6 +1,6 @@
 # GitHub 운영과 현재 검증 절차
 
-상태: 2026-10-15 실제 저장소 설정·초기 엔진 CI 확인. 공개 릴리스 미발행.
+상태: 2026-10-16 실제 저장소 설정·엔진 통합 PR 병합 확인. 공개 릴리스 미발행.
 
 ## 공개 저장소
 
@@ -8,7 +8,7 @@
 
 ## main에 적용한 규칙
 
-- PR 경로로 변경하고 필수 `docs` 체크를 통과해야 한다.
+- PR 경로로 변경하고 필수 `docs`, `rust`, `managed native integration` 체크를 모두 통과해야 한다.
 - 최신 base 반영을 요구하는 strict status check를 적용한다.
 - 관리자도 보호 규칙을 적용받는다.
 - 강제 push·branch 삭제를 금지하고 선형 이력을 요구한다.
@@ -26,9 +26,9 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 git diff --check
 ```
 
-현재 문서 검사와 검사기 테스트 8건을 실행한다. 문서 CI가 통과했다고 Rust 엔진·GPU·웹·30명·144fps가 검증된 것은 아니다. [최초 CI 실행](https://github.com/sonan0721/Daedalus/actions/runs/38741106943)은 성공했다.
+문서 검사기 자체의 테스트는 8건이다. 전체 Python discovery는 packaging 검사 등 추가된 테스트도 실행하므로 총수는 해당 실행 로그를 따른다. 문서 CI가 통과했다고 Rust 엔진·GPU·웹·30명·144fps가 검증된 것은 아니다. [최초 CI 실행](https://github.com/sonan0721/Daedalus/actions/runs/38741106943)은 성공했다.
 
-엔진 구현 PR#3의 첫 Rust workspace CI도 [성공](https://github.com/sonan0721/Daedalus/actions/runs/38751689468)했다. 이후 커밋의 검사 상태는 해당 PR·Actions에서 다시 확인한다. 실제 엔진·GPU·managed 검증 명령은 루트 [TESTING](../../TESTING.md)에 유지한다. 필수 보호 체크의 현재 이름은 위에 별도로 기록하며, 새 workflow를 추가한 사실만으로 보호 설정이 바뀌었다고 하지 않는다.
+[엔진 구현 PR#3](https://github.com/sonan0721/Daedalus/pull/3)은 `docs`, `rust`, `managed native integration` 성공 뒤 squash 병합했다. 병합 commit은 `ec5d9c15374ac222706ab1185b3b96c2a46790c1`이다. 병합 전 마지막 검증은 [문서](https://github.com/sonan0721/Daedalus/actions/runs/38756044859), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38756051150), [실제 native bridge와 .NET 연결](https://github.com/sonan0721/Daedalus/actions/runs/38756045045)에서 확인할 수 있다. 실제 엔진·GPU·managed 검증 명령은 루트 [TESTING](../../TESTING.md)에 유지한다. 필수 보호 체크 3개는 workflow 추가와 별도로 GitHub API에 적용하고 조회했다.
 
 CLI 로컬 package와 후속 tag 기반 공개 배포는 [배포 계약](../03-architecture/cli-build-and-release.md)에 따라 추가한다. 현재 태그와 GitHub Release는 생성하지 않는다. PR dry build artifact는 공개 릴리스와 구분한다.
 

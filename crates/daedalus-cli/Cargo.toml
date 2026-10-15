@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "Headless JSON control CLI for the Daedalus engine"
 
+[features]
+default = []
+capture = ["dep:daedalus-renderer", "daedalus-renderer/test-fixtures"]
+window = ["capture", "daedalus-renderer/window"]
+
 [[bin]]
 name = "daedalus"
 path = "src/main.rs"
@@ -14,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 daedalus-core = { path = "../daedalus-core" }
+daedalus-content = { path = "../daedalus-content" }
+daedalus-renderer = { path = "../daedalus-renderer", default-features = false, optional = true }
 daedalus-runtime = { path = "../daedalus-runtime" }
 daedalus-world = { path = "../daedalus-world" }
 serde.workspace = true

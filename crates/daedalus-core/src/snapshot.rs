@@ -42,6 +42,7 @@ pub struct SnapshotConsumer {
 pub enum PublicationStatus {
     Published { sequence: u64 },
     SkippedAtCapacity,
+    SkippedAtEntityLimit { entity_count: usize, limit: usize },
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -93,6 +94,30 @@ impl SnapshotPublisher {
         tick: Tick,
         entities: Vec<RenderEntitySnapshot>,
     ) -> Result<PublicationStatus, SnapshotPublishError> {
+        let entity_count = entities.len();
+        self.try_publish_with(tick, entity_count, usize::MAX, || entities)
+    }
+
+    /// Publish using bounded, lazy entity extraction. The extractor is called only after
+    /// the entity limit and retained-snapshot capacity checks pass. Extraction runs while
+    /// the mailbox mutex is held; readers remain nonblocking and report `Busy` until the
+    /// short, entity-bounded copy completes.
+    pub fn try_publish_with<F>(
+        &self,
+        tick: Tick,
+        entity_count: usize,
+        entity_limit: usize,
+        extract: F,
+    ) -> Result<PublicationStatus, SnapshotPublishError>
+    where
+        F: FnOnce() -> Vec<RenderEntitySnapshot>,
+    {
+        if entity_count > entity_limit {
+            return Ok(PublicationStatus::SkippedAtEntityLimit {
+                entity_count,
+                limit: entity_limit,
+            });
+        }
         let mut state = match self.state.try_lock() {
             Ok(state) => state,
             Err(TryLockError::WouldBlock) => return Err(SnapshotPublishError::Busy),
@@ -119,6 +144,13 @@ impl SnapshotPublisher {
             return Ok(PublicationStatus::SkippedAtCapacity);
         }
 
+        let entities = extract();
+        if entities.len() > entity_limit {
+            return Ok(PublicationStatus::SkippedAtEntityLimit {
+                entity_count: entities.len(),
+                limit: entity_limit,
+            });
+        }
         let sequence = state.next_sequence;
         state.next_sequence = sequence
             .checked_add(1)
@@ -209,6 +241,59 @@ mod tests {
             publisher.try_publish(Tick(1), vec![]),
             Err(SnapshotPublishError::Busy)
         );
+        assert_eq!(consumer.try_latest(), Err(SnapshotReadError::Busy));
+    }
+
+    #[test]
+    fn lazy_extraction_is_skipped_for_entity_budget_and_retention_capacity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (publisher, consumer) = snapshot_channel(1);
+        publisher.try_publish(Tick(1), vec![]).unwrap();
+        let retained = consumer.try_latest().unwrap().unwrap();
+        let calls = AtomicUsize::new(0);
+
+        assert_eq!(
+            publisher
+                .try_publish_with(Tick(2), 0, 1, || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    vec![]
+                })
+                .unwrap(),
+            PublicationStatus::SkippedAtCapacity
+        );
+        assert_eq!(
+            publisher
+                .try_publish_with(Tick(3), 2, 1, || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    vec![]
+                })
+                .unwrap(),
+            PublicationStatus::SkippedAtEntityLimit {
+                entity_count: 2,
+                limit: 1,
+            }
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(consumer.try_latest().unwrap().unwrap().tick, Tick(1));
+        drop(retained);
+    }
+
+    #[test]
+    fn lazy_extraction_is_skipped_when_mailbox_is_busy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (publisher, consumer) = snapshot_channel(2);
+        let calls = AtomicUsize::new(0);
+        let _guard = publisher.state.lock().unwrap();
+        assert_eq!(
+            publisher.try_publish_with(Tick(1), 0, 1, || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                vec![]
+            }),
+            Err(SnapshotPublishError::Busy)
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert_eq!(consumer.try_latest(), Err(SnapshotReadError::Busy));
     }
 }

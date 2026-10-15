@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Daedalus.ManagedHost</AssemblyName>
+    <RootNamespace>Daedalus.ManagedHost</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Daedalus.ManagedSdk/Daedalus.ManagedSdk.csproj" />
+  </ItemGroup>
+</Project>

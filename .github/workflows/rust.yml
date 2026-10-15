@@ -15,6 +15,10 @@ jobs:
     name: rust
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # This verifies oxijolt's SHA-256-checked x86_64 Linux archive. Use
+      # JOLTC_PREBUILT=off locally to exercise the CMake/C++ source fallback.
+      JOLTC_PREBUILT: require
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -22,6 +26,8 @@ jobs:
           persist-credentials: false
       - name: Check Rust formatting
         run: cargo fmt --all --check
+      - name: Install Linux audio build prerequisites
+        run: sudo apt-get update && sudo apt-get install --yes pkg-config libasound2-dev
       - name: Check workspace
         run: cargo check --workspace --locked
       - name: Test workspace

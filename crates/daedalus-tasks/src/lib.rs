@@ -244,6 +244,12 @@ impl TaskPool {
         })
     }
 
+    /// Number of worker threads owned by this bounded background pool.
+    #[must_use]
+    pub fn worker_count(&self) -> usize {
+        self.inner.pool.current_num_threads()
+    }
+
     /// Attempt admission without waiting for capacity or another submitter.
     pub fn try_submit<T, F>(&self, job: F) -> Result<TaskHandle<T>, SubmitError>
     where

@@ -9,6 +9,7 @@ description = "Headless Daedalus simulation runtime, fixed clock, and gameplay s
 
 [dependencies]
 bevy_ecs.workspace = true
+bevy_tasks.workspace = true
 daedalus-core = { path = "../daedalus-core" }
 daedalus-tasks = { path = "../daedalus-tasks" }
 daedalus-world = { path = "../daedalus-world" }

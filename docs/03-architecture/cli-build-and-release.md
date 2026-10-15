@@ -10,6 +10,8 @@
 
 초기 배포 단위는 타깃별 native CLI 실행 파일, 원본 엔진 라이선스, 사용 안내, JSON build manifest, archive·SHA-256이다. 최초 검증 범위는 이 Mac의 `aarch64-apple-darwin`이다. GitHub 빌드는 macOS-arm64·Linux-x64부터 실제 빌드/실행 상태를 검증하고 확대한다. Windows·web·mobile 산출물 이름만 만들어 지원으로 표시하지 않는다.
 
+Rust 의존성의 package ID·버전·license 선언·source checksum과 배포 package 안의 license/notice 텍스트를 inventory와 함께 모은다. metadata의 CLI 도달 graph와 feature/target 조건을 기록하며, 보수적인 포함 목록을 실제 binary symbol 수준 SBOM이라고 부르지 않는다. 빠진 license 원문은 공개 tag package에서 명시적 오류로 처리하고, arbitrary 사용자 경로를 자동 수집하지 않는다. 자동 수집이 모든 법적 의무 검토를 대신한다고 주장하지 않는다.
+
 기본 CPU 제어 경로와 capture/window feature를 manifest에 기록한다. 릴리스 CLI의 capture feature는 실제 renderer를 포함해야 하고 GPU 부재의 오류 계약을 유지한다. 실행 파일 하나를 배포했다고 C# SDK·CoreCLR runtime·외부 에셋·게임 export가 모두 포함됐다고 하지 않는다. 초기 archive의 실제 포함 범위를 사용 안내에 명시한다.
 
 ## 버전과 로컬 관리

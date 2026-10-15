@@ -16,6 +16,7 @@ Rust가 world·entity·명령·tick·자원 수명을 소유한다. managed SDK�
 - panic/managed exception이 외부 ABI를 넘어가지 않게 한다. 복구 불가능한 native crash를 성공 오류 코드로 감추지 않는다.
 - 함수의 thread/동시 호출 계약과 종료 중 호출 의미를 명시한다. frame thread에서 compile·module 교체·긴 command 완료를 동기 대기하지 않는다.
 - 초기는 복사·직렬화 batch로 정확성을 검증한다. per-component P/Invoke 또는 무기한 pointer lease를 성능 기본안으로 만들지 않는다.
+- wire command ID는 caller 하위 u128 절반과 host 자동 상위 절반의 namespace를 분리한다. caller가 예약 범위를 제출하면 mutation 전에 거부하고 실제 FFI regression으로 충돌 방지를 확인한다.
 
 ABI 함수의 정확한 spelling은 Luna 구현과 리뷰 시 고정하고 버전·호환 검사를 함께 둔다. 세계 상태의 두 번째 managed 원본을 만들지 않는다.
 

@@ -70,6 +70,9 @@
 | [R01 작업 기록](06-worklog/2026-10-15-r01.md) | 작성 문서별 목적·확인 범위·검증·후속 과제 기록 |
 | [R02 스크립팅 작업 기록](06-worklog/2026-10-15-r02-scripting.md) | 언어·모드 범위 변경, 새 문서별 목적과 남은 통합 조사 기록 |
 | [E01~E03 첫 구현 검증](06-worklog/2026-10-15-e01-foundation.md) | 실제 Rust·CLI·Metal 검증과 아직 완료하지 않은 기능의 경계 |
+| [E04 C# 연결 검증](06-worklog/2026-10-15-e04-managed.md) | 실제 Rust state·명령 ACK·모듈 교체·실패 복구·context 회수 근거 |
+| [E06 물리·오디오 검증](06-worklog/2026-10-15-e06-physics-audio.md) | Jolt/Rapier 실제 충돌과 Kira PCM·장치 probe의 실행 근거 |
+| [첫 실행 통합 checkpoint](06-worklog/2026-10-15-runtime-integration.md) | 10개 crate·CPU80건·C# 실제 연결·CLI 제어·추가 리뷰 수정 근거 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

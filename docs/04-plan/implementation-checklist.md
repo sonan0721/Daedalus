@@ -12,14 +12,14 @@
 
 | 작업 | 산출물·책임 | 주요 종료 증거 | 현재 |
 | --- | --- | --- | --- |
-| E01 / I01 | Cargo workspace, core·ECS·fixed clock·명령·유한 task·snapshot·Rust 시스템 등록 | stale ID/revision·포화·취소·job 실패·느린 worker 중 표시 소비·shutdown 시험 | 초기 구현·CPU 검증 완료. 병렬 ECS·실행 통합 후속 |
-| E02 / I02·I04 | wgpu renderer, 실제 offscreen capture, native window/input, 독립 presentation | 실제 GPU PNG·상태 manifest·resize·로딩 중 UI/입력 경로 | Metal capture 확인. 창은 compile/CPU 검사·통합 후속 |
+| E01 / I01 | Cargo workspace, core·ECS·fixed clock·명령·유한 task·snapshot·Rust 시스템 등록 | stale ID/revision·포화·취소·job 실패·느린 worker 중 표시 소비·shutdown 시험 | 병렬 ECS·CPU 예산 진단·지속 JSONL 제어 검증. 실제 창/스트리밍 통합 후속 |
+| E02 / I02·I04 | wgpu renderer, 실제 offscreen capture, native window/input, 독립 presentation | 실제 GPU PNG·상태 manifest·resize·로딩 중 UI/입력 경로 | Metal·CLI capture 확인. 창은 compile/CPU 검사·통합 후속 |
 | E03 / I06 | voxel·tile·fluid·light·terrain revision과 비동기 파생 데이터 | 경계·greedy mesh·질량 보존·광원 제거·stale 결과 시험 | 초기 CPU 알고리즘18건 통과. async/영역 연결 후속 |
-| E04 / I03 | C# SDK·CoreCLR 연결·module 교체·빌드형 Rust 게임플레이 | 실제 C#→Rust 명령·상태 보존·실패 복구·참조 회수 | SDK 설치 확인. E01 후 실제 bridge 통합 |
+| E04 / I03 | C# SDK·CoreCLR 연결·module 교체·빌드형 Rust 게임플레이 | 실제 C#→Rust 명령·상태 보존·실패 복구·참조 회수 | bridge7건·.NET2 scenario 통과. transform SDK·명시적 module 교체 구현, 일반 API·자동 build 후속 |
 | E05 / I05 | 권한 command·영속화·세션 transport·관심 영역 | 두 client·중복/손실·저장 복원·30명 부하 증거 | 대기 |
-| E06 / I08 | 2D/3D 물리·캐릭터·오디오 | 실제 backend 통합·접지/충돌·audio callback/stream·복귀 | 착수: native backend·최소 물리/audio 검증 |
+| E06 / I08 | 2D/3D 물리·캐릭터·오디오 | 실제 backend 통합·접지/충돌·audio callback/stream·복귀 | Jolt/Rapier primitive·Kira PCM 10건+장치 probe 확인. 캐릭터·stream·ECS 연결 후속 |
 | E07 / I07·I08 | UI·텍스트/IME·애니메이션·내비·렌더 효과 | 실제 입력·경로 갱신·pose·시각/행동 fixture | 대기 |
-| E08 / I09 | AI 친화적 scene/asset/cutscene/terrain 원본·CLI/MCP·native/web export | schema 검증·실행 중 조작·재현 캡처·깨끗한 배포 | 착수: scene·patch 데이터. 나머지 대기 |
+| E08 / I09 | AI 친화적 scene/asset/cutscene/terrain 원본·CLI/MCP·native/web export | schema 검증·실행 중 조작·재현 캡처·깨끗한 배포 | scene validate/patch·지속 CLI 구현. 로컬 package/태그 workflow 진행, MCP·web 후속 |
 | E09 / I10 | 통합·회귀·장시간·품질/성능·릴리스 | 검증 matrix·실측 artifact·지원 상태·미완료 목록 | 대기 |
 
 작업 이름은 모듈별 추적 단위이며 한 번에 모두 병렬 편집하지 않는다. 선행 API가 필요한 작업은 계약을 먼저 공유하고 파일 소유권을 분리한다. 세부 체크는 실제 구현을 리뷰하면서 이 표 아래에 추가한다.

@@ -270,11 +270,26 @@ impl SimulationWorld {
 
     #[must_use]
     pub fn render_entities(&mut self) -> Vec<RenderEntitySnapshot> {
+        self.render_entities_bounded(usize::MAX)
+    }
+
+    /// Extract at most `limit` transforms for bounded inspection responses.
+    #[must_use]
+    pub fn render_entities_bounded(&mut self, limit: usize) -> Vec<RenderEntitySnapshot> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let session = self.session;
         self.ecs
             .query::<(Entity, &TransformComponent)>()
             .iter(&self.ecs)
+            .take(limit)
             .map(|(entity, transform)| RenderEntitySnapshot {
-                entity: self.handle_for(entity),
+                entity: EntityHandle {
+                    session,
+                    index: entity.index_u32(),
+                    generation: entity.generation().to_bits(),
+                },
                 transform: transform.0,
             })
             .collect::<Vec<_>>()
@@ -283,6 +298,17 @@ impl SimulationWorld {
     #[must_use]
     pub fn entity_count(&self) -> usize {
         self.ecs.entities().count_spawned() as usize
+    }
+
+    /// Count transform-bearing render entities without allocating a snapshot vector.
+    /// Bevy marks this component-only query as archetypal and reports the exact number
+    /// of matching rows from its storage ranges, without visiting entity component data.
+    #[must_use]
+    pub fn render_entity_count(&mut self) -> usize {
+        self.ecs
+            .query::<&TransformComponent>()
+            .iter(&self.ecs)
+            .len()
     }
 
     #[must_use]

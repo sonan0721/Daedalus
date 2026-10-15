@@ -14,6 +14,10 @@ Bevy ECS의 병렬 executor와 Rayon background pool이 각각 전체 코어를 
 
 Bevy의 process-global pool을 사용하면 최초 설정과 다른 후속 engine 설정을 조용히 무시하지 않는다. 일치하지 않는 요청은 명시적으로 거부하거나 이미 설정된 유효 예산을 반환한다. 독립 system의 동시 실행과 충돌하는 mutable access의 직렬 실행을 실제 일정으로 검사한다. 한 system 안의 거대한 작업까지 자동으로 쪼개진다고 가정하지 않는다.
 
+잘못된 config나 실패한 scheduler/task 준비가 전역 pool 예산을 먼저 확정하지 않게 검증·fallible 준비를 앞에 둔다. 임의 외부 Rust system 초기화의 모든 부작용을 rollback하는 보장은 별도이며, 엔진 자체의 invalid-input 실패는 이후 정상 생성에 영향을 남기지 않도록 시험한다.
+
+snapshot 포화·mailbox Busy는 world 전체 추출 이전에 검사한다. 유효 tick마다 버릴 Vec를 먼저 만드는 경로를 피한다. 초기 runtime은 snapshot entity 수와 고정 크기 항목의 byte 예산을 제한하고, 초과 시 이전 complete snapshot을 유지하며 게시 결과에 원인을 드러낸다. lazy extraction이 mailbox guard 안에서 수행되는 초기 경로라면 consumer는 기다리지 않고 Busy를 받으며, 그 구간과 추출 상한을 문서화한다.
+
 ## 지속 제어
 
 초기 로컬 전송은 stdio JSON Lines다. 프로세스 하나·세션 하나에서 inspect/spawn/get/set/step/snapshot/종료를 반복한다. stdout은 기계가 읽는 응답만 출력하고 진단은 stderr로 보낸다. 요청·응답은 protocol version과 request ID를 가지며 엔티티 ID는 현재 session·generation을 검사한다.
@@ -21,6 +25,8 @@ Bevy의 process-global pool을 사용하면 최초 설정과 다른 후속 engin
 줄 길이·한 요청의 tick 수·entity 수·결과 크기·pending command 수를 제한한다. 한도 초과는 구조화된 오류이며 무제한 `read_line` 뒤에 길이만 확인하는 구현은 피한다. 잘못된 JSON 한 건이 세션을 죽이거나 이전 상태를 바꾸지 않아야 한다. EOF와 명시적 종료는 worker 취소·수명 회수로 연결한다. 이 로컬 trusted 제어 경로를 인증된 원격 멀티플레이 프로토콜이라고 부르지 않는다.
 
 `Accepted`는 큐 수락이고 `Applied`는 tick에서 적용된 결과다. 잘못된 revision·중복 command·이미 제거된 handle·단계 적용 실패를 성공 응답으로 바꾸지 않는다. 교체·시간 초과·취소의 결과는 해당 request ID로 추적한다.
+
+초기 control/managed wire에서 caller-provided command ID는 u128의 하위 절반(`<2^127`), host 자동 ID는 상위 절반을 사용한다. caller가 예약 범위를 주면 queue·world 변경 전에 거부한다. 요청 재시도에서 같은 command 의미를 유지하려면 caller가 자신의 ID를 보존해 재전송한다. server-assigned ID는 반환 결과의 상관관계 추적용이며 외부 명령으로 재지정하지 않는다. Rust 내부 CommandId 타입 자체의 전체 범위를 금지하는 규칙은 아니다.
 
 ## 콘텐츠·캡처·창 연결
 

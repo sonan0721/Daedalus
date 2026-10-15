@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Daedalus.ManagedIntegrationTests</AssemblyName>
+    <RootNamespace>Daedalus.ManagedIntegrationTests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Daedalus.ManagedSdk/Daedalus.ManagedSdk.csproj" />
+    <ProjectReference Include="../Daedalus.ManagedHost/Daedalus.ManagedHost.csproj" />
+    <ProjectReference Include="../fixtures/Daedalus.Fixture.V1/Daedalus.Fixture.V1.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../fixtures/Daedalus.Fixture.V2/Daedalus.Fixture.V2.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../fixtures/Daedalus.Fixture.Broken/Daedalus.Fixture.Broken.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+</Project>

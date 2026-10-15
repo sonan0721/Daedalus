@@ -1,0 +1,23 @@
+[package]
+name = "daedalus-bridge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned C ABI bridge from the managed Daedalus host to the Rust runtime"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+daedalus-core = { path = "../daedalus-core" }
+daedalus-runtime = { path = "../daedalus-runtime" }
+daedalus-world = { path = "../daedalus-world" }
+serde.workspace = true
+serde_json.workspace = true
+
+# This crate is the only initial ABI boundary. Raw pointers are restricted to
+# the exported functions in lib.rs; engine state and the Rust core remain safe.
+[lints.rust]
+unsafe_code = "allow"

@@ -1,0 +1,20 @@
+[package]
+name = "daedalus-renderer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+description = "Independent wgpu renderer for the Daedalus engine"
+
+[features]
+default = ["window"]
+window = ["dep:winit"]
+test-fixtures = []
+
+[dependencies]
+bytemuck = { version = "=1.25.2", features = ["derive"] }
+glam = "=0.30.9"
+png = "=0.18.1"
+wgpu = { version = "=27.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "gles", "metal", "vulkan", "wgsl"] }
+winit = { version = "=0.30.12", optional = true }
+pollster = "=1.0.1"

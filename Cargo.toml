@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/daedalus-core",
+    "crates/daedalus-tasks",
+    "crates/daedalus-world",
+    "crates/daedalus-runtime",
+    "crates/daedalus-cli",
+    "crates/daedalus-renderer",
+    "crates/daedalus-content",
+]
+default-members = [
+    "crates/daedalus-core",
+    "crates/daedalus-tasks",
+    "crates/daedalus-world",
+    "crates/daedalus-runtime",
+    "crates/daedalus-cli",
+    "crates/daedalus-renderer",
+    "crates/daedalus-content",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sonan0721/Daedalus"
+
+[workspace.dependencies]
+bevy_ecs = { version = "=0.18.1", default-features = false, features = ["std"] }
+clap = { version = "=4.6.7", features = ["derive"] }
+rayon = "=1.12.0"
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
+serde_json = "=1.0.154"
+thiserror = "=2.0.21"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

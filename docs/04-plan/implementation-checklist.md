@@ -12,12 +12,12 @@
 
 | 작업 | 산출물·책임 | 주요 종료 증거 | 현재 |
 | --- | --- | --- | --- |
-| E01 / I01 | Cargo workspace, core·ECS·fixed clock·명령·유한 task·snapshot·Rust 시스템 등록 | stale ID/revision·포화·취소·job 실패·느린 worker 중 표시 소비·shutdown 시험 | 착수 |
-| E02 / I02·I04 | wgpu renderer, 실제 offscreen capture, native window/input, 독립 presentation | 실제 GPU PNG·상태 manifest·resize·로딩 중 UI/입력 경로 | 착수 |
-| E03 / I06 | voxel·tile·fluid·light·terrain revision과 비동기 파생 데이터 | 경계·greedy mesh·질량 보존·광원 제거·stale 결과 시험 | 착수: CPU 데이터·알고리즘 |
+| E01 / I01 | Cargo workspace, core·ECS·fixed clock·명령·유한 task·snapshot·Rust 시스템 등록 | stale ID/revision·포화·취소·job 실패·느린 worker 중 표시 소비·shutdown 시험 | 초기 구현·CPU 검증 완료. 병렬 ECS·실행 통합 후속 |
+| E02 / I02·I04 | wgpu renderer, 실제 offscreen capture, native window/input, 독립 presentation | 실제 GPU PNG·상태 manifest·resize·로딩 중 UI/입력 경로 | Metal capture 확인. 창은 compile/CPU 검사·통합 후속 |
+| E03 / I06 | voxel·tile·fluid·light·terrain revision과 비동기 파생 데이터 | 경계·greedy mesh·질량 보존·광원 제거·stale 결과 시험 | 초기 CPU 알고리즘18건 통과. async/영역 연결 후속 |
 | E04 / I03 | C# SDK·CoreCLR 연결·module 교체·빌드형 Rust 게임플레이 | 실제 C#→Rust 명령·상태 보존·실패 복구·참조 회수 | SDK 설치 확인. E01 후 실제 bridge 통합 |
 | E05 / I05 | 권한 command·영속화·세션 transport·관심 영역 | 두 client·중복/손실·저장 복원·30명 부하 증거 | 대기 |
-| E06 / I08 | 2D/3D 물리·캐릭터·오디오 | 실제 backend 통합·접지/충돌·audio callback/stream·복귀 | 대기 |
+| E06 / I08 | 2D/3D 물리·캐릭터·오디오 | 실제 backend 통합·접지/충돌·audio callback/stream·복귀 | 착수: native backend·최소 물리/audio 검증 |
 | E07 / I07·I08 | UI·텍스트/IME·애니메이션·내비·렌더 효과 | 실제 입력·경로 갱신·pose·시각/행동 fixture | 대기 |
 | E08 / I09 | AI 친화적 scene/asset/cutscene/terrain 원본·CLI/MCP·native/web export | schema 검증·실행 중 조작·재현 캡처·깨끗한 배포 | 착수: scene·patch 데이터. 나머지 대기 |
 | E09 / I10 | 통합·회귀·장시간·품질/성능·릴리스 | 검증 matrix·실측 artifact·지원 상태·미완료 목록 | 대기 |
@@ -51,6 +51,10 @@
 - 초기 조명은 광원 제거 뒤에도 이전 빛이 남지 않는 reference 경로를 둔다. 대규모 incremental frontier 최적화는 검증 전 별도 상태로 남긴다.
 - 초기 경로 탐색은 점유 grid의 bounded/cancellable query다. 일반 3D navmesh·플랫포머 jump graph·군중 회피를 구현했다고 부르지 않는다. world revision과 결과 stale 여부를 전달한다.
 - 콘텐츠 라이브러리는 CPU·직렬화 계층이며 권한 ECS나 GPU 객체를 소유하지 않는다. 실제 async 생성·렌더·저장 연결은 통합 작업과 해당 시험으로 구분한다.
+
+## E04·E06 상세 계약
+
+C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-bridge.md), 실제 물리·오디오 연결은 [backend 계약](../03-architecture/physics-and-audio-runtime.md)을 따른다. 각 작업의 코드 시작 전 해당 소유자와 범위·버전·테스트를 공유한다. 물리·오디오·GUI·CoreCLR이 없어도 코어 CPU 검사는 실행 가능하게 모듈을 분리한다.
 
 ## 기록할 근거
 

@@ -33,6 +33,7 @@
 | [출처 등록부](02-research/source-register.md) | 공식 문서·원저자 자료의 검증 범위와 한계를 기록 |
 | [원안 주장 검증](02-research/claim-audit.md) | 144Hz 보장·전체 ECS 복사·핫리로드 수치 등의 오해를 정리 |
 | [스택 선택지](02-research/stack-options.md) | 독립 엔진 관점에서 부품별 이점·결합 비용·실험 기준 비교 |
+| [구현 의존성 기준선](02-research/implementation-dependency-baseline.md) | 실제 선택 버전·native 빌드·라이선스·타깃 검증 경계 |
 | [스크립트 언어 비교](02-research/scripting-language-comparison.md) | C#·TS·Luau의 작성 경험·실행·reload·플랫폼 비용과 실제 사례 비교 |
 | [Unity Lua·오토파일럿 조사](02-research/unity-lua-and-autopilot.md) | 과거 Lua 도입 경험을 플레이 제어·코드 교체·런타임 제약으로 나누어 검토 |
 | [상용 엔진에서 배울 점](02-research/commercial-engine-lessons.md) | 공개 발표에서 확인한 원칙과 추정을 분리 |

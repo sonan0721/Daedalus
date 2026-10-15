@@ -71,6 +71,9 @@
 | S61 | [Rust external ABI](https://doc.rust-lang.org/reference/items/external-blocks.html#abi) | Rust ABI 안정성 미보장·C ABI 타깃 의미 | build-time Rust API와 binary plugin ABI 구분 |
 | S62 | [Rust FFI](https://doc.rust-lang.org/nomicon/ffi.html) | C 경계·소유권·unsafe·callback·unwind | C++ 어댑터의 계약·검증. Rust 안전성이 foreign 코드를 자동 보증하지 않음 |
 | S63 | [CXX](https://cxx.rs/) | Rust/C++ bridge의 목적·경계 | 통합 후보. 채택 버전·타깃·실제 엔진 통합은 미검증 |
+| S64 | [Bevy ComputeTaskPool0.18.1](https://docs.rs/bevy_tasks/0.18.1/bevy_tasks/struct.ComputeTaskPool.html) | global pool 초기화·유효 thread 수 | process 예산 불일치를 숨기지 않는 병렬 ECS 계약 |
+| S65 | [oxijolt](https://docs.rs/oxijolt/latest/oxijolt/) / [native build](https://github.com/pockerhead/oxijolt/blob/main/docs/building.md) | 배포 source1.1.0+jolt-5.6.0의 초기화·CMake·prebuilt 경계와 대조 | Jolt native 통합. 기능 소개는 엔진 검증 완료가 아님 |
+| S66 | [Kira Panning](https://docs.rs/kira/latest/kira/struct.Panning.html) | 0.12.5에서 pan -1..1 의미 확인 | 엔진 volume/pan·실제 PCM 검증 계약 |
 
 ## 조사 실패·부족 기록
 

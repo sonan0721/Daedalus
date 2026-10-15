@@ -11,7 +11,7 @@ python3 scripts/check_docs.py
 python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
-The documentation checker verifies UTF-8 Markdown, local link targets, repository path boundaries, and use of an obsolete project label. Its unit tests cover link resolution, code masking, reference links, path traversal, and encoding/name errors. GitHub Actions runs these checks in the `docs` job on pull requests and pushes to `main`.
+The documentation checker verifies UTF-8 Markdown, local link targets, repository path boundaries, and use of an obsolete project label. Its unit tests cover link resolution, code masking, reference links, path traversal, and encoding/name errors. GitHub Actions runs these checks in the `docs` job on pull requests and pushes to `main`. It does not validate remote URLs, heading anchors, factual claims, or the whole CommonMark grammar; those need review or additional tools when relevant.
 
 ## Engine checks later
 

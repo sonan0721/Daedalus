@@ -61,7 +61,7 @@ def empty_cli_metadata(repository: Path) -> dict:
         ],
         "workspace_members": [root_id],
         "resolve": {
-            "nodes": [{"id": root_id, "features": ["capture"], "deps": []}]
+            "nodes": [{"id": root_id, "features": ["capture", "window"], "deps": []}]
         },
     }
 
@@ -110,7 +110,7 @@ class PackageCliTests(unittest.TestCase):
         self.assertTrue(manifest["dirty"])
         self.assertEqual(manifest["target_triple"], TARGET)
         self.assertEqual(manifest["cargo_profile"], "release")
-        self.assertEqual(manifest["cargo_features"], ["capture"])
+        self.assertEqual(manifest["cargo_features"], ["window"])
         self.assertEqual(manifest["rust_path_remapping"], package_cli.RUST_PATH_REMAP_POLICY)
         self.assertEqual(manifest["build_id"], BUILD_ID)
         self.assertEqual(manifest["binary_name"], "daedalus")
@@ -216,7 +216,7 @@ class PackageCliTests(unittest.TestCase):
                 "-p",
                 "daedalus-cli",
                 "--features",
-                "capture",
+                "window",
                 "--locked",
                 "--target-dir",
                 str(self.root / "target"),
@@ -295,7 +295,7 @@ class PackageCliTests(unittest.TestCase):
                         "-p",
                         "daedalus-cli",
                         "--features",
-                        "capture",
+                        "window",
                         "--locked",
                         "--target-dir",
                         str(repository / "target"),

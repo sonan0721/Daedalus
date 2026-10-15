@@ -66,6 +66,17 @@ jobs:
           git show-ref --verify --quiet refs/remotes/origin/main
           git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
 
+      - name: Restore native package Rust build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-package-window-remap1-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-package-window-remap1-${{ hashFiles('rust-toolchain.toml') }}-
+
       - name: Build and package native CLI
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
@@ -155,7 +166,7 @@ jobs:
               --arg version "$expected_version" \
               --arg commit "$RELEASE_COMMIT" \
               --arg target "$target" \
-              '.schema_version == 1 and .cli_version == $version and .exact_commit == $commit and .dirty == false and .target_triple == $target and .cargo_profile == "release" and (.cargo_features | index("capture") != null) and (.third_party_notices_sha256 | test("^[0-9a-f]{64}$")) and (.dependency_inventory_sha256 | test("^[0-9a-f]{64}$"))' \
+              '.schema_version == 1 and .cli_version == $version and .exact_commit == $commit and .dirty == false and .target_triple == $target and .cargo_profile == "release" and (.cargo_features | index("window") != null) and (.third_party_notices_sha256 | test("^[0-9a-f]{64}$")) and (.dependency_inventory_sha256 | test("^[0-9a-f]{64}$"))' \
               "${manifests[0]}" > /dev/null
             cp "$archive" "$release_assets/"
             cp "$checksum" "$release_assets/"

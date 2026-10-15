@@ -61,7 +61,20 @@ cargo test -p daedalus-renderer --features test-fixtures --test gpu_capture -- -
 
 It renders a small material/depth fixture through a real wgpu adapter, reads back 513×289 pixels with padded rows, writes a PNG in the system temporary directory, and decodes the pixels for validation. `DAEDALUS_RENDERER_CAPTURE_PATH` selects another output path. No adapter is an explicit failure in this requested test; a placeholder image is not a fallback.
 
-The native window path compiles and has bounded input/message queues, local camera controls, and an independent animated loading overlay. Interactive window behavior has not yet been manually verified. Mac Metal offscreen evidence does not establish browser, Windows, mobile, or console support.
+## Native live session
+
+The optional `window` CLI feature includes GPU capture. Run the actual engine window on a desktop with a supported GPU:
+
+```sh
+cargo run -p daedalus-cli --features window -- view
+cargo run -p daedalus-cli --features window -- view --seconds 5 --report /tmp/daedalus-live.json
+```
+
+WASD/QE moves the camera; left-drag or wheel changes the view. Arrow keys submit movement commands to the authority ECS, R requests a new terrain generation, and Escape closes the window. Dimensions are requested logical points; the report records the actual physical render size. `--work-iterations 10000` increases actual bounded generate/mesh work for loading/cancellation checks. The last owned scene remains visible during regeneration. There is no synthetic delay substituted for terrain work.
+
+For manual QA, observe loading animation and advancing tick/generation in the title, move the camera and entity while loading, request overlapping regenerations, resize, then close. Inspect the JSON for accepted/applied/stopped outcomes, unread results recovered at shutdown, real terrain completions/cancellations, input drops, loading frames/input, camera changes, resize events, and bounded frame interval samples. An accepted command may finish after the last displayed snapshot; compare the authority's final shutdown state as well.
+
+`--capture-output /tmp/daedalus-live.png` captures the final owned scene after the window exits. It is an offscreen render, not proof of an interactive window or its overlay. Physical-window screenshots and the session report provide separate evidence. Frame interval samples measure CPU/present spacing; they do not certify GPU completion latency or 144 fps. Mac evidence does not establish browser, Windows, mobile, or console support. The [live session contract](docs/03-architecture/native-live-session.md) defines ownership and failure behavior.
 
 ## Local CLI packaging and future releases
 
@@ -71,7 +84,7 @@ Python 3.11 or newer is required for the packaging scripts. On a native macOS ar
 python3 scripts/package_cli.py
 ```
 
-The script builds `daedalus-cli` in the release profile with `--locked --features capture`, creates a new versioned directory under ignored `dist/local/`, and prints the archive, checksum, and manifest paths. It refuses to overwrite an existing output directory. The manifest records the exact commit, dirty state, native target, features, toolchain, build ID, and hashes of the executable, notices, and dependency inventory. The archive contains no .NET runtime or managed SDK.
+The script builds `daedalus-cli` in the release profile with `--locked --features window`, creates a new versioned directory under ignored `dist/local/`, and prints the archive, checksum, and manifest paths. It refuses to overwrite an existing output directory. The manifest records the exact commit, dirty state, native target, features, toolchain, build ID, and hashes of the executable, notices, and dependency inventory. The archive contains no .NET runtime or managed SDK.
 
 Recheck a generated archive using its printed path:
 

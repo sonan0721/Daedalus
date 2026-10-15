@@ -18,5 +18,9 @@ pub use renderer::{CaptureArtifact, CaptureOptions, Renderer, RendererError, Ren
 pub use scene::{Camera, DirectionalLight, Material, Mesh, RenderObject, RenderScene, Vertex};
 #[cfg(feature = "window")]
 pub use window::{
-    WindowInput, WindowInputSink, WindowMessage, WindowOptions, run_windowed, window_input_channel,
+    FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervalStats, MAX_WINDOW_SCENE_GEOMETRY_BYTES,
+    MAX_WINDOW_SCENE_INDICES, MAX_WINDOW_SCENE_OBJECTS, MAX_WINDOW_SCENE_VERTICES,
+    PresentationMetadata, WindowExitReason, WindowInput, WindowInputSink, WindowKeyCode,
+    WindowMessage, WindowOptions, WindowOutcome, WindowReport, run_windowed, run_windowed_reported,
+    window_input_channel,
 };

@@ -8,6 +8,8 @@ use serde::Serialize;
 use serde_json::json;
 
 mod control;
+#[cfg(feature = "window")]
+mod view;
 
 const MAX_CLI_ENTITIES: u32 = 16_384;
 const MAX_CLI_TICKS: u32 = 120;
@@ -62,6 +64,9 @@ enum Commands {
         #[arg(long, default_value_t = 360)]
         height: u32,
     },
+    /// Open a native window over one live runtime session (requires `--features window`).
+    #[cfg(feature = "window")]
+    View(view::ViewArgs),
 }
 
 #[derive(Subcommand)]
@@ -167,15 +172,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
         }
         Commands::Version { json: as_json } => {
-            let capabilities = json!({
-                "protocol_version": control::CONTROL_PROTOCOL_VERSION,
-                "serve": true,
-                "scene_validate": true,
-                "scene_patch": true,
-                "capture": cfg!(feature = "capture"),
-                "window": false,
-                "renderer_window_compiled": cfg!(feature = "window"),
-            });
+            let capabilities = cli_capabilities();
             if as_json {
                 print_json(
                     &json!({"cli_version": env!("CARGO_PKG_VERSION"), "capabilities": capabilities}),
@@ -223,6 +220,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }))?;
             }
         },
+        #[cfg(feature = "window")]
+        Commands::View(options) => view::run(options)?,
         #[cfg(feature = "capture")]
         Commands::Capture {
             output,
@@ -251,6 +250,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn cli_capabilities() -> serde_json::Value {
+    json!({
+        "protocol_version": control::CONTROL_PROTOCOL_VERSION,
+        "serve": true,
+        "scene_validate": true,
+        "scene_patch": true,
+        "capture": cfg!(feature = "capture"),
+        "window": cfg!(feature = "window"),
+        "renderer_window_compiled": cfg!(feature = "window"),
+    })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T, Box<dyn Error>> {
@@ -312,10 +323,11 @@ fn make_output(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use daedalus_core::{Revision, Tick, Transform};
     use daedalus_world::{CommandOutcome, CommandSubmission, WorldCommand, WorldCommandKind};
 
-    use super::{MAX_CLI_ENTITIES, run_engine_config};
+    use super::{Args, MAX_CLI_ENTITIES, cli_capabilities, run_engine_config};
     use daedalus_runtime::{EngineBuilder, EngineConfig};
 
     #[test]
@@ -352,5 +364,38 @@ mod tests {
                 .all(|command| matches!(&command.outcome, CommandOutcome::Applied { .. }))
         );
         engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn capabilities_report_only_compiled_renderer_features() {
+        let capabilities = cli_capabilities();
+        assert_eq!(capabilities["window"], cfg!(feature = "window"));
+        assert_eq!(
+            capabilities["renderer_window_compiled"],
+            cfg!(feature = "window")
+        );
+        assert_eq!(capabilities["capture"], cfg!(feature = "capture"));
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn view_parser_accepts_bounded_configuration_and_rejects_out_of_range_work() {
+        assert!(
+            Args::try_parse_from([
+                "daedalus",
+                "view",
+                "--width",
+                "4096",
+                "--height",
+                "64",
+                "--seconds",
+                "3600",
+                "--work-iterations",
+                "10000",
+            ])
+            .is_ok()
+        );
+        assert!(Args::try_parse_from(["daedalus", "view", "--work-iterations", "10001",]).is_err());
+        assert!(Args::try_parse_from(["daedalus", "view", "--seconds", "0"]).is_err());
     }
 }

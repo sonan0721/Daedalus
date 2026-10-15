@@ -24,13 +24,23 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - name: Restore workspace Rust build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-workspace-allfeatures-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-workspace-allfeatures-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Check Rust formatting
         run: cargo fmt --all --check
       - name: Install Linux audio build prerequisites
         run: sudo apt-get update && sudo apt-get install --yes pkg-config libasound2-dev
       - name: Check workspace
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --all-features --locked
       - name: Test workspace
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
       - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

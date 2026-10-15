@@ -12,8 +12,8 @@
 | --- | --- | --- | --- | --- |
 | R01 | 기획 착수·요구·자료·구조·질문·공개 기여 기반 | 문서 첫 라운드와 검증 가능한 저장소 기반, 각 문서 목적 설명 | 사용자 원안 | 완료: 1차 문서·공개 기반·검증. 전체 설계 완료는 아님 |
 | R02 | 제품·품질·플랫폼 계약 | 내부 해상도·최소 브라우저·30명 부하·품질 카드·필수 기능 합의 | R01·질문 | 진행 전/일부 답변 확보 |
-| R03 | 스택·스크립트 선택 비교 | version/features/BOM·C#/TS/Luau·ECS·작업·물리·UI 후보 비교, 기술 실험 계획 | R02 | 미완료 |
-| R04 | 실행·데이터 수명 계약 | DAG·소유권·게시/회수·포화·종료·unsafe 경계 리뷰 | R02·R03 후보 | 초안 |
+| R03 | 스택·SDK·host 기준선 | C# 선택 이후 host·ABI·BOM·Rust/C++ 경계와 ECS·작업·물리·UI 비교·실험 계획 | R02의 관련 답변 | 진행: 언어·native 반영 방식 채택, 나머지 미완료 |
+| R04 | 실행·데이터 수명 계약 | DAG·소유권·게시/회수·포화·종료·FFI·CLR 모듈 수명·오토파일럿 요청 리뷰 | R02·R03 후보 | 초안 |
 | R05 | native/web·배포 계약 | host·workers·GPU 소유·export·저장·버전·capability 명세 | R02·R03 | 초안 |
 | R06 | 권한·월드·영속화 계약 | 30명 authority·AOI·command·save·복셀/타일 revision과 보존 규칙 | R02·R04 | 초안 |
 | R07 | 고품질 표현·액션·제작 계약 | 렌더·재질·캐릭터·UI·오디오·내비·DCC 세부 명세와 인수 카드 | R02·R03·R05 | 개요만 작성 |
@@ -29,7 +29,7 @@ R03~R07은 조사 대상을 나눈 것이며, 코드를 여러 팀이 동시에 
 | --- | --- | --- | --- |
 | I01 | core·ID·clock·command·budgeted task 기반 | 수명·포화·취소·shutdown·작업 부하 검증 | R08 |
 | I02 | macOS/web 최소 presentation·입력·로딩 UI·진단 | 느린 job 중 UI·입력·표시 지연 trace, 실제 양쪽 실행 | I01 |
-| I03 | 선택한 script host·공식 API·reload | 타입/진단·상태 보존·실패 복구·플랫폼 conformance | I01·I02·언어 ADR |
+| I03 | C# host·SDK·reload·Rust 등록·오토파일럿 | 타입/진단·상태 보존·실패 복구·native 계약·제어 trace·플랫폼 conformance | I01·I02·ADR-0003 |
 | I04 | asset cook/load·렌더 기본·offscreen 캡처 | 자원·색공간·재질·2D/3D fixture·비동기 readback | I02 |
 | I05 | 전용 서버·권한·저장·최소 복제 | 중복·재접속·복구·두 client 정합성·30명 부하 기반 | I01·I03 필요한 API |
 | I06-3D | voxel + 일반 3D world partition·streaming | 경계·취소·revision·충돌·upload·상주 메모리 검증 | I04·I05 |

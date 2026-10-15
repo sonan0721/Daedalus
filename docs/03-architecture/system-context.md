@@ -15,7 +15,9 @@ Daedalus
   presentation    로컬 UI 상태 / 표시 시계 / 렌더 추출
   render          wgpu / 그래프 / 재질 / 2D / 3D / GPU 자원
   assets          import 메타데이터 / cooked bundle / 캐시 / 출처
-  script          TS 모듈 도구 / host API / reload / migration
+  script          C# SDK / CLR host / reload / migration
+  gameplay        Rust 빌드형 시스템 등록 / 공통 schema·schedule
+  native          C++ 부품 어댑터 / ABI / 소유권·오류 경계
   physics         2D·3D 어댑터 / 캐릭터 컨트롤러 / 공간 쿼리
   voxel           3D 청크 / 생성 / 메시 / 조명
   tile            2D 영역 / 유체 / 조명 / 파괴
@@ -23,7 +25,7 @@ Daedalus
   audio           스트리밍 / 믹서 / 플랫폼 출력
   net             권한 / 입력 / 복제 / 관심 영역 / 전송
   persistence     저널 / 체크포인트 / 스키마 마이그레이션
-  control         서비스 / CLI / MCP / 캡처 / 진단
+  control         서비스 / CLI / MCP / 오토파일럿 / 캡처 / 진단
 ```
 
 모듈 수·파일 수 자체를 품질 지표로 삼지 않는다. Rust crate 경계는 의존성·빌드·API 공개·테스트에 도움이 되는 경우에 나눈다.
@@ -50,9 +52,9 @@ flowchart LR
 
 ## 의존 방향
 
-- core는 렌더러·JS VM·전송·DCC에 의존하지 않는다.
+- core는 렌더러·CLR host·전송·DCC에 의존하지 않는다.
 - world는 ECS 부품을 통합한다. 외부 API에 모든 라이브러리 타입을 노출하지 않되 의미 없는 전체 기능 래퍼도 만들지 않는다.
-- voxel·tile은 데이터와 계산 결과를 소유하며 wgpu 자원·JS 객체를 보관하지 않는다.
+- voxel·tile은 데이터와 계산 결과를 소유하며 wgpu 자원·managed 객체를 보관하지 않는다.
 - render는 렌더 전용 입력을 읽는다. 실행 중인 simulation world에 가변 접근하지 않는다.
 - net·persistence·script·control은 의미가 같은 명령 진입점을 사용하며 외부에서 ECS를 직접 변경하지 않는다.
 - platform은 시계·I/O·GPU·입력·오디오·저장 차이를 처리한다. 브라우저 전용 API가 core의 계약이 되지 않게 한다.
@@ -70,7 +72,9 @@ flowchart LR
 | RenderSnapshot | 게시 sequence·tick/time·schema version·불변 렌더 데이터·asset 참조 |
 | Diagnostics | correlation ID·단계·시간·bytes·queue depth·원인 |
 
-64bit ID를 JS Number로 무조건 변환하지 않는다. 문자열·BigInt·분리 필드의 계약을 스크립트 조사에서 정한다. 네트워크 ID와 로컬 ECS index도 동일시하지 않는다.
+64bit ID는 C#·Rust 및 JSON/브라우저 제어 프로토콜에서 동일 의미를 유지한다. JSON 수신자가 정밀도를 잃지 않도록 문자열 등 encoding을 명세한다. 네트워크 ID와 로컬 ECS index도 동일시하지 않는다.
+
+게임플레이 작성·native 통합은 [SDK](gameplay-and-mod-sdk.md), 실행 중 플레이 제어·새 로직 주입은 [오토파일럿](autopilot-and-live-testing.md)으로 구체화한다. Rust의 빌드 시 API와 외부 binary ABI는 다른 계약이다.
 
 ## 수명과 실행 모드
 

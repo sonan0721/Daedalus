@@ -12,8 +12,9 @@
 | CPU 병렬 | Rayon / Bevy task 계층 / 전용 executor | deadline·취소·공정성·재진입·웹을 어떻게 처리하는가? | CPU 경쟁·포화·종료·웹 초기화 실험 |
 | 통신 | bounded Crossbeam / mailbox / 최신 상태 게시 구조 | 순서·드롭·메모리·수명 요구가 무엇인가? | 메시지 종류별 포화·회수 모델 |
 | GPU | wgpu | 장치 feature·웹 소유권·셰이더·진단 경로는? | macOS+웹 최소 경로, device loss·readback |
-| TS 실행 | rquickjs / deno_core / 브라우저 JS host | 모듈·디버그·npm·성능·일관성·빌드 크기는? | 동일 API conformance·스케줄·migration 비교 |
-| TS 도구 | oxc + 별도 타입 검사 후보 | TS/TSX·source map·순환 모듈·의존 그래프 지원은? | 실제 모듈 집합의 cold/warm reload |
+| 주 게임플레이·PC 모드 | C# 14/.NET 10 LTS/CoreCLR 채택 | host·SDK·dependency·상태 보존·배포를 어떻게 통합할까? | PC host·반복 reload·batch·clean-machine 검증 |
+| C# 도구 | SDK/Roslyn compiler·분석기·코드 생성 후보 | 진단·schema·지원 edit·생성 바인딩 경계는? | 고정 SDK·실제 모듈의 cold/warm compile/reload |
+| native 게임플레이·FFI | Rust 빌드형 등록·C++ adapter, CXX 후보 | 공통 scheduler·API·allocator·layout·실패 의미는? | Rust 재빌드·C ABI·타깃별 C++ 통합 검증 |
 | 3D 물리 | Jolt 바인딩 / Rust 대안 | C++ FFI·Wasm·메모리·job adapter·라이선스 유지 비용은? | 결정적 경계·충돌 변경·타깃 빌드 |
 | 2D 물리 | Rapier 2D / 타일 전용 충돌 / 조합 | 캐릭터·타일·고속 충돌을 누가 소유하는가? | 파괴 경계·일방 통행·연속 충돌 계약 |
 | 유체·빛 | 엔진 소유 CPU 셀 시스템 / GPU 보조 | authoritative 상태와 시각 상태를 어떻게 구분하는가? | 보존·재현·경계·확장 시험 |
@@ -25,6 +26,8 @@
 | 오디오·내비 | 아직 미선정 | 웹·모바일·파괴 지형·실시간 제약을 어떻게 만족하는가? | 별도 조사 문서 필수 |
 
 ## 발견한 의존성 위험
+
+언어와 반영 방식은 [ADR-0003](../05-decisions/0003-csharp-and-native-gameplay.md)이 현재 기준선이다. TS·QuickJS·Luau는 비교 이력으로 남기고 V8·Chromium은 제품에서 제외한다. CoreCLR host의 process entrypoint·framework-dependent 배포·runtime 동봉 정책은 아직 미결이다.
 
 확인 시점 Bevy pipelined API 문서는 0.20.0을 표시한다. 조회한 Hanabi 호환 표는 0.19↔Bevy 0.19를, Lightyear README는 0.30↔Bevy 0.19를 제시한다. 따라서 각 프로젝트의 `latest`를 독립 선택하여 하나의 검증된 조합이라고 적을 수 없다. [Bevy API](https://docs.rs/bevy/latest/bevy/render/pipelined_rendering/struct.PipelinedRenderingPlugin.html), [Hanabi](https://github.com/djeedai/bevy_hanabi), [Lightyear](https://github.com/cBournhonesque/lightyear)
 

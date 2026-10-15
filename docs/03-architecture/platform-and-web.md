@@ -6,7 +6,7 @@
 
 macOS와 WebGPU 브라우저를 초기 설계 대상으로 삼는다. Windows·Linux·iOS·Android·후속 콘솔 확장을 위해 OS·GPU·입력·I/O·저장·오디오·수명을 platform adapter로 나눈다. 사용자의 전체 플랫폼 목표와 현재 지원 인증을 구분한다.
 
-기준 개발 장비는 MacBook Pro, M3 Pro CPU 12/GPU 18코어, 통합 메모리 18GB, 내장 화면 3024×1964이다. 내부 해상도·fps·품질 프로파일은 미결이다. 통합 메모리를 RAM·VRAM의 독립된 예산으로 중복 계산하지 않는다.
+기준 개발 장비는 MacBook Pro, M3 Pro CPU 12/GPU 18코어, 통합 메모리 18GB, 내장 화면 3024×1964이며 목표는 144fps 이상이다. 내부 해상도·품질·허용 초과율은 미결이다. 통합 메모리를 RAM·VRAM의 독립된 예산으로 중복 계산하지 않는다.
 
 ## 플랫폼별 검증 대상
 
@@ -39,12 +39,14 @@ GPU owner를 main 또는 지원을 확인한 worker에 두는 안을 비교한�
 | Asset IO | hash 요청·취소·진행·캐시 | fetch·CORS·quota·부분 다운로드 |
 | Storage | schema·checkpoint·완료 ack | IndexedDB/OPFS 후보·quota·eviction |
 | Transport | 입력·복제 메시지·대역폭 제어 | native UDP를 직접 쓴다는 전제 제거. WebTransport 등 비교 |
-| Script host | Engine API·module generation·직렬화 상태 | browser JS 또는 VM Wasm 후보·실행 제한 |
+| Script host | C# SDK 의미·module generation·직렬화 상태 | .NET Wasm 실행·Rust Wasm bridge·payload·배포 제한을 후속 검증 |
 | Audio | stream·bus·device 상태 | 사용자 활성화·resume·worker 경계 |
 | Text/Input | IME·clipboard·focus·touch·gamepad | DOM 접점과 네이티브 UI 렌더의 연결 |
 | Control | request ID·결과·진단 | 권한·다운로드·로컬 bridge |
 
 ## 버전과 배포
+
+[ADR-0003](../05-decisions/0003-csharp-and-native-gameplay.md)에 따라 PC는 C#/.NET 10 CoreCLR 동적 모드를 우선 설계한다. 웹·모바일의 다운로드형 모드는 현재 동일 방식 요구에서 제외한다. 같은 게임 기능·저장/API 의미라는 목표와 같은 런타임 binary·assembly 로딩 방식은 구분한다. 웹에서 C# 게임을 실행할 실제 경로는 미검증이며 TS 제품 지원으로 자동 대체하지 않는다. Rust 게임플레이의 native·Wasm 빌드도 플랫폼별 의존성 검증이 필요하다.
 
 소스형 오픈소스 엔진, 설치 가능한 네이티브 산출물, 웹 배포를 설계한다. engine version, 공개 API, script API, asset cook version, world save schema, network protocol을 별도 식별자로 manifest에 둔다. 모든 호환성을 엔진 버전 문자열 하나로 판정하지 않는다.
 
@@ -52,4 +54,4 @@ GPU owner를 main 또는 지원을 확인한 worker에 두는 안을 비교한�
 
 ## 미결 사항
 
-초기 브라우저·최소 버전, 외부 iframe, 기능·화질 동등성, 내부 해상도·fps, 웹 script backend·저장·전송 gateway, 어댑터별 최소 기술 실험이 필요하다.
+초기 브라우저·최소 버전, 외부 iframe, 기능/API 동등성 검증 범위, 내부 해상도·품질·144fps 부하 계약, 웹 C# host·저장·전송 gateway, 어댑터별 최소 기술 실험이 필요하다.

@@ -54,8 +54,12 @@ Rust safe 코드·테스트 한 번만으로 모든 race 부재를 증명했다�
 | V-011 | 한글 IME·게임패드·긴 UI·DPI | 실제 입력·focus·읽기·가상화·로딩 중 동작 |
 | V-012 | 캐릭터·pose·판정·오디오·경로 | event 중복/누락·음 끊김·경로 버전·조작 지연 계약 |
 | V-013 | HTML/Wasm·native export | 깨끗한 배포·최초 로드·version·저장/API 의미 동일 |
+| V-014 | 실행 중 오토파일럿 조작·검증 | 같은 session 유지·실제 입력 경로·조건/시간·server 적용·관련 frame 증거·취소 입력 해제 |
+| V-015 | C#/Rust 게임플레이·C++ 어댑터 | 공통 schema/명령/등록·ABI layout·allocator·타깃 진단·Rust 재빌드·C# 반복 reload |
 
 각 workload의 입력량·budget 숫자는 W1에서 채운다. 단순히 부하를 줄여 frame만 유지하고 지형·유체 결과가 무기한 밀리면 불합격이다. 렌더 응답성·simulation tick·스트리밍 처리량을 함께 측정한다.
+
+V-005·014·015의 상세 인수는 [SDK](../03-architecture/gameplay-and-mod-sdk.md)와 [오토파일럿](../03-architecture/autopilot-and-live-testing.md)을 따른다. 지원 edit 적용, 전체 모듈 교체, 일반 테스트 요청을 구분한다. native DLL hot-reload는 초기 합격 조건에 넣지 않는다.
 
 ## CI의 실제와 미래
 

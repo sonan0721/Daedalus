@@ -10,8 +10,8 @@
 | RSK-04 | 전체 ECS 복제 또는 잘못된 2slot 덮어쓰기 | 복사 비용·데이터 경쟁·잘못된 화면 | 최소 extract·불변 게시·독자 수명 모델 | R04 |
 | RSK-05 | ECS·Rayon·Jolt가 각자 full-core pool 사용 | CPU 경쟁·tick/UI 지연 | 프로세스 실행 예산·job adapter·우선순위·trace | R03·R04 |
 | RSK-06 | Web 공유 메모리·GPU 소유·host 조건 미고려 | 웹 멀티스레드·export 실패 | browser/worker·배포 계약·최소 타깃 실험 | R05 |
-| RSK-07 | C# AOT 또는 native/browser script 차이를 늦게 발견 | reload·모드·배포 경로 재설계 | C#/TS/Luau·개발/배포 실행 비교·conformance | R03·R05 |
-| RSK-08 | VM GC·무한 script·긴 host 함수 | tick 과부하·취소 불가 | VM 소유·중단·배치 API·메모리 한도·오류 시험 | R03·R04 |
+| RSK-07 | C# PC CoreCLR과 후속 web/mobile 실행·패키징 차이를 늦게 발견 | SDK·모드·배포 경로 재설계 | PC 동적 모드와 공통 게임 의미를 분리·native host 배포 검증·플랫폼 conformance | R03·R05 |
+| RSK-08 | managed GC/JIT·무한 script·긴 native host 함수 | tick 과부하·취소 불가 | 등록된 실행·협조 취소·batch·allocation 관측·신뢰 경계·오류 시험 | R03·R04 |
 | RSK-09 | mesh·light·collider·save가 서로 다른 revision | 틈·빛 잔상·통과·저장 불일치 | 작업 입력 revision·경계·apply 검증·안전 정책 | R06 |
 | RSK-10 | 유체 병렬 destination 경쟁·경계 중복 | 질량 생성/소멸·순서별 결과 변화 | reference solver·보존·capacity·결정적 transfer | R06 |
 | RSK-11 | UI를 Taffy만으로 끝낸다고 가정 | 텍스트·IME·focus·접근성 누락 | UI 계층별 명세·실제 입력·Web 어댑터 | R07 |
@@ -24,6 +24,9 @@
 | RSK-18 | 공개 에셋·Spine·SDK 조건을 엔진 라이선스로 덮음 | 재배포·기여·포팅 제한 | provenance·별도 조건·비공개 SDK 경계 | R03·R05·R07 |
 | RSK-19 | AI 출력의 그럴듯한 API·성능·문서 오류 | 빌드 실패·허위 지원·설계 부채 | 1차 자료·리뷰·실제 명령·구현/계획 구분 | 전 단계 |
 | RSK-20 | 불신 PR CI에 과한 권한·임의 실행 | 저장소·credential 노출 | 최소 권한·Action SHA 고정·PR용 검사·비밀 분리 | R01·릴리스 |
+| RSK-21 | ALC를 sandbox·강제 종료 수단으로 오해하거나 참조 회수 실패 | 모드 권한 오해·반복 reload 누수·hung system | 신뢰한 in-process 플러그인 계약·협조 취소·세대/참조 추적·격리 별도 설계 | R03·R04 |
+| RSK-22 | Rust/C++ ABI·allocator·함수 포인터 수명 혼합 | crash·메모리 오류·타깃 호환 실패 | Rust 빌드형 등록·native hot-reload 제외·타깃 C ABI·어댑터 검증 | R03·R04 |
+| RSK-23 | 오토파일럿의 debug 조작·입력 수락·오래된 화면을 성공으로 간주 | 실제 플레이·서버 회귀 누락 | 정상 입력 경로·server ack·적용 tick/snapshot/frame 연결·취소 시험 | R04·R06 |
 
 ## 변경과 대응
 

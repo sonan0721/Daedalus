@@ -6,6 +6,7 @@
 - The current stage is research and architecture. Write or update the relevant Markdown specification before implementation. Do not start engine runtime implementation until the user requests that stage.
 - Do not add sample games, game clones, or demo projects. Minimal engine test fixtures may be proposed with an explicit validation purpose.
 - The engine is independent; reusable libraries such as ECS, GPU abstraction, physics, and layout are candidates, not permission to fork an entire engine by default.
+- Follow [ADR-0003](docs/05-decisions/0003-csharp-and-native-gameplay.md): Rust core, C++ via explicit adapters, C# 14/.NET 10 LTS/CoreCLR as the main gameplay/PC mod SDK, and build-time Rust gameplay. C# supports the planned reload path; native hot-reload and a second scripting language are outside the initial contract. These are design decisions, not implemented capabilities.
 - Read [the documentation index](docs/README.md), [the charter](docs/00-vision/project-charter.md), and [the answer log](docs/01-discovery/answer-log.md) before planning changes.
 
 ## Coding delegation

@@ -30,7 +30,7 @@ Taffy는 레이아웃 계산 후보다. 완성 UI에는 텍스트·입력·포�
 | Render | 배칭·clip/scissor·text·image·custom material·alpha·layer |
 | Accessibility | 의미 정보와 OS/web 접근성 접점. 상세 지원 수준 후속 |
 
-TSX는 TS를 고를 때의 작성 방식 후보이며 필수 프레임워크가 아니다. C#·Luau를 고르면 동일 view 의미를 다른 선언 API로 제공할 수 있다. JSX 변환이 React runtime 전체 채택을 뜻하지 않는다.
+C# 선택에 따라 view schema와 C# 선언 API를 기본 작성 경로로 설계한다. Rust 게임플레이도 같은 view 의미를 사용할 수 있다. 구체 API·생성 도구는 미결이며 TSX·React runtime을 필수 의존성으로 추가하지 않는다. [SDK](gameplay-and-mod-sdk.md)
 
 ## 로딩 중 상호작용 계약
 

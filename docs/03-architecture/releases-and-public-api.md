@@ -4,7 +4,7 @@
 
 ## 배포할 대상
 
-이 저장소는 엔진 소스·문서·도구·테스트만 포함한다. 장기 산출물 후보는 Rust 엔진 패키지, 개발자 CLI, script SDK·타입/분석 정의, native runtime/package 도구, web export template·HTML/JS/Wasm·cooked asset manifest, GPU 없는 dedicated server이다.
+이 저장소는 엔진 소스·문서·도구·테스트만 포함한다. 장기 산출물 후보는 Rust 엔진 패키지·게임플레이 등록 API, 개발자 CLI, C# SDK·분석/생성 도구, native runtime/package 도구, web export template·HTML/JS/Wasm·cooked asset manifest, GPU 없는 dedicated server이다.
 
 현재 게임 프로젝트나 export 파일을 생성하지 않는다. 향후 엔진이 만든 사용자의 게임 산출물과 엔진 자체 릴리스도 구분한다.
 
@@ -14,6 +14,7 @@
 | --- | --- |
 | Engine release | 소스·빌드·공개 API의 호환 수준은? |
 | Script API | module이 요구하는 타입·command·행동 의미가 같은가? |
+| Native bridge/SDK | C ABI·schema·CPU/OS와 빌드형 Rust crate API의 호환 조건은? |
 | Asset cook | 기존 변환 자원을 재사용할 수 있는가? |
 | World schema | 과거 저장을 읽고 migration 가능한가? |
 | Network protocol | 해당 client/server가 같은 세션에 들어갈 수 있는가? |
@@ -28,6 +29,8 @@ SemVer·pre-release·실험 API 표시·deprecation 기간은 구현 전 ADR로 
 멀티스레드 build가 필요한 cross-origin isolation·MIME·압축·캐시 조건을 사전 검사하고, 지원하지 않는 환경은 진단한다. “파일이 만들어졌다”와 “해당 브라우저·서버에서 실행 검증됐다”를 구분한다. local preview·자동 브라우저 smoke·깨끗한 캐시 첫 로드를 인수 절차에 포함한다.
 
 웹·설치형은 기능·저장 의미·공식 script API를 유지한다. 화질 설정·내부 해상도·그림자·effect 비용은 기기별 profile로 조정할 수 있다. profile 변경이 gameplay 유체·충돌·서버 권한 의미를 바꾸지 않게 한다.
+
+PC 다운로드형 C# 모드, Rust 게임플레이의 재빌드, 웹에 포함되는 게임 코드의 배포는 다른 산출물 계약이다. PC 동적 모드 host에 Native AOT를 기본 적용하지 않는다. 정확한 runtime 동봉·servicing·SDK patch·서명은 후속 BOM/패키징 조사로 결정한다. [SDK 상세](gameplay-and-mod-sdk.md)
 
 ## 공개 API와 기여
 

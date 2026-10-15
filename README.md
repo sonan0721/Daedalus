@@ -8,6 +8,18 @@ Daedalus aims to combine a Rust core, responsive loading and streaming, modern G
 
 Run the current engine CLI with `cargo run -p daedalus-cli -- inspect --entities 2`. Build and validation commands, GPU requirements, and known limits are in [TESTING.md](TESTING.md). Module progress is tracked in the [implementation checklist](docs/04-plan/implementation-checklist.md).
 
+## Build a local CLI package
+
+With the pinned Rust toolchain and Python 3.11 or newer, run:
+
+```sh
+python3 scripts/package_cli.py
+```
+
+This builds a native release CLI with GPU capture enabled, verifies the extracted executable, and stores a versioned archive, build manifest, dependency notices, and checksum under ignored `dist/local/`. Each build records its source commit and whether the working tree was dirty. The initial packaging targets are macOS arm64 and Linux x64, built on their respective native hosts.
+
+The release workflow builds packages for PR inspection. A future `v<CLI version>` tag on main history triggers GitHub Release publication after both platform builds succeed. No public release has been issued. The initial CLI archive does not bundle the C# SDK, .NET runtime, or game export tools. See the [CLI build and release contract](docs/03-architecture/cli-build-and-release.md) for boundaries.
+
 ## Direction
 
 - Treat 2D tile simulation, 3D voxel streaming, and general engine capabilities as first-class design concerns.

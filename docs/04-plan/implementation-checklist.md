@@ -19,7 +19,7 @@
 | E05 / I05 | 권한 command·영속화·세션 transport·관심 영역 | 두 client·중복/손실·저장 복원·30명 부하 증거 | 대기 |
 | E06 / I08 | 2D/3D 물리·캐릭터·오디오 | 실제 backend 통합·접지/충돌·audio callback/stream·복귀 | Jolt/Rapier primitive·Kira PCM 10건+장치 probe 확인. 캐릭터·stream·ECS 연결 후속 |
 | E07 / I07·I08 | UI·텍스트/IME·애니메이션·내비·렌더 효과 | 실제 입력·경로 갱신·pose·시각/행동 fixture | 대기 |
-| E08 / I09 | AI 친화적 scene/asset/cutscene/terrain 원본·CLI/MCP·native/web export | schema 검증·실행 중 조작·재현 캡처·깨끗한 배포 | scene validate/patch·지속 CLI 구현. 로컬 package/태그 workflow 진행, MCP·web 후속 |
+| E08 / I09 | AI 친화적 scene/asset/cutscene/terrain 원본·CLI/MCP·native/web export | schema 검증·실행 중 조작·재현 캡처·깨끗한 배포 | scene validate/patch·지속 CLI·로컬 package·두 native PR dry build 확인. tag publish·MCP·web 후속 |
 | E09 / I10 | 통합·회귀·장시간·품질/성능·릴리스 | 검증 matrix·실측 artifact·지원 상태·미완료 목록 | 대기 |
 
 작업 이름은 모듈별 추적 단위이며 한 번에 모두 병렬 편집하지 않는다. 선행 API가 필요한 작업은 계약을 먼저 공유하고 파일 소유권을 분리한다. 세부 체크는 실제 구현을 리뷰하면서 이 표 아래에 추가한다.

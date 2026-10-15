@@ -1,6 +1,6 @@
 # Daedalus CLI 로컬 빌드·태그 릴리스
 
-상태: 사용자 확정 배포 방향 + 구현 계약 · 2026-10-15
+상태: 로컬 package·native PR dry build 확인, 태그 publish 미실행 · 2026-10-16
 
 ## 사용자 요구
 
@@ -12,13 +12,17 @@
 
 Rust 의존성의 package ID·버전·license 선언·source checksum과 배포 package 안의 license/notice 텍스트를 inventory와 함께 모은다. metadata의 CLI 도달 graph와 feature/target 조건을 기록하며, 보수적인 포함 목록을 실제 binary symbol 수준 SBOM이라고 부르지 않는다. 빠진 license 원문은 공개 tag package에서 명시적 오류로 처리하고, arbitrary 사용자 경로를 자동 수집하지 않는다. 자동 수집이 모든 법적 의무 검토를 대신한다고 주장하지 않는다.
 
+2026-10-16 보완: 고정된 배포 crate와 upstream commit 모두 별도 license 파일 없이 Cargo의 표준 SPDX 선언만 제공하는 경우가 있다. Cargo는 `license`를 package가 배포되는 라이선스의 SPDX expression으로 정의한다. 이런 확인된 package는 checksum·선언 파일의 pinned URL·SPDX 식별자를 묶어 명시적으로 등록하고, 고정한 공식 SPDX license-list-data의 해당 reference text를 함께 제공할 수 있다. 이를 `declared_spdx_reference`로 표시해 upstream 원문과 구분하며 author/year/copyright holder를 만들어 채우지 않는다. 임의 expression의 자동 추정·미등록 누락·버전 변경은 여전히 오류다. 이는 알려진 선언을 보존하는 packaging 정책이며 법적 적합성 보증이 아니다. [Cargo license 의미](https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields), [공식 SPDX 목록](https://github.com/spdx/license-list-data)
+
 기본 CPU 제어 경로와 capture/window feature를 manifest에 기록한다. 릴리스 CLI의 capture feature는 실제 renderer를 포함해야 하고 GPU 부재의 오류 계약을 유지한다. 실행 파일 하나를 배포했다고 C# SDK·CoreCLR runtime·외부 에셋·게임 export가 모두 포함됐다고 하지 않는다. 초기 archive의 실제 포함 범위를 사용 안내에 명시한다.
 
 ## 버전과 로컬 관리
 
-`daedalus --version`은 실제 crate SemVer를 표시한다. build manifest에는 schema version, CLI version, exact Git commit, dirty 여부, target triple, Cargo profile, feature 목록, Rust toolchain, binary SHA-256, build 식별자를 남긴다. 조회하지 못한 값은 임의로 채우지 않는다. dirty 빌드는 로컬에서 허용하되 공개 릴리스 후보와 구분한다.
+`daedalus --version`은 실제 crate SemVer를 표시한다. build manifest에는 schema version, CLI version, exact Git commit, dirty 여부, target triple, Cargo profile, feature 목록, Rust toolchain, binary SHA-256, build 식별자를 남긴다. 조회하지 못한 값은 임의로 채우지 않는다. build 전후 HEAD를 비교해 변경 시 중단하며 dirty 여부는 양쪽 결과를 합친다. dirty 빌드는 로컬에서 허용하되 공개 릴리스 후보와 구분하고 tag 후보는 build 후에도 clean이어야 한다. 이는 source snapshot이나 byte-for-byte 재현 빌드 증명과 다르다.
 
-로컬 packaging 명령은 `--locked`로 native release build를 수행하고 격리된 ignored 디렉터리 아래 산출물을 보관한다. 여러 빌드를 식별할 수 있게 이름·manifest를 연결하고 기존 산출물을 조용히 덮어쓰지 않는다. 프로젝트 source·로그·토큰·개인 경로·임의 사용자 파일을 archive에 포함하지 않는다. 빌드물은 Git에 커밋하지 않는다.
+로컬 packaging 명령은 `--locked`로 native release build를 수행하고 격리된 ignored 디렉터리 아래 산출물을 보관한다. 여러 빌드를 식별할 수 있게 이름·manifest를 연결하고 기존 산출물을 조용히 덮어쓰지 않는다. archive entry와 manifest에는 개인 경로를 쓰지 않고 프로젝트 source·로그·토큰·임의 사용자 파일을 자동 포함하지 않는다. 빌드물은 Git에 커밋하지 않는다.
+
+배포용 Rust compiler 경로는 `--remap-path-prefix`로 repository·Cargo/Rustup cache·build home을 중립 prefix에 대응시킨다. 사용자의 encoded Rust flags 우선순위와 공백 구분 `RUSTFLAGS` 의미를 보존해 build subprocess에만 적용하고 실제 개인 경로는 manifest에 쓰지 않는다. 이 방식은 Cargo config의 `rustflags`보다 환경 변수를 우선하므로 별도 config flags가 필요한 사용자는 environment로 전달한다. compiler 생성 경로를 정규화하는 범위이며 외부 도구·임의 문자열·서명 정보까지 전부 제거한다는 보장은 아니다. [Rust 경로 remapping](https://doc.rust-lang.org/rustc/remap-source-paths.html), [Cargo flags 우선순위](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags)
 
 archive에서 꺼낸 실행 파일로 `--version`과 CPU inspect smoke를 실행한다. macOS 실행 권한도 보존한다. SHA-256은 무결성 비교이며 code signing/notarization을 대신하지 않는다. 초기 unsigned 배포와 서명된 사용자 배포의 품질 게이트를 구분한다. SDK/framework-dependent host의 부속 packaging은 E04 결과와 연결해 후속 확장한다.
 
@@ -38,5 +42,7 @@ PR 또는 수동 build 검증은 읽기 권한으로만 수행하며 공개 Rele
 4. 최초 실제 태그 발행 시에만 Release asset의 플랫폼·checksum·다운로드 후 실행까지 기록한다. 현재 공개 Release는 만들지 않는다.
 
 동일 소스를 동일 명령으로 다시 빌드하는 절차와 byte-for-byte reproducible build 증명은 다르다. 처음부터 후자를 달성했다고 표시하지 않는다. 자동 업데이트·패키지 매니저·Homebrew tap·코드 서명은 이 초기 작업의 완료 주장에 포함하지 않는다.
+
+실제 실행 결과와 미검증 범위는 [E08 작업 기록](../06-worklog/2026-10-16-cli-packaging.md)에 남긴다.
 
 근거: [GitHub push 이벤트](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push), [hosted runner 목록](https://docs.github.com/en/actions/reference/runners/github-hosted-runners), [gh release create](https://cli.github.com/manual/gh_release_create), [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html). 조회일2026-10-15. workflow와 실제 실행 로그가 최종 플랫폼 근거다.

@@ -1,0 +1,69 @@
+# 엔진 구현 체크리스트
+
+상태: 사용자 구현 착수 승인 · 2026-10-15 · 모든 코딩 Luna xhigh
+
+## 착수와 검증 원칙
+
+사용자가 설계 문서를 기반으로 엔진 구축을 시작하도록 요청했다. 기존 전체 설계 게이트를 통과했다고 표시하지 않고, 모듈별 계약·최소 통합·오류 시험·실제 실행 근거를 쌓는다. 엔진 전용 저장소이며 샘플 게임은 추가하지 않는다. 기능 검증 목적이 명시된 작은 fixture는 허용한다.
+
+실제 빌드 가능한 구현, 소스만 있는 미검증 구현, 아직 계획뿐인 기능을 구분한다. 상용 참조 게임과 동등한 품질·144fps·모든 플랫폼 지원을 구조만으로 완료 처리하지 않는다. 전용 서버와 GPU offscreen을 구분한다.
+
+## 구축 단위
+
+| 작업 | 산출물·책임 | 주요 종료 증거 | 현재 |
+| --- | --- | --- | --- |
+| E01 / I01 | Cargo workspace, core·ECS·fixed clock·명령·유한 task·snapshot·Rust 시스템 등록 | stale ID/revision·포화·취소·job 실패·느린 worker 중 표시 소비·shutdown 시험 | 병렬 ECS·CPU 예산 진단·지속 JSONL 제어 검증. 실제 창/스트리밍 통합 후속 |
+| E02 / I02·I04 | wgpu renderer, 실제 offscreen capture, native window/input, 독립 presentation | 실제 GPU PNG·상태 manifest·resize·로딩 중 UI/입력 경로 | Metal·CLI capture 확인. 창은 compile/CPU 검사·통합 후속 |
+| E03 / I06 | voxel·tile·fluid·light·terrain revision과 비동기 파생 데이터 | 경계·greedy mesh·질량 보존·광원 제거·stale 결과 시험 | 초기 CPU 알고리즘18건 통과. async/영역 연결 후속 |
+| E04 / I03 | C# SDK·CoreCLR 연결·module 교체·빌드형 Rust 게임플레이 | 실제 C#→Rust 명령·상태 보존·실패 복구·참조 회수 | bridge7건·.NET2 scenario 통과. transform SDK·명시적 module 교체 구현, 일반 API·자동 build 후속 |
+| E05 / I05 | 권한 command·영속화·세션 transport·관심 영역 | 두 client·중복/손실·저장 복원·30명 부하 증거 | 대기 |
+| E06 / I08 | 2D/3D 물리·캐릭터·오디오 | 실제 backend 통합·접지/충돌·audio callback/stream·복귀 | Jolt/Rapier primitive·Kira PCM 10건+장치 probe 확인. 캐릭터·stream·ECS 연결 후속 |
+| E07 / I07·I08 | UI·텍스트/IME·애니메이션·내비·렌더 효과 | 실제 입력·경로 갱신·pose·시각/행동 fixture | 대기 |
+| E08 / I09 | AI 친화적 scene/asset/cutscene/terrain 원본·CLI/MCP·native/web export | schema 검증·실행 중 조작·재현 캡처·깨끗한 배포 | scene validate/patch·지속 CLI 구현. 로컬 package/태그 workflow 진행, MCP·web 후속 |
+| E09 / I10 | 통합·회귀·장시간·품질/성능·릴리스 | 검증 matrix·실측 artifact·지원 상태·미완료 목록 | 대기 |
+
+작업 이름은 모듈별 추적 단위이며 한 번에 모두 병렬 편집하지 않는다. 선행 API가 필요한 작업은 계약을 먼저 공유하고 파일 소유권을 분리한다. 세부 체크는 실제 구현을 리뷰하면서 이 표 아래에 추가한다.
+
+## E01 계약
+
+- 권한 ECS는 simulation 실행 영역이 소유한다. Bevy ECS는 부품으로 사용하고 전체 Bevy 엔진은 도입하지 않는다.
+- entity handle은 session/world·generation을 검사한다. 명령에는 ID·대상·revision·결과를 둔다.
+- 고정 tick은 설정값이다. 초기 개발 설정은 60Hz이며 144fps presentation 목표와 구분한다. 따라잡기 횟수·초과를 드러낸다.
+- 배경 CPU 작업은 입력을 소유하고 결과를 반환한다. 유한 admission·결과 credit·try 제출·협조 취소·실패 결과를 제공한다. blocking I/O를 같은 CPU pool에 넣지 않는다.
+- snapshot은 필요한 데이터만 불변 게시한다. 느린 소비자 때문에 simulation이 동기 대기하지 않으며 큐 상한과 게시 실패 의미를 정한다.
+- Rust gameplay는 공개 builder/system 등록 경로를 사용한다. 코어의 재빌드 경로이며 native hot-reload가 아니다.
+- 설정·trace·상태를 직렬화할 공통 계약을 둔다. 가짜 backend나 고정 성공 응답을 실제 엔진 기능으로 표시하지 않는다.
+
+## E02 계약
+
+- renderer는 live ECS를 직접 읽지 않고 렌더 입력을 소유한다. wgpu 버전은 설치 Rust와 실제 빌드 호환을 확인해 lock한다.
+- offscreen은 실제 GPU texture를 렌더하고 readback한다. no-adapter를 명시적 오류로 반환하며 검은 placeholder 이미지를 성공으로 반환하지 않는다.
+- viewport·camera·mesh·material·light의 작은 검증 장면은 엔진 테스트 fixture로만 제공한다. 게임 프로젝트는 만들지 않는다.
+- native OS event·presentation은 simulation/worker의 장기 작업 완료를 동기 대기하지 않는다. 표시와 캡처의 비용·실패는 분리한다.
+
+## E03·E08 초기 데이터 계약
+
+- 엔진 콘텐츠의 작은 직렬화 가능 데이터 모델을 `daedalus-content`에 둔다. scene은 schema version·stable ID·asset 참조·entity/component 목록과 revision을 갖고 중복 ID·누락 참조·잘못된 값·계층 cycle을 검증한다.
+- scene patch는 expected revision을 검사하고 전체 변경을 검증한 뒤 교체한다. 실패 시 기존 scene을 유지한다. 런타임 저장과 편집 원본의 역할을 구분한다.
+- 모델·텍스처 등 고밀도 데이터를 모두 JSON으로 바꾸지 않는다. AI가 읽는 식별자·참조·파라미터와 binary 자산·쿠킹 산출물을 분리한다.
+- voxel chunk는 정수 좌표·seed·generator version·data revision을 갖는다. greedy mesh는 방향·material·경계 이웃의 점유를 고려하고 오래된 작업 결과를 거부할 metadata를 보존한다.
+- 초기 타일 유체는 보존되는 정수량·cell capacity와 고정 입력에서 다음 상태를 계산한다. 경계 유출입·이중 적용·음수·용량 초과를 시험하며 무제한 활성 영역을 한 tick에 처리하지 않는다.
+- 초기 조명은 광원 제거 뒤에도 이전 빛이 남지 않는 reference 경로를 둔다. 대규모 incremental frontier 최적화는 검증 전 별도 상태로 남긴다.
+- 초기 경로 탐색은 점유 grid의 bounded/cancellable query다. 일반 3D navmesh·플랫포머 jump graph·군중 회피를 구현했다고 부르지 않는다. world revision과 결과 stale 여부를 전달한다.
+- 콘텐츠 라이브러리는 CPU·직렬화 계층이며 권한 ECS나 GPU 객체를 소유하지 않는다. 실제 async 생성·렌더·저장 연결은 통합 작업과 해당 시험으로 구분한다.
+
+## E04·E06 상세 계약
+
+C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-bridge.md), 실제 물리·오디오 연결은 [backend 계약](../03-architecture/physics-and-audio-runtime.md)을 따른다. 각 작업의 코드 시작 전 해당 소유자와 범위·버전·테스트를 공유한다. 물리·오디오·GUI·CoreCLR이 없어도 코어 CPU 검사는 실행 가능하게 모듈을 분리한다.
+
+## E01·E02·E08 실행 통합
+
+[실행·제어·표시 계약](../03-architecture/runtime-control-and-presentation.md)에 따라 process CPU 예산이 있는 병렬 ECS, 같은 세션의 bounded JSONL 제어, 콘텐츠 검증·실제 GPU capture CLI를 연결한다. 창은 macOS main thread에서 실행하고 simulation·worker 완료를 callback에서 기다리지 않는다. 첫 독립 라이브러리 커밋과 이 통합의 검증을 분리한다.
+
+## 기록할 근거
+
+각 작업에 실제 변경 파일·선택 버전·환경·명령·결과·artifact·남은 제한을 기록한다. 현재 실행 가능한 명령은 루트 TESTING에 갱신하고, CI와 테스트 코드는 Luna xhigh가 작성한다. 이 문서의 미완료 체크를 코드 파일 생성만으로 완료 처리하지 않는다.
+
+## E08 CLI 배포 후속
+
+사용자 추가 요구에 따라 [CLI 빌드·태그 릴리스](../03-architecture/cli-build-and-release.md)를 구현한다. 현재 로컬 versioned binary·manifest·checksum을 만들고 관리하며, future `v<version>` push 자동 배포를 구성한다. 지금 태그·공개 Release는 만들지 않는다. PR packaging·실제 태그 publish를 별도 근거로 기록한다.

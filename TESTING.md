@@ -1,6 +1,6 @@
 # Testing
 
-Daedalus is currently in the planning and design stage. The repository does not contain a runnable engine, so engine, renderer, platform, and game-runtime tests are not available yet. Do not treat a future test command as something contributors can run today.
+Daedalus has an early Rust engine workspace. Tests cover implemented contracts and small engine fixtures; they do not certify commercial game quality, 144 fps, or every planned platform. The [implementation checklist](docs/04-plan/implementation-checklist.md) separates working code from remaining integrations.
 
 ## Current checks
 
@@ -13,8 +13,85 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 
 The documentation checker verifies UTF-8 Markdown, local link targets, repository path boundaries, and use of an obsolete project label. Its unit tests cover link resolution, code masking, reference links, path traversal, and encoding/name errors. GitHub Actions runs these checks in the `docs` job on pull requests and pushes to `main`. It does not validate remote URLs, heading anchors, factual claims, or the whole CommonMark grammar; those need review or additional tools when relevant.
 
-## Engine checks later
+## Rust workspace checks
 
-When engine code is added, document the exact build and test commands alongside the code they cover. A useful test strategy can grow from focused unit tests and small engine fixtures to integration checks and platform-specific validation as those systems exist.
+The repository pins Rust 1.94.0, rustfmt, and Clippy in rust-toolchain.toml. Run:
 
-Fixtures and test scenes should exercise a narrow engine behavior and stay within the engine's test suite. They are different from sample games, demos, or cloned game projects; this repository is not accepting those projects at this stage. Do not add `cargo test`, renderer checks, GPU requirements, or runtime smoke tests to contributor instructions until the corresponding code and environment are present.
+```sh
+cargo check --workspace --all-features --locked
+cargo fmt --all --check
+cargo test --workspace --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+```
+
+The initial tests exercise generation/session handles, stale revisions, command saturation/deduplication, fixed-clock catch-up, task cancellation/panic/shutdown, snapshot retention, scene patch rollback, greedy-mesh boundaries, fluid conservation, light removal, and bounded occupancy paths. A 100,000-entity fixture checks ECS data and handles; it is not proof of zero races or frame-time performance.
+
+The ECS schedule now uses Bevy's parallel executor with an explicit process-global compute worker budget and a separate per-engine bounded Rayon pool. An integration test uses two compute workers to verify independent-system overlap and conflicting mutable-access serialization. Conflicting global-pool configurations return errors. Reported CPU totals are per-engine estimates, not a limit on every process, driver, physics, or audio thread. Snapshot publication and result polling use nonwaiting entry points, but the whole engine is not formally lock-free or wait-free.
+
+## Current CLI smoke
+
+```sh
+cargo run -p daedalus-cli -- inspect --entities 2
+cargo run -p daedalus-cli -- run --ticks 3 --entities 2
+cargo run -p daedalus-cli -- step --ticks 2
+cargo run -p daedalus-cli -- --version
+cargo run -p daedalus-cli -- version --json
+cargo run -p daedalus-cli -- serve
+```
+
+The first commands create bounded inspection sessions and do not initialize a GPU. `serve` keeps one real engine/session alive over stdin/stdout JSON Lines; its simulation advances through explicit `step` requests. A line has `protocol: 1`, `request_id`, and a nested `request` with a snake_case operation such as `spawn_transform`, `get_transform`, `set_transform`, `step`, `latest_snapshot`, or `exit`. Command acceptance is distinct from the applied outcomes returned by a step. Malformed/oversized input is isolated, outputs are bounded, and EOF shuts down the workers. This is local control, not the multiplayer server or an MCP implementation.
+
+`scene validate <input>` and `scene patch <input> <patch> <output>` use the real content schema and revisioned atomic patch validation. They do not yet instantiate arbitrary content components in the running ECS.
+
+An optional GPU CLI build is explicit:
+
+```sh
+cargo run -p daedalus-cli --features capture -- capture --output /tmp/daedalus-capture.png --width 320 --height 180
+```
+
+This captures the renderer's named material validation fixture, not a game or a general scene importer. The coordinator's recorded GPU adapter is Apple M3 Pro/Metal; no-adapter is an error.
+
+## Real GPU smoke
+
+The GPU test is ignored in the default suite so CPU CI does not silently depend on a graphics adapter. Run it explicitly:
+
+```sh
+cargo test -p daedalus-renderer --features test-fixtures --test gpu_capture -- --ignored --nocapture
+```
+
+It renders a small material/depth fixture through a real wgpu adapter, reads back 513×289 pixels with padded rows, writes a PNG in the system temporary directory, and decodes the pixels for validation. `DAEDALUS_RENDERER_CAPTURE_PATH` selects another output path. No adapter is an explicit failure in this requested test; a placeholder image is not a fallback.
+
+The native window path compiles and has bounded input/message queues, local camera controls, and an independent animated loading overlay. Interactive window behavior has not yet been manually verified. Mac Metal offscreen evidence does not establish browser, Windows, mobile, or console support.
+
+## Managed/native integration
+
+Use the pinned .NET SDK 10.0.402 with C# 14. `global.json` disables SDK roll-forward; ensure the intended `dotnet` is on PATH as described in [managed/README.md](managed/README.md).
+
+```sh
+cargo test -p daedalus-bridge --locked
+cargo build -p daedalus-bridge --locked
+dotnet build managed/Daedalus.slnx --configuration Release
+DAEDALUS_NATIVE_PATH="$PWD/target/debug/libdaedalus_bridge.dylib" \
+  dotnet run --no-build --project managed/Daedalus.ManagedHost --configuration Release -- --self-test
+DAEDALUS_NATIVE_PATH="$PWD/target/debug/libdaedalus_bridge.dylib" \
+  dotnet run --no-build --project managed/Daedalus.ManagedIntegrationTests --configuration Release
+```
+
+Linux uses `libdaedalus_bridge.so`. The coordinator verified 7 bridge tests, a warning-free Release managed build, the real Rust-backed self-test, and 2 integration scenarios covering state migration, staged failure rollback, cleanup, and repeated ALC collection. This is synchronous whole-module replacement with a transform SDK; automatic source compilation/watch, general gameplay APIs, MetadataUpdater edits, runtime distribution, and browser C# are not implemented. See the [E04 record](docs/06-worklog/2026-10-15-e04-managed.md).
+
+## Physics/audio integration
+
+The initial physics/audio adapters can be checked independently:
+
+```sh
+cargo test -p daedalus-physics -p daedalus-audio --locked -- --nocapture
+cargo test -p daedalus-audio inspect_native_default_output_device_without_playback --locked -- --ignored --nocapture
+```
+
+The coordinator verified 7 physics and 3 audio tests, plus the separately requested hardware probe on this Mac (48 kHz stereo). The probe does not open a stream or play audio. These tests exercise actual Jolt/Rapier bodies and Kira PCM, not completed character, terrain-collider, audio streaming, or ECS integration. See the [E06 record](docs/06-worklog/2026-10-15-e06-physics-audio.md). Native dependencies and source-build requirements are in the [dependency baseline](docs/02-research/implementation-dependency-baseline.md); Linux CPAL builds need ALSA development headers.
+
+## Evidence and remaining coverage
+
+On 2026-10-15 the coordinator independently ran the initial all-feature suite (50 passed), expanded suite (72 passed), and post-review ten-crate suite (80 passed). Two hardware tests are ignored by default: GPU capture and output-device probe; both passed separately on this Mac. Formatting and all-target/all-feature Clippy with warnings denied passed. Documentation checker tests remain 8. These are recorded checkpoints, not evidence for every later change. See the [integration record](docs/06-worklog/2026-10-15-runtime-integration.md).
+
+Fixtures stay inside the engine test suite and do not grow into sample games. No web conformance, advanced renderer quality/performance, 30-player server, complete gameplay SDK, full UI/IME, complete physics/audio behavior, or long-running stability result is implied by the foundation checks. Add executable commands and evidence here as those integrations become real.

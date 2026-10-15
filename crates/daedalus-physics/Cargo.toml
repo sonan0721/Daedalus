@@ -1,0 +1,16 @@
+[package]
+name = "daedalus-physics"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Safe, engine-facing 2D and 3D physics adapters for Daedalus"
+
+[dependencies]
+daedalus-core = { path = "../daedalus-core" }
+oxijolt = { version = "=1.1.0", default-features = true }
+rapier2d = { version = "=0.36.1", default-features = false, features = ["dim2", "f32", "std", "block-solver"] }
+
+[lints]
+workspace = true

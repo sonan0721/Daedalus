@@ -1,0 +1,20 @@
+[package]
+name = "daedalus-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless Daedalus simulation runtime, fixed clock, and gameplay scheduling"
+
+[dependencies]
+bevy_ecs.workspace = true
+bevy_tasks.workspace = true
+daedalus-core = { path = "../daedalus-core" }
+daedalus-tasks = { path = "../daedalus-tasks" }
+daedalus-world = { path = "../daedalus-world" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

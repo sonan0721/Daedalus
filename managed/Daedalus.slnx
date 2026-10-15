@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="Daedalus.ManagedSdk/Daedalus.ManagedSdk.csproj" />
+  <Project Path="Daedalus.ManagedHost/Daedalus.ManagedHost.csproj" />
+  <Project Path="Daedalus.ManagedIntegrationTests/Daedalus.ManagedIntegrationTests.csproj" />
+  <Project Path="fixtures/Daedalus.Fixture.V1/Daedalus.Fixture.V1.csproj" />
+  <Project Path="fixtures/Daedalus.Fixture.V2/Daedalus.Fixture.V2.csproj" />
+  <Project Path="fixtures/Daedalus.Fixture.Broken/Daedalus.Fixture.Broken.csproj" />
+</Solution>

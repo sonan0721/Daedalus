@@ -1,12 +1,14 @@
 # 엔진 공개 API·릴리스·웹 내보내기
 
-상태: 배포·오픈소스 버전 관리 설계 제안. 릴리스 미발행 · 2026-10-15
+상태: CLI 로컬 빌드·후속 태그 자동 배포 사용자 확정. 나머지 배포 설계·릴리스 미발행 · 2026-10-15
 
 ## 배포할 대상
 
 이 저장소는 엔진 소스·문서·도구·테스트만 포함한다. 장기 산출물 후보는 Rust 엔진 패키지·게임플레이 등록 API, 개발자 CLI, C# SDK·분석/생성 도구, native runtime/package 도구, web export template·HTML/JS/Wasm·cooked asset manifest, GPU 없는 dedicated server이다.
 
 현재 게임 프로젝트나 export 파일을 생성하지 않는다. 향후 엔진이 만든 사용자의 게임 산출물과 엔진 자체 릴리스도 구분한다.
+
+사용자가 CLI를 로컬에서 빌드·버전 관리하고 향후 release tag가 GitHub Release 배포를 유발하도록 요청했다. [CLI 빌드·릴리스 계약](cli-build-and-release.md)에 따라 구성하며, 현재 태그 생성·공개 발행은 하지 않는다.
 
 ## 버전 축
 
@@ -20,7 +22,7 @@
 | Network protocol | 해당 client/server가 같은 세션에 들어갈 수 있는가? |
 | Content/generator | 같은 seed·asset ID가 같은 내용을 뜻하는가? |
 
-SemVer·pre-release·실험 API 표시·deprecation 기간은 구현 전 ADR로 결정한다. 아직 안정 API·하위 호환 보장을 선언하거나 빈 엔진에 정식 버전을 발행하지 않는다.
+CLI는 crate SemVer와 일치하는 `v<version>` 태그를 초기 규칙으로 쓴다. 나머지 API 축·실험 API 표시·deprecation 기간은 별도 결정으로 유지한다. 아직 안정 API·하위 호환 보장을 선언하거나 정식 릴리스를 발행하지 않는다.
 
 ## 웹 export의 사용자 경험
 

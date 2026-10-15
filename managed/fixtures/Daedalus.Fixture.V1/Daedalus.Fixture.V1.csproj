@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Daedalus.Fixture.V1</AssemblyName>
+    <RootNamespace>Daedalus.Fixture.V1</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Daedalus.ManagedSdk/Daedalus.ManagedSdk.csproj" Private="false" />
+  </ItemGroup>
+</Project>

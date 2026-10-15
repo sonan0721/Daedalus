@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping shape Daedalus. The project is in its planning and design stage: it is intended to become a game engine, but there is no runnable engine yet. Read the [project overview](README.md) first, then open an issue or pull request with the question, requirement, or change you have in mind.
+Thanks for helping shape Daedalus. Engine implementation has started from the documented architecture; the runtime and several subsystems are still early and incomplete. Read the [project overview](README.md), [implementation checklist](docs/04-plan/implementation-checklist.md), and relevant subsystem contract before opening an issue or pull request.
 
 The repository is engine-only. Do not add sample game projects, game demos, or cloned games. Small fixtures and test scenes are welcome later when they exercise a specific engine behavior and remain part of the engine's test suite; they should not grow into playable sample projects.
 
@@ -22,11 +22,14 @@ AI-assisted contributions should be easy to inspect: describe generated or subst
 
 ## Local checks
 
-The current repository has documentation checks only. Run them from the repository root:
+Run the documented checks from the repository root:
 
 ```sh
 python3 scripts/check_docs.py
 python3 -m unittest discover -s scripts -p 'test_*.py'
+cargo fmt --all --check
+cargo test --workspace --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
 See [TESTING.md](TESTING.md) for what these commands cover and what remains planned. For security reports, follow [SECURITY.md](SECURITY.md). Please follow the expectations in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

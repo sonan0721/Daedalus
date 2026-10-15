@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Daedalus.ManagedSdk</AssemblyName>
+    <RootNamespace>Daedalus.ManagedSdk</RootNamespace>
+  </PropertyGroup>
+</Project>

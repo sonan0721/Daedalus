@@ -1,6 +1,8 @@
 # CLI·MCP·관측 가능성
 
-상태: AI 친화적인 엔진 제어 계약 초안. 아래 engine 명령은 아직 미구현 · 2026-10-15
+상태: 전체 AI 제어 계약 초안 + 초기 CLI 일부 구현. MCP 미구현 · 2026-10-15
+
+현재 실제 CLI에는 bounded inspect/run/step, 지속 JSONL `serve`, version/capability 조회, scene validate/patch, 선택 feature의 실제 GPU fixture capture가 있다. 실행 명령은 루트 [TESTING](../../TESTING.md)과 [실행 통합 계약](runtime-control-and-presentation.md)을 따른다. 아래 전체 명령군 중 구현하지 않은 기능까지 지원한다고 해석하지 않는다. JSONL 로컬 제어는 MCP protocol 구현과 구분한다.
 
 ## 공통 제어 서비스
 

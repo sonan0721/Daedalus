@@ -1,6 +1,6 @@
 # GitHub 운영과 현재 검증 절차
 
-상태: 2026-10-15 실제 저장소 설정 확인. 엔진 테스트·릴리스는 아직 없음.
+상태: 2026-10-15 실제 저장소 설정·초기 엔진 CI 확인. 공개 릴리스 미발행.
 
 ## 공개 저장소
 
@@ -27,6 +27,10 @@ git diff --check
 ```
 
 현재 문서 검사와 검사기 테스트 8건을 실행한다. 문서 CI가 통과했다고 Rust 엔진·GPU·웹·30명·144fps가 검증된 것은 아니다. [최초 CI 실행](https://github.com/sonan0721/Daedalus/actions/runs/38741106943)은 성공했다.
+
+엔진 구현 PR#3의 첫 Rust workspace CI도 [성공](https://github.com/sonan0721/Daedalus/actions/runs/38751689468)했다. 이후 커밋의 검사 상태는 해당 PR·Actions에서 다시 확인한다. 실제 엔진·GPU·managed 검증 명령은 루트 [TESTING](../../TESTING.md)에 유지한다. 필수 보호 체크의 현재 이름은 위에 별도로 기록하며, 새 workflow를 추가한 사실만으로 보호 설정이 바뀌었다고 하지 않는다.
+
+CLI 로컬 package와 후속 tag 기반 공개 배포는 [배포 계약](../03-architecture/cli-build-and-release.md)에 따라 추가한다. 현재 태그와 GitHub Release는 생성하지 않는다. PR dry build artifact는 공개 릴리스와 구분한다.
 
 CI는 read-only contents 권한으로 실행하고 checkout Action을 확인한 commit SHA에 고정했다. 공개 PR이 권한 있는 `pull_request_target` 경로에서 코드를 실행하는 구성을 사용하지 않는다. [GitHub Actions 공식 보안 문서](https://docs.github.com/en/actions/reference/security/secure-use)
 

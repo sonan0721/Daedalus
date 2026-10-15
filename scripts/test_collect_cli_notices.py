@@ -76,7 +76,7 @@ class NoticeCollectorTests(unittest.TestCase):
             "manifest_path": str(self.cli_manifest),
         }
         packages = [root_package]
-        nodes = [{"id": root_id, "features": ["capture", "default"], "deps": []}]
+        nodes = [{"id": root_id, "features": ["capture", "default", "window"], "deps": []}]
         for name in ("foo_bar", "foo-bar", "unreachable"):
             package_id = f"registry+https://github.com/rust-lang/crates.io-index#{name}@1.0.0"
             package = {
@@ -119,7 +119,7 @@ class NoticeCollectorTests(unittest.TestCase):
         inventory = json.loads(artifacts.inventory_path.read_text(encoding="utf-8"))
         self.assertEqual(inventory["dependency_count"], 2)
         self.assertEqual(inventory["target_triple"], TARGET)
-        self.assertEqual(inventory["requested_features"], ["daedalus-cli/capture"])
+        self.assertEqual(inventory["requested_features"], ["daedalus-cli/window"])
         self.assertIn("conservative-workspace-feature-unified-superset", inventory["feature_resolution"])
         dependencies = inventory["dependencies"]
         self.assertEqual({item["name"] for item in dependencies}, {"foo_bar", "foo-bar"})

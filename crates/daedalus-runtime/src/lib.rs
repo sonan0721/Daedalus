@@ -1,6 +1,7 @@
 //! Headless simulation runtime with fixed-rate scheduling and independent presentation snapshots.
 
 mod clock;
+pub mod live_session;
 
 use std::time::Duration;
 
@@ -24,6 +25,12 @@ pub use daedalus_tasks::{
     TaskPool as CpuTaskPool,
 };
 pub use daedalus_world::{RevisionComponent, TransformComponent};
+pub use live_session::{
+    CommandAccepted, LiveCommand, LiveCommandOutcome, LiveCommandResult, LiveCommandSubmitError,
+    LiveCpuBudget, LiveFrame, LiveResultReadError, LiveSession, LiveSessionConfig,
+    LiveSessionStartError, LiveSessionStats, LiveShutdownReport, LiveStatusReadError,
+    LiveTermination, LiveTerrainFrame,
+};
 
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CurrentTick(pub Tick);

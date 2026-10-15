@@ -868,6 +868,7 @@ dependencies = [
  "daedalus-renderer",
  "daedalus-runtime",
  "daedalus-world",
+ "glam 0.30.9",
  "serde",
  "serde_json",
 ]
@@ -916,6 +917,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "bevy_tasks",
+ "daedalus-content",
  "daedalus-core",
  "daedalus-tasks",
  "daedalus-world",

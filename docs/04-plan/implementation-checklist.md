@@ -13,7 +13,7 @@
 | 작업 | 산출물·책임 | 주요 종료 증거 | 현재 |
 | --- | --- | --- | --- |
 | E01 / I01 | Cargo workspace, core·ECS·fixed clock·명령·유한 task·snapshot·Rust 시스템 등록 | stale ID/revision·포화·취소·job 실패·느린 worker 중 표시 소비·shutdown 시험 | 병렬 ECS·CPU 예산 진단·지속 JSONL 제어 검증. 실제 창/스트리밍 통합 후속 |
-| E02 / I02·I04 | wgpu renderer, 실제 offscreen capture, native window/input, 독립 presentation | 실제 GPU PNG·상태 manifest·resize·로딩 중 UI/입력 경로 | Metal·CLI capture 확인. 창은 compile/CPU 검사·통합 후속 |
+| E02 / I02·I04 | wgpu renderer, 실제 offscreen capture, native window/input, 독립 presentation | 실제 GPU PNG·상태 manifest·resize·로딩 중 UI/입력 경로 | Metal capture·실제 Mac 창·로딩 중 ECS/카메라 입력·resize·취소 확인. 고급 렌더·성능 인증 후속 |
 | E03 / I06 | voxel·tile·fluid·light·terrain revision과 비동기 파생 데이터 | 경계·greedy mesh·질량 보존·광원 제거·stale 결과 시험 | 초기 CPU 알고리즘18건 통과. async/영역 연결 후속 |
 | E04 / I03 | C# SDK·CoreCLR 연결·module 교체·빌드형 Rust 게임플레이 | 실제 C#→Rust 명령·상태 보존·실패 복구·참조 회수 | bridge7건·.NET2 scenario 통과. transform SDK·명시적 module 교체 구현, 일반 API·자동 build 후속 |
 | E05 / I05 | 권한 command·영속화·세션 transport·관심 영역 | 두 client·중복/손실·저장 복원·30명 부하 증거 | 대기 |
@@ -67,3 +67,15 @@ C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-b
 ## E08 CLI 배포 후속
 
 사용자 추가 요구에 따라 [CLI 빌드·태그 릴리스](../03-architecture/cli-build-and-release.md)를 구현한다. 현재 로컬 versioned binary·manifest·checksum을 만들고 관리하며, future `v<version>` push 자동 배포를 구성한다. 지금 태그·공개 Release는 만들지 않는다. PR packaging·실제 태그 publish를 별도 근거로 기록한다.
+
+## E01·E02·E03·E08 native live checkpoint
+
+사용자 A-038에 따라 [native live session 계약](../03-architecture/native-live-session.md)을 구현한다. 아래 게이트는 코드 생성만으로 완료하지 않는다.
+
+- [x] CLI 한 명령으로 실제 native window 실행·camera·resize·종료.
+- [x] 권한 ECS 명령의 적용 결과를 동일 session snapshot으로 표시.
+- [x] bounded background generation·meshing·revision/generation 검사·stale 거부.
+- [x] 실제 loading 중 input·presentation 지속을 Mac 입력과 실행 report로 확인.
+- [x] 포화·취소·종료·frame interval·회귀 검사 및 window 포함 local package 검증.
+
+통과 근거와 실제 수치는 [작업 기록](../06-worklog/2026-10-16-native-live-session.md)에 둔다. 이는 한 청크 native 통합 체크포인트이며 전체 E01~E08 품질 게이트의 완료가 아니다.

@@ -31,7 +31,7 @@ SUPPORTED_TARGETS = frozenset(
         "x86_64-unknown-linux-gnu",
     }
 )
-PACKAGE_FEATURES = ("capture",)
+PACKAGE_FEATURES = ("window",)
 ARCHIVE_BINARY = "daedalus"
 ARCHIVE_USAGE = "USAGE.txt"
 ARCHIVE_MANIFEST = "build-manifest.json"
@@ -242,7 +242,7 @@ def build_cli(repository: Path, target: str, cargo_executable: str = "cargo") ->
         "-p",
         "daedalus-cli",
         "--features",
-        "capture",
+        ",".join(PACKAGE_FEATURES),
         "--locked",
         "--target-dir",
         repository / "target",
@@ -281,8 +281,9 @@ license and notice texts, and `build-manifest.json`.
 ./daedalus inspect --entities 2
 ```
 
-`inspect`, `run`, and `step` use the CPU control path. This package is built with the `capture`
-feature; GPU capture requires a compatible graphics adapter and reports adapter failures directly.
+`inspect`, `run`, `step`, and `serve` use the CPU control path. This package is built with the
+`window` feature, which also enables `capture`. `view` opens a native window and requires a
+compatible graphics adapter. `capture` writes the renderer's bounded validation fixture as PNG.
 
 This is a native CLI package only. It does not include a C# SDK, CoreCLR runtime, game assets,
 external content, or a game export. The manifest records the exact source commit, dirty state,
@@ -513,7 +514,7 @@ def verify_archive(
             or type(inventory.get("schema_version")) is not int
             or inventory.get("schema_version") != 1
             or inventory.get("target_triple") != manifest["target_triple"]
-            or inventory.get("requested_features") != ["daedalus-cli/capture"]
+            or inventory.get("requested_features") != ["daedalus-cli/window"]
             or not isinstance(inventory.get("dependencies"), list)
             or type(inventory.get("dependency_count")) is not int
             or inventory.get("dependency_count") != len(inventory["dependencies"])

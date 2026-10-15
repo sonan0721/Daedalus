@@ -16,6 +16,13 @@
 - Do not silently replace the requested model or effort if it is unavailable; report the problem and continue independent documentation work.
 - This is the maintainer's AI workflow, not a prohibition on human open-source contributions.
 
+## Build and verification coordination
+
+- Share the public API contract before dependent parallel edits; keep file ownership disjoint and assign one Cargo.lock owner.
+- Reuse the workspace build cache. Coordinate Cargo checks against the shared target directory; do not create a second cold workspace only to bypass an in-progress lockfile update.
+- Run focused CPU checks while implementing. After source integration is stable, run the required workspace/managed checks and then hardware/UI checks. Repeat broad checks when changes or failures justify them.
+- CI caches accelerate dependencies and compilation; cache hits never replace locked builds, tests, or package smoke checks. Keep credentials and per-user configuration outside cached paths.
+
 ## Evidence and decisions
 
 - Distinguish user requirements, verified source facts, design proposals, and measured results.

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -18,15 +18,45 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-use crate::{Camera, RenderScene, Renderer, RendererError};
+/// Key code type exposed by the window input observer.
+pub use winit::keyboard::KeyCode as WindowKeyCode;
+
+use crate::{Camera, RenderScene, Renderer, RendererError, RendererInfo};
+
+/// Maximum CPU-side scene geometry accepted by the native window path.
+/// These limits bound the validation-scene upload; they do not describe mesh
+/// residency or a general asset streaming policy.
+pub const MAX_WINDOW_SCENE_OBJECTS: usize = 4_096;
+pub const MAX_WINDOW_SCENE_VERTICES: usize = 1_000_000;
+pub const MAX_WINDOW_SCENE_INDICES: usize = 3_000_000;
+pub const MAX_WINDOW_SCENE_GEOMETRY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum number of recent CPU frame intervals retained in a window report.
+pub const FRAME_INTERVAL_SAMPLE_CAPACITY: usize = 512;
+const MAX_MESSAGES_PER_EVENT: usize = 64;
 
 /// Messages from runtime/presentation producers to the window-owned renderer.
 /// The receiver is drained with `try_recv`; a delayed simulation or producer
 /// never blocks OS events or local presentation state.
 #[derive(Clone, Debug)]
 pub enum WindowMessage {
+    /// Atomically publishes one owned scene with the loading state and the
+    /// runtime's presentation identity. Arrow/R keys still flow through the
+    /// input observer; this message never reads runtime-owned state.
+    Present {
+        scene: RenderScene,
+        loading: bool,
+        sequence: u64,
+        tick: u64,
+        generation: u64,
+    },
+    /// Compatibility message for callers predating atomic presentation.
     ReplaceScene(RenderScene),
+    /// Compatibility message for callers predating atomic presentation.
     SetLoading(bool),
+    /// Stops the window with a producer-side bridge failure. This lets a CLI
+    /// propagate conversion/runtime errors from its presentation thread.
+    Abort(String),
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +70,16 @@ pub struct WindowOptions {
     /// Optional bounded observer queue for OS input. Full-queue drops are
     /// counted on the sink, while local camera controls continue to work.
     pub input_events: Option<WindowInputSink>,
+    /// Loading state to display from the first native frame.
+    pub initial_loading: bool,
+    /// Optional smoke-test limit. `None` keeps an interactive window open
+    /// until the user closes it.
+    pub max_run_time: Option<Duration>,
+    /// Optional smoke-test frame limit, counting successfully presented frames.
+    pub max_frames: Option<u64>,
+    /// Treat loss of the presentation producer as a fatal window error. This
+    /// is opt-in so standalone and legacy interactive callers remain open.
+    pub fail_on_presentation_disconnect: bool,
 }
 
 impl Default for WindowOptions {
@@ -50,6 +90,10 @@ impl Default for WindowOptions {
             height: 720,
             frame_interval: Duration::from_nanos(6_944_444),
             input_events: None,
+            initial_loading: false,
+            max_run_time: None,
+            max_frames: None,
+            fail_on_presentation_disconnect: false,
         }
     }
 }
@@ -96,7 +140,7 @@ pub fn window_input_channel(
 
 /// Native input received by the window loop. The loop also handles camera
 /// orbit and zoom locally, so those controls remain responsive while runtime
-/// messages are delayed.
+/// messages are delayed. Key input is always observed, including camera keys.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WindowInput {
     Key { code: KeyCode, pressed: bool },
@@ -107,31 +151,214 @@ pub enum WindowInput {
     Focused(bool),
 }
 
-/// Starts a native winit event loop. Send `WindowMessage::ReplaceScene` and
-/// `SetLoading` through a bounded `sync_channel` to publish the latest owned scene
-/// and independent loading state. Left-drag orbits the local camera, the wheel
-/// zooms, WASD moves, Q/E move vertically, and Escape closes the window.
-pub fn run_windowed(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresentationMetadata {
+    pub sequence: u64,
+    pub tick: u64,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowExitReason {
+    CloseRequested,
+    EscapePressed,
+    TimeLimit,
+    FrameLimit,
+    EventLoopReturned,
+}
+
+/// Bounded sample of CPU time between successful surface presents. This is
+/// neither a GPU completion time nor a frame-rate guarantee.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameIntervalStats {
+    pub sample_capacity: usize,
+    /// Oldest-to-newest retained intervals in milliseconds.
+    pub samples_ms: Vec<f64>,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub p99_ms: Option<f64>,
+    pub max_ms: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowReport {
+    pub rendered_frames: u64,
+    pub loading_frames: u64,
+    /// All observed input events, including key, pointer, focus, and resize.
+    pub input_events: u64,
+    pub loading_input_events: u64,
+    pub key_events: u64,
+    pub loading_key_events: u64,
+    pub mouse_button_events: u64,
+    pub loading_mouse_button_events: u64,
+    pub cursor_events: u64,
+    pub loading_cursor_events: u64,
+    pub wheel_events: u64,
+    pub loading_wheel_events: u64,
+    pub resize_events: u64,
+    pub loading_resize_events: u64,
+    pub focus_events: u64,
+    pub loading_focus_events: u64,
+    pub local_camera_changes: u64,
+    pub final_camera: Camera,
+    pub resize_count: u64,
+    pub final_width: u32,
+    pub final_height: u32,
+    pub frame_intervals: FrameIntervalStats,
+    pub exit_reason: WindowExitReason,
+    pub renderer: Option<RendererInfo>,
+    /// True if the presentation sender was dropped. The window remains open
+    /// and interactive so legacy and standalone callers retain their behavior.
+    pub message_source_disconnected: bool,
+    pub final_loading: bool,
+    pub latest_presentation: Option<PresentationMetadata>,
+    /// Current title plus the latest tick/loading state and native controls.
+    pub window_title: String,
+}
+
+/// Report plus the final owned presentation scene. A CLI may use this scene
+/// for offscreen capture after the native event loop has returned.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowOutcome {
+    pub report: WindowReport,
+    pub final_scene: RenderScene,
+}
+
+/// Opens a native winit window and returns its report and final owned scene.
+/// The event loop stays on the calling/main thread. Messages are drained with
+/// a bounded `try_recv` loop; callbacks do not wait for a producer or perform
+/// readback/file I/O/thread joins.
+pub fn run_windowed_reported(
     initial_scene: RenderScene,
     messages: Receiver<WindowMessage>,
     options: WindowOptions,
-) -> Result<(), RendererError> {
-    if options.width == 0 || options.height == 0 || options.frame_interval.is_zero() {
-        return Err(RendererError::Window(
-            "window size and redraw interval must be nonzero".into(),
-        ));
-    }
-    initial_scene.validate()?;
+) -> Result<WindowOutcome, RendererError> {
+    validate_options(&options)?;
+    validate_window_scene(&initial_scene)?;
     let event_loop = EventLoop::new().map_err(|error| RendererError::Window(error.to_string()))?;
     let mut app = WindowApp::new(initial_scene, messages, options);
     event_loop
         .run_app(&mut app)
         .map_err(|error| RendererError::Window(error.to_string()))?;
     if let Some(error) = app.failure.take() {
-        Err(error)
-    } else {
-        Ok(())
+        return Err(error);
     }
+    Ok(app.into_outcome())
+}
+
+/// Compatibility wrapper for callers that only need the interactive window.
+pub fn run_windowed(
+    initial_scene: RenderScene,
+    messages: Receiver<WindowMessage>,
+    options: WindowOptions,
+) -> Result<(), RendererError> {
+    run_windowed_reported(initial_scene, messages, options).map(|_| ())
+}
+
+fn validate_options(options: &WindowOptions) -> Result<(), RendererError> {
+    if options.width == 0 || options.height == 0 || options.frame_interval.is_zero() {
+        return Err(RendererError::Window(
+            "window size and redraw interval must be nonzero".into(),
+        ));
+    }
+    if options
+        .max_run_time
+        .is_some_and(|duration| duration.is_zero())
+        || options.max_frames.is_some_and(|frames| frames == 0)
+    {
+        return Err(RendererError::Window(
+            "optional window run limits must be nonzero".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn max_run_time_reached(started_at: Instant, now: Instant, limit: Option<Duration>) -> bool {
+    limit.is_some_and(|limit| now.saturating_duration_since(started_at) >= limit)
+}
+
+fn max_frames_reached(rendered_frames: u64, limit: Option<u64>) -> bool {
+    limit.is_some_and(|limit| rendered_frames >= limit)
+}
+
+fn validate_window_scene(scene: &RenderScene) -> Result<(), RendererError> {
+    if scene.objects.len() > MAX_WINDOW_SCENE_OBJECTS {
+        return Err(RendererError::InvalidScene(format!(
+            "window scene exceeds bounded validation-scene budget (objects: {}/{MAX_WINDOW_SCENE_OBJECTS})",
+            scene.objects.len(),
+        )));
+    }
+    let mut vertices = 0usize;
+    let mut indices = 0usize;
+    let mut geometry_bytes = 0usize;
+    for object in &scene.objects {
+        vertices = vertices
+            .checked_add(object.mesh.vertices.len())
+            .ok_or_else(|| RendererError::InvalidScene("window vertex count overflowed".into()))?;
+        indices = indices
+            .checked_add(object.mesh.indices.len())
+            .ok_or_else(|| RendererError::InvalidScene("window index count overflowed".into()))?;
+        let vertex_bytes = object
+            .mesh
+            .vertices
+            .len()
+            .checked_mul(std::mem::size_of::<crate::Vertex>())
+            .ok_or_else(|| RendererError::InvalidScene("window vertex bytes overflowed".into()))?;
+        let index_bytes = object
+            .mesh
+            .indices
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| RendererError::InvalidScene("window index bytes overflowed".into()))?;
+        geometry_bytes = geometry_bytes
+            .checked_add(vertex_bytes)
+            .and_then(|size| size.checked_add(index_bytes))
+            .ok_or_else(|| {
+                RendererError::InvalidScene("window geometry bytes overflowed".into())
+            })?;
+    }
+    if vertices > MAX_WINDOW_SCENE_VERTICES
+        || indices > MAX_WINDOW_SCENE_INDICES
+        || geometry_bytes > MAX_WINDOW_SCENE_GEOMETRY_BYTES
+    {
+        return Err(RendererError::InvalidScene(format!(
+            "window scene exceeds bounded validation-scene budget (objects: {}/{MAX_WINDOW_SCENE_OBJECTS}, vertices: {vertices}/{MAX_WINDOW_SCENE_VERTICES}, indices: {indices}/{MAX_WINDOW_SCENE_INDICES}, geometry: {geometry_bytes}/{MAX_WINDOW_SCENE_GEOMETRY_BYTES} bytes)",
+            scene.objects.len(),
+        )));
+    }
+    // Counts and byte budgets are cheap to inspect from vector lengths. Only
+    // after admission do we walk vertices, indices, transforms, and materials.
+    scene.validate()
+}
+
+fn presentation_disconnect_error(fail_on_disconnect: bool) -> Option<RendererError> {
+    fail_on_disconnect.then(|| {
+        RendererError::Window(
+            "presentation message source disconnected before the window closed".into(),
+        )
+    })
+}
+
+fn apply_presentation(
+    current_scene: &mut RenderScene,
+    current_loading: &mut bool,
+    latest_presentation: &mut Option<PresentationMetadata>,
+    incoming_scene: RenderScene,
+    loading: bool,
+    metadata: PresentationMetadata,
+    local_camera: Option<&Camera>,
+) -> Result<(), RendererError> {
+    // Validate the complete producer-owned scene before changing any visible
+    // state. A failed update leaves scene, loading, and metadata untouched.
+    validate_window_scene(&incoming_scene)?;
+    let mut next_scene = incoming_scene;
+    if let Some(camera) = local_camera {
+        next_scene.camera = camera.clone();
+    }
+    *current_scene = next_scene;
+    *current_loading = loading;
+    *latest_presentation = Some(metadata);
+    Ok(())
 }
 
 struct SurfaceState {
@@ -139,22 +366,101 @@ struct SurfaceState {
     config: wgpu::SurfaceConfiguration,
 }
 
+#[derive(Default)]
+struct WindowCounters {
+    rendered_frames: u64,
+    loading_frames: u64,
+    input_events: u64,
+    loading_input_events: u64,
+    key_events: u64,
+    loading_key_events: u64,
+    mouse_button_events: u64,
+    loading_mouse_button_events: u64,
+    cursor_events: u64,
+    loading_cursor_events: u64,
+    wheel_events: u64,
+    loading_wheel_events: u64,
+    resize_events: u64,
+    loading_resize_events: u64,
+    focus_events: u64,
+    loading_focus_events: u64,
+    local_camera_changes: u64,
+    resize_count: u64,
+}
+
+struct FrameIntervals {
+    last_present: Option<Instant>,
+    samples_ms: VecDeque<f64>,
+}
+
+impl FrameIntervals {
+    fn new() -> Self {
+        Self {
+            last_present: None,
+            samples_ms: VecDeque::with_capacity(FRAME_INTERVAL_SAMPLE_CAPACITY),
+        }
+    }
+
+    fn record_present(&mut self, now: Instant) {
+        if let Some(previous) = self.last_present.replace(now) {
+            let sample = now.saturating_duration_since(previous).as_secs_f64() * 1_000.0;
+            if self.samples_ms.len() == FRAME_INTERVAL_SAMPLE_CAPACITY {
+                self.samples_ms.pop_front();
+            }
+            self.samples_ms.push_back(sample);
+        }
+    }
+
+    fn report(&self) -> FrameIntervalStats {
+        let samples_ms: Vec<_> = self.samples_ms.iter().copied().collect();
+        let mut sorted = samples_ms.clone();
+        sorted.sort_by(f64::total_cmp);
+        let percentile = |fraction: f64| {
+            if sorted.is_empty() {
+                None
+            } else {
+                let index = ((fraction * sorted.len() as f64).ceil() as usize)
+                    .saturating_sub(1)
+                    .min(sorted.len() - 1);
+                Some(sorted[index])
+            }
+        };
+        FrameIntervalStats {
+            sample_capacity: FRAME_INTERVAL_SAMPLE_CAPACITY,
+            p50_ms: percentile(0.50),
+            p95_ms: percentile(0.95),
+            p99_ms: percentile(0.99),
+            max_ms: sorted.last().copied(),
+            samples_ms,
+        }
+    }
+}
+
 struct WindowApp {
-    initial_scene: Option<RenderScene>,
     messages: Receiver<WindowMessage>,
     options: WindowOptions,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    renderer_info: Option<RendererInfo>,
     surface: Option<SurfaceState>,
     scene: RenderScene,
     local_camera: Option<Camera>,
+    latest_presentation: Option<PresentationMetadata>,
+    loading_since: Option<Instant>,
+    message_source_disconnected: bool,
     keys_down: HashSet<KeyCode>,
     left_mouse_down: bool,
     last_cursor: Option<PhysicalPosition<f64>>,
     last_update: Instant,
     next_redraw: Instant,
-    loading_since: Option<Instant>,
+    started_at: Instant,
+    exit_reason: Option<WindowExitReason>,
     failure: Option<RendererError>,
+    counters: WindowCounters,
+    intervals: FrameIntervals,
+    final_width: u32,
+    final_height: u32,
+    window_title: String,
 }
 
 impl WindowApp {
@@ -164,27 +470,74 @@ impl WindowApp {
         options: WindowOptions,
     ) -> Self {
         let now = Instant::now();
+        let initial_loading = options.initial_loading;
+        let width = options.width;
+        let height = options.height;
         Self {
-            initial_scene: Some(initial_scene.clone()),
             messages,
             options,
             window: None,
             renderer: None,
+            renderer_info: None,
             surface: None,
             scene: initial_scene,
             local_camera: None,
+            latest_presentation: None,
+            loading_since: initial_loading.then_some(now),
+            message_source_disconnected: false,
             keys_down: HashSet::new(),
             left_mouse_down: false,
             last_cursor: None,
             last_update: now,
             next_redraw: now,
-            loading_since: None,
+            started_at: now,
+            exit_reason: None,
             failure: None,
+            counters: WindowCounters::default(),
+            intervals: FrameIntervals::new(),
+            final_width: width,
+            final_height: height,
+            window_title: String::new(),
+        }
+    }
+
+    fn is_loading(&self) -> bool {
+        self.loading_since.is_some()
+    }
+
+    fn set_loading(&mut self, loading: bool) {
+        if self.is_loading() != loading {
+            self.loading_since = loading.then(Instant::now);
+        }
+        self.update_window_title();
+    }
+
+    fn update_window_title(&mut self) {
+        let tick_and_generation = self.latest_presentation.as_ref().map_or_else(
+            || "tick — · gen —".to_owned(),
+            |metadata| format!("tick {} · gen {}", metadata.tick, metadata.generation),
+        );
+        let loading = if self.is_loading() {
+            "Loading"
+        } else {
+            "Ready"
+        };
+        self.window_title = format!(
+            "{} | {tick_and_generation} · {loading} | WASD/QE + drag/wheel · arrows/R via bridge · Esc close",
+            self.options.title
+        );
+        if let Some(window) = &self.window {
+            window.set_title(&self.window_title);
         }
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: RendererError) {
         self.failure = Some(error);
+        event_loop.exit();
+    }
+
+    fn exit(&mut self, event_loop: &ActiveEventLoop, reason: WindowExitReason) {
+        self.exit_reason = Some(reason);
         event_loop.exit();
     }
 
@@ -198,6 +551,8 @@ impl WindowApp {
                 .map_err(|error| RendererError::Window(error.to_string()))?,
         );
         let size = window.inner_size();
+        self.final_width = size.width;
+        self.final_height = size.height;
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance
             .create_surface(window.clone())
@@ -254,33 +609,70 @@ impl WindowApp {
         let renderer = pollster::block_on(Renderer::from_adapter(instance, adapter, format))?;
         renderer.validate_dimensions(config.width, config.height)?;
         surface.configure(&renderer.device, &config);
+        self.renderer_info = Some(renderer.info().clone());
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.surface = Some(SurfaceState { surface, config });
-        self.initial_scene = None;
-        self.drain_messages();
+        self.update_window_title();
+        self.drain_messages(event_loop);
         Ok(())
     }
 
-    fn drain_messages(&mut self) {
-        for _ in 0..64 {
+    fn drain_messages(&mut self, event_loop: &ActiveEventLoop) {
+        for _ in 0..MAX_MESSAGES_PER_EVENT {
             match self.messages.try_recv() {
+                Ok(WindowMessage::Present {
+                    scene,
+                    loading,
+                    sequence,
+                    tick,
+                    generation,
+                }) => {
+                    let mut current_loading = self.is_loading();
+                    if let Err(error) = apply_presentation(
+                        &mut self.scene,
+                        &mut current_loading,
+                        &mut self.latest_presentation,
+                        scene,
+                        loading,
+                        PresentationMetadata {
+                            sequence,
+                            tick,
+                            generation,
+                        },
+                        self.local_camera.as_ref(),
+                    ) {
+                        self.fail(event_loop, error);
+                        return;
+                    }
+                    self.set_loading(current_loading);
+                }
                 Ok(WindowMessage::ReplaceScene(mut scene)) => {
+                    if let Err(error) = validate_window_scene(&scene) {
+                        self.fail(event_loop, error);
+                        return;
+                    }
                     if let Some(camera) = &self.local_camera {
                         scene.camera = camera.clone();
                     }
                     self.scene = scene;
                 }
-                Ok(WindowMessage::SetLoading(true)) => {
-                    if self.loading_since.is_none() {
-                        self.loading_since = Some(Instant::now());
-                    }
+                Ok(WindowMessage::SetLoading(loading)) => self.set_loading(loading),
+                Ok(WindowMessage::Abort(message)) => {
+                    self.fail(event_loop, RendererError::Window(bounded_message(message)));
+                    return;
                 }
-                Ok(WindowMessage::SetLoading(false)) => self.loading_since = None,
-                Err(
-                    std::sync::mpsc::TryRecvError::Empty
-                    | std::sync::mpsc::TryRecvError::Disconnected,
-                ) => break,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.message_source_disconnected = true;
+                    if let Some(error) =
+                        presentation_disconnect_error(self.options.fail_on_presentation_disconnect)
+                    {
+                        self.fail(event_loop, error);
+                        return;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -294,9 +686,14 @@ impl WindowApp {
         if elapsed <= 0.0 {
             return;
         }
+        self.apply_camera_movement(elapsed);
+    }
+
+    fn apply_camera_movement(&mut self, elapsed: f32) {
         let camera = self
             .local_camera
             .get_or_insert_with(|| self.scene.camera.clone());
+        let previous = camera.clone();
         let forward = (Vec3::from_array(camera.target) - Vec3::from_array(camera.position))
             .normalize_or_zero();
         let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
@@ -320,16 +717,19 @@ impl WindowApp {
         if self.keys_down.contains(&KeyCode::KeyQ) {
             movement -= Vec3::Y;
         }
-        if movement.length_squared() > 0.0 {
-            let delta = movement.normalize() * (elapsed * 3.5);
-            camera.position = (Vec3::from_array(camera.position) + delta).to_array();
-            camera.target = (Vec3::from_array(camera.target) + delta).to_array();
+        move_camera(camera, movement, elapsed);
+        if *camera != previous {
             self.scene.camera = camera.clone();
+            self.counters.local_camera_changes =
+                self.counters.local_camera_changes.saturating_add(1);
         }
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        self.drain_messages();
+        self.drain_messages(event_loop);
+        if self.failure.is_some() {
+            return;
+        }
         let now = Instant::now();
         self.update_local_camera(now);
         let Some(window) = &self.window else {
@@ -380,14 +780,95 @@ impl WindowApp {
         }
         window.pre_present_notify();
         frame.present();
+        self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(1);
+        if self.is_loading() {
+            self.counters.loading_frames = self.counters.loading_frames.saturating_add(1);
+        }
+        self.intervals.record_present(Instant::now());
+        if max_frames_reached(self.counters.rendered_frames, self.options.max_frames) {
+            self.exit(event_loop, WindowExitReason::FrameLimit);
+        }
     }
 
-    fn emit_input(&self, event: WindowInput) {
-        // Presentation keeps its own camera controls. This optional queue is a
-        // best-effort observation channel for applications; it never blocks an
-        // OS event callback while a runtime consumer is busy.
+    fn emit_input(&mut self, event: WindowInput) {
+        self.counters.input_events = self.counters.input_events.saturating_add(1);
+        let while_loading = self.is_loading();
+        if while_loading {
+            self.counters.loading_input_events =
+                self.counters.loading_input_events.saturating_add(1);
+        }
+        let (events, loading_events) = match &event {
+            WindowInput::Key { .. } => (
+                &mut self.counters.key_events,
+                &mut self.counters.loading_key_events,
+            ),
+            WindowInput::MouseButton { .. } => (
+                &mut self.counters.mouse_button_events,
+                &mut self.counters.loading_mouse_button_events,
+            ),
+            WindowInput::CursorMoved { .. } => (
+                &mut self.counters.cursor_events,
+                &mut self.counters.loading_cursor_events,
+            ),
+            WindowInput::MouseWheel { .. } => (
+                &mut self.counters.wheel_events,
+                &mut self.counters.loading_wheel_events,
+            ),
+            WindowInput::Resized { .. } => (
+                &mut self.counters.resize_events,
+                &mut self.counters.loading_resize_events,
+            ),
+            WindowInput::Focused(_) => (
+                &mut self.counters.focus_events,
+                &mut self.counters.loading_focus_events,
+            ),
+        };
+        *events = events.saturating_add(1);
+        if while_loading {
+            *loading_events = loading_events.saturating_add(1);
+        }
         if let Some(sender) = &self.options.input_events {
             sender.try_send(event);
+        }
+    }
+
+    fn into_outcome(self) -> WindowOutcome {
+        let final_loading = self.is_loading();
+        let report = WindowReport {
+            rendered_frames: self.counters.rendered_frames,
+            loading_frames: self.counters.loading_frames,
+            input_events: self.counters.input_events,
+            loading_input_events: self.counters.loading_input_events,
+            key_events: self.counters.key_events,
+            loading_key_events: self.counters.loading_key_events,
+            mouse_button_events: self.counters.mouse_button_events,
+            loading_mouse_button_events: self.counters.loading_mouse_button_events,
+            cursor_events: self.counters.cursor_events,
+            loading_cursor_events: self.counters.loading_cursor_events,
+            wheel_events: self.counters.wheel_events,
+            loading_wheel_events: self.counters.loading_wheel_events,
+            resize_events: self.counters.resize_events,
+            loading_resize_events: self.counters.loading_resize_events,
+            focus_events: self.counters.focus_events,
+            loading_focus_events: self.counters.loading_focus_events,
+            local_camera_changes: self.counters.local_camera_changes,
+            final_camera: self.scene.camera.clone(),
+            resize_count: self.counters.resize_count,
+            final_width: self.final_width,
+            final_height: self.final_height,
+            frame_intervals: self.intervals.report(),
+            exit_reason: self
+                .exit_reason
+                .unwrap_or(WindowExitReason::EventLoopReturned),
+            renderer: self.renderer_info,
+            message_source_disconnected: self.message_source_disconnected,
+            final_loading,
+            latest_presentation: self.latest_presentation,
+            window_title: self.window_title,
+        };
+        WindowOutcome {
+            report,
+            final_scene: self.scene,
         }
     }
 }
@@ -416,8 +897,13 @@ impl ApplicationHandler for WindowApp {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.exit(event_loop, WindowExitReason::CloseRequested);
+            }
             WindowEvent::Resized(size) => {
+                self.counters.resize_count = self.counters.resize_count.saturating_add(1);
+                self.final_width = size.width;
+                self.final_height = size.height;
                 if let (Some(renderer), Some(surface_state)) = (&self.renderer, &mut self.surface)
                     && size.width > 0
                     && size.height > 0
@@ -441,6 +927,7 @@ impl ApplicationHandler for WindowApp {
                 if !focused {
                     self.left_mouse_down = false;
                     self.keys_down.clear();
+                    self.last_cursor = None;
                 }
                 self.emit_input(WindowInput::Focused(focused));
             }
@@ -449,16 +936,27 @@ impl ApplicationHandler for WindowApp {
                     return;
                 };
                 let pressed = event.state == ElementState::Pressed;
-                if code == KeyCode::Escape && pressed {
-                    event_loop.exit();
-                    return;
-                }
                 if pressed {
                     self.keys_down.insert(code);
                 } else {
                     self.keys_down.remove(&code);
                 }
                 self.emit_input(WindowInput::Key { code, pressed });
+                if pressed && is_camera_key(code) {
+                    // Apply a small immediate step so a short press/release
+                    // between redraws is visible in the final camera report.
+                    let now = Instant::now();
+                    self.apply_camera_movement(
+                        self.options
+                            .frame_interval
+                            .as_secs_f32()
+                            .clamp(1.0 / 120.0, 0.05),
+                    );
+                    self.last_update = now;
+                }
+                if code == KeyCode::Escape && pressed {
+                    self.exit(event_loop, WindowExitReason::EscapePressed);
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -476,8 +974,13 @@ impl ApplicationHandler for WindowApp {
                     let camera = self
                         .local_camera
                         .get_or_insert_with(|| self.scene.camera.clone());
+                    let previous_camera = camera.clone();
                     camera.orbit(-dx * 0.006, -dy * 0.006, 0.0);
-                    self.scene.camera = camera.clone();
+                    if *camera != previous_camera {
+                        self.scene.camera = camera.clone();
+                        self.counters.local_camera_changes =
+                            self.counters.local_camera_changes.saturating_add(1);
+                    }
                 }
                 self.last_cursor = Some(position);
                 self.emit_input(WindowInput::CursorMoved {
@@ -493,8 +996,13 @@ impl ApplicationHandler for WindowApp {
                 let camera = self
                     .local_camera
                     .get_or_insert_with(|| self.scene.camera.clone());
+                let previous_camera = camera.clone();
                 camera.orbit(0.0, 0.0, -lines * 0.12);
-                self.scene.camera = camera.clone();
+                if *camera != previous_camera {
+                    self.scene.camera = camera.clone();
+                    self.counters.local_camera_changes =
+                        self.counters.local_camera_changes.saturating_add(1);
+                }
                 self.emit_input(WindowInput::MouseWheel { lines });
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
@@ -503,23 +1011,92 @@ impl ApplicationHandler for WindowApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.drain_messages();
+        self.drain_messages(event_loop);
+        if self.failure.is_some() {
+            return;
+        }
         let now = Instant::now();
+        if max_run_time_reached(self.started_at, now, self.options.max_run_time) {
+            self.exit(event_loop, WindowExitReason::TimeLimit);
+            return;
+        }
         if now >= self.next_redraw {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
             self.next_redraw = now + self.options.frame_interval;
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_redraw));
+        let wait_until = self
+            .options
+            .max_run_time
+            .map(|limit| self.started_at + limit)
+            .map_or(self.next_redraw, |deadline| self.next_redraw.min(deadline));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wait_until));
+    }
+}
+
+fn bounded_message(mut message: String) -> String {
+    const MAX_MESSAGE_BYTES: usize = 4 * 1024;
+    if message.len() > MAX_MESSAGE_BYTES {
+        let mut boundary = MAX_MESSAGE_BYTES;
+        while !message.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        message.truncate(boundary);
+        message.push_str("… [message truncated]");
+    }
+    message
+}
+
+fn is_camera_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::KeyW
+            | KeyCode::KeyA
+            | KeyCode::KeyS
+            | KeyCode::KeyD
+            | KeyCode::KeyQ
+            | KeyCode::KeyE
+    )
+}
+
+fn move_camera(camera: &mut Camera, movement: Vec3, elapsed: f32) {
+    if movement.length_squared() > 0.0 && elapsed > 0.0 {
+        let delta = movement.normalize() * (elapsed * 3.5);
+        camera.position = (Vec3::from_array(camera.position) + delta).to_array();
+        camera.target = (Vec3::from_array(camera.target) + delta).to_array();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use glam::Mat4;
     use winit::keyboard::KeyCode;
 
-    use super::{WindowInput, window_input_channel};
+    use crate::{Material, Mesh, RenderObject, RenderScene, Vertex};
+
+    use super::{
+        FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, PresentationMetadata, WindowApp,
+        WindowInput, WindowOptions, apply_presentation, max_frames_reached, max_run_time_reached,
+        presentation_disconnect_error, validate_options, validate_window_scene,
+        window_input_channel,
+    };
+
+    fn triangle_scene() -> RenderScene {
+        let mesh = Mesh::new(
+            vec![
+                Vertex::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+                Vertex::new([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+                Vertex::new([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+            ],
+            vec![0, 1, 2],
+        );
+        let mut scene = RenderScene::new();
+        scene
+            .objects
+            .push(RenderObject::new(mesh, Mat4::IDENTITY, Material::default()));
+        scene
+    }
 
     #[test]
     fn input_observer_queue_is_bounded_and_reports_drops() {
@@ -540,5 +1117,187 @@ mod tests {
                 pressed: true
             })
         );
+    }
+
+    #[test]
+    fn window_scene_validation_accepts_empty_loading_scene_and_rejects_bad_geometry() {
+        assert!(validate_window_scene(&RenderScene::new()).is_ok());
+
+        let mut malformed = triangle_scene();
+        malformed.objects[0].mesh.indices[2] = 99;
+        assert!(validate_window_scene(&malformed).is_err());
+    }
+
+    #[test]
+    fn window_geometry_budget_rejects_oversized_scene_before_upload() {
+        let mut oversized = triangle_scene();
+        // Keep the individual mesh structurally valid while exceeding a
+        // window-path count limit with a deterministic CPU-only fixture.
+        oversized.objects[0].mesh.vertices.resize(
+            super::MAX_WINDOW_SCENE_VERTICES + 1,
+            Vertex::new([0.0; 3], [0.0, 0.0, 1.0]),
+        );
+        oversized.objects[0].mesh.vertices[0].position[0] = f32::NAN;
+        let error = validate_window_scene(&oversized)
+            .expect_err("count budget must reject before reading malformed vertex data");
+        assert!(
+            error
+                .to_string()
+                .contains("bounded validation-scene budget")
+        );
+    }
+
+    #[test]
+    fn atomic_presentation_applies_scene_loading_and_metadata_together() {
+        let mut scene = RenderScene::new();
+        let mut loading = false;
+        let mut metadata = None;
+        let next = triangle_scene();
+        apply_presentation(
+            &mut scene,
+            &mut loading,
+            &mut metadata,
+            next.clone(),
+            true,
+            PresentationMetadata {
+                sequence: 10,
+                tick: 7,
+                generation: 3,
+            },
+            None,
+        )
+        .expect("valid presentation applies");
+        assert_eq!(scene, next);
+        assert!(loading);
+        assert_eq!(
+            metadata,
+            Some(PresentationMetadata {
+                sequence: 10,
+                tick: 7,
+                generation: 3,
+            })
+        );
+
+        let previous_scene = scene.clone();
+        let previous_metadata = metadata.clone();
+        let mut invalid = RenderScene::new();
+        invalid.camera.position = [f32::NAN, 0.0, 0.0];
+        assert!(
+            apply_presentation(
+                &mut scene,
+                &mut loading,
+                &mut metadata,
+                invalid,
+                false,
+                PresentationMetadata {
+                    sequence: 11,
+                    tick: 8,
+                    generation: 3,
+                },
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(scene, previous_scene);
+        assert!(loading);
+        assert_eq!(metadata, previous_metadata);
+    }
+
+    #[test]
+    fn frame_interval_samples_stay_bounded_and_compute_percentiles() {
+        let mut intervals = FrameIntervals::new();
+        let start = std::time::Instant::now();
+        intervals.record_present(start);
+        for frame in 1..=(FRAME_INTERVAL_SAMPLE_CAPACITY + 4) {
+            intervals.record_present(start + std::time::Duration::from_millis(frame as u64));
+        }
+        let report = intervals.report();
+        assert_eq!(report.samples_ms.len(), FRAME_INTERVAL_SAMPLE_CAPACITY);
+        assert_eq!(report.sample_capacity, FRAME_INTERVAL_SAMPLE_CAPACITY);
+        assert_eq!(report.samples_ms.first().copied(), Some(1.0));
+        assert_eq!(report.samples_ms.last().copied(), Some(1.0));
+        assert_eq!(report.p50_ms, Some(1.0));
+        assert_eq!(report.p95_ms, Some(1.0));
+        assert_eq!(report.p99_ms, Some(1.0));
+        assert_eq!(report.max_ms, Some(1.0));
+    }
+
+    #[test]
+    fn smoke_time_and_frame_limits_must_be_nonzero_when_set() {
+        let mut options = WindowOptions::default();
+        assert!(validate_options(&options).is_ok());
+        options.max_run_time = Some(std::time::Duration::ZERO);
+        assert!(validate_options(&options).is_err());
+        options.max_run_time = None;
+        options.max_frames = Some(0);
+        assert!(validate_options(&options).is_err());
+    }
+
+    #[test]
+    fn presentation_disconnect_is_nonfatal_by_default_and_can_be_fatal() {
+        assert!(!WindowOptions::default().fail_on_presentation_disconnect);
+        assert!(presentation_disconnect_error(false).is_none());
+        let error = presentation_disconnect_error(true)
+            .expect("opt-in disconnect handling returns a fatal error");
+        assert!(
+            error
+                .to_string()
+                .contains("presentation message source disconnected")
+        );
+    }
+
+    #[test]
+    fn smoke_time_and_frame_limits_trigger_at_the_requested_boundary() {
+        let start = std::time::Instant::now();
+        assert!(!max_run_time_reached(
+            start,
+            start + std::time::Duration::from_millis(49),
+            Some(std::time::Duration::from_millis(50)),
+        ));
+        assert!(max_run_time_reached(
+            start,
+            start + std::time::Duration::from_millis(50),
+            Some(std::time::Duration::from_millis(50)),
+        ));
+        assert!(!max_frames_reached(2, Some(3)));
+        assert!(max_frames_reached(3, Some(3)));
+    }
+
+    #[test]
+    fn input_report_separates_keys_from_pointer_and_focus_during_loading() {
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let options = WindowOptions {
+            initial_loading: true,
+            ..WindowOptions::default()
+        };
+        let mut app = WindowApp::new(RenderScene::new(), receiver, options);
+        app.emit_input(WindowInput::Key {
+            code: KeyCode::ArrowUp,
+            pressed: true,
+        });
+        app.emit_input(WindowInput::CursorMoved { x: 10.0, y: 20.0 });
+        app.emit_input(WindowInput::Focused(false));
+
+        let report = app.into_outcome().report;
+        assert_eq!(report.input_events, 3);
+        assert_eq!(report.loading_input_events, 3);
+        assert_eq!(report.key_events, 1);
+        assert_eq!(report.loading_key_events, 1);
+        assert_eq!(report.cursor_events, 1);
+        assert_eq!(report.loading_cursor_events, 1);
+        assert_eq!(report.focus_events, 1);
+        assert_eq!(report.loading_focus_events, 1);
+    }
+
+    #[test]
+    fn short_camera_key_step_changes_the_owned_final_camera_immediately() {
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut app = WindowApp::new(RenderScene::new(), receiver, WindowOptions::default());
+        let starting_camera = app.scene.camera.clone();
+        app.keys_down.insert(KeyCode::KeyW);
+        app.apply_camera_movement(1.0 / 120.0);
+
+        assert_ne!(app.scene.camera, starting_camera);
+        assert_eq!(app.counters.local_camera_changes, 1);
     }
 }

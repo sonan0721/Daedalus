@@ -7,9 +7,13 @@ license.workspace = true
 repository.workspace = true
 description = "Kira-based audio service and offline mixer output for Daedalus"
 
+[features]
+default = []
+native = ["kira/cpal"]
+
 [dependencies]
 daedalus-core = { path = "../daedalus-core" }
-kira = { version = "=0.12.5", default-features = false, features = ["cpal"] }
+kira = { version = "=0.12.5", default-features = false }
 
 [lints]
 workspace = true

@@ -7,10 +7,16 @@ license.workspace = true
 repository.workspace = true
 description = "Headless Daedalus simulation runtime, fixed clock, and gameplay scheduling"
 
+[features]
+default = []
+audio = ["dep:daedalus-audio"]
+native-audio = ["audio", "daedalus-audio/native"]
+
 [dependencies]
 bevy_ecs.workspace = true
 bevy_tasks.workspace = true
 daedalus-core = { path = "../daedalus-core" }
+daedalus-audio = { path = "../daedalus-audio", optional = true, default-features = false }
 daedalus-content = { path = "../daedalus-content" }
 daedalus-tasks = { path = "../daedalus-tasks" }
 daedalus-world = { path = "../daedalus-world" }

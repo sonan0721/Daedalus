@@ -159,3 +159,17 @@ worker와 actor가 같은 runtime crate를 공유하는 점도 build 순서에 �
 첫 실제 preparation CPU smoke는 기존 helper 한 invocation으로49개/2.002032초에 통과했다. PNG·warm·node·atlas·WAV의 다섯 후보를 같은 service/cache owner에서 준비하고 epoch/replay/실제 취소를 관찰했다. unchanged warm은 read9/parse8이 남지만 decode·geometry/image/atlas/audio cook·cache write는 모두0이다. 매 수정마다 새 service/session을 만들지 않는 경로가 동작한다는 근거이며, 아직 표시/audio 전환이 연결되지 않아 완성된 edit→observe 루프나 개발 시간 개선율로 보고하지 않는다. binary/input/metrics는 [준비 worklog](../06-worklog/2026-10-16-project-asset-preparation.md)에 둔다.
 
 실제 process 결과 리뷰 뒤 audio와 preparation이 별도 service로만 검사된 빈틈을 보강했다. 기존 ticket/audio helper의 composition 함수 하나를 serve/view에 함께 쓰고 자동 server command ID로 caller high-water 충돌을 피했다. Python만 바뀌었으므로 전체 Rust/GPU를 중복 실행하지 않고 Python61·preparation-only30·combined CPU50·native60을 확인했다. 새 검사도 기존 archive/CI staged binary helper에서 그대로 실행한다. 검사 수/모드가 달라 단1회 wall time을 속도 비교에 쓰지 않는다.
+
+## DEV06/07: PR package cache 범위의 실제 반복 비용
+
+2026-10-16 PR14 로그에서 macOS/Linux package가 모두 `Cache not found`였고 release compile은 각각2분47초/2분06초였다. `actions/caches` API snapshot은 package cache가 PR12/13/14 merge ref에만 있고 main에는 없음을 보였다. ignored `p03-preparation-ci-cache-audit-01.json`은8개 cache/10,240,376,390bytes를 기록한다. 용량 설정·과금은 바꾸지 않는다.
+
+공식 문서상 PR merge-ref cache는 그 PR의 재실행에만 사용할 수 있고 다른 PR/main에서 복원할 수 없다. 현재 release workflow는 PR/tag/manual만 실행해, 저장 성공과 다음 PR 재사용이 달랐다. main의 trusted push/manual로 만든 cache는 후속 PR의 default/base branch 검색에서 사용할 수 있다. 접근일2026-10-16. [GitHub cache 범위와 검색 규칙](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)
+
+다음 좁은 개선을 채택한다. 기존 release workflow에 `push.branches: [main]`을 추가해 같은 native build/package/smoke/artifact 경로가 main cache를 공급한다. 새 workflow/job·dependency·토큰 권한·cache path·보호 체크를 추가하지 않는다. public Publish는 기존 tag-only 조건을 그대로 사용하고 branch/manual에는 실행하지 않는다. cache hit이어도 locked build·실제 smoke는 유지한다. main에서의 추가 build 비용과 후속 PR의 실제 restore/compile을 기록해 효과를 판단하며, cache 저장만 보고 시간 절감 배율을 만들지 않는다.
+
+초기 공급은 현재 main `275ea360fb53dde3713aca84910781a4c895a8e4`의 기존 read-only [manual package run](https://github.com/sonan0721/Daedalus/actions/runs/38907971641)으로 시작했다. 아직 결과와 main cache 생성/다음 PR hit는 확인하지 않았다. source/설계→Luna의 최소 YAML 변경→syntax/기존 package unit→실제 main run/후속 PR 복원 확인 순서이며, 이 개선으로 DEV06/07 전체를 완료 처리하지 않는다.
+
+후속 실제 결과: 해당 manual run은 macOS/Linux package와 각 staged CPU50이 모두 성공했고 Publish는 skipped였다. cache API에서 `refs/heads/main`의 macOS ID9050680369/249,846,600bytes, Linux ID9050710266/313,614,043bytes 생성을 확인했다. 두 binary hash는 PR14와 같았다. raw는 ignored `p03-preparation-main-seed-*-01.log`, `...main-cache-after-seed-01.json`, `...main-seed-jobs-01.json`이다. 아직 다음 PR의 실제 restore/compile 감소를 주장하지 않는다.
+
+Luna의 workflow diff는 `push.branches`의 main 두 줄만 추가한다. 기존 Publish의 `push && refs/tags/v` 조건·read-only build·모든 job/검증은 그대로다. Ruby Psych YAML syntax·package unit14개/2.594초·diff check가 통과했다. PyYAML이 없어 이미 설치된 parser를 썼고 dependency를 추가하지 않았다. 이 세 검사의 raw 파일은 저장되지 않아 작업자 tool 응답의 관찰로 기록하며 사후 raw를 재현해 최초 run인 것처럼 쓰지 않는다. 현재 자동 main trigger 변경은 다음 PR 인수 전이다.

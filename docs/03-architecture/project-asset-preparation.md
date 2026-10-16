@@ -1,6 +1,6 @@
 # P03.3a 실행 중 에셋 후보의 비동기 준비
 
-상태: worker/actor/CLI 구현·같은 actor의 audio/preparation·clean extracted package 회귀 통과. CI/main 인수 대기 · 2026-10-16
+상태: P03.3a local/clean archive·PR14 두 native package/다섯 CI·main 동일 tree 인수. P03.3 전체와 D1은 미통과 · 2026-10-16
 
 ## 목적과 제품 경계
 

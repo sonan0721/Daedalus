@@ -1,6 +1,6 @@
 # 외부 project 실행 창과 JSONL protocol 2
 
-상태: P02.2a native 창·protocol 2 연결 검증, process I/O 극단 사례 추가 검증 대기 · 2026-10-16
+상태: P02.2a native 창·protocol 2·process I/O와 실제 manual 입력 검증 · 2026-10-16
 
 ## 목적과 범위
 
@@ -65,6 +65,10 @@ WASDQE·pointer camera와 Escape/resize/focus는 공통 window 경로다. contro
 manual 모드의 F10은 명시 Step 1 요청이다. 자동 tick/implicit apply는 없고 realtime에서는 Step을 보내지 않는다. 입력 ticket은 별도 client로 per-client 한도를 분리하지만 session-wide reserved Step lane은 1개를 공유한다. 먼저 수락한 요청이 이를 점유하며 다른 client의 Step은 ResultCapacity를 명시 반환한다. F10 결과는 즉시 관찰·회수하고 protocol terminal Step은 사용자의 ack/forget까지 유효하다. UI callback에서 lane을 기다리거나 reserve를 몰래 추가하지 않는다. 이 제한된 조작은 연결 검증이며 정식 gameplay action·AI device injection은 P02.3 후속이다.
 
 ## 검증과 완료 조건
+
+실제 2026-10-16 Mac 검증은 workspace CPU 188건·Python 52건·opt-in native smoke 22개를 통과했다. EOF/blocked stdout은 time-limit까지 실제 frame과 정상 shutdown을 확인했고, 별도 release physical 입력은 retained protocol Step과 F10의 경합·ACK 후 진행을 확인했다. initial accepted metadata 회귀도 수정했다. 정확한 binary hash·count·패키지 경계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
+
+추가 native process 검증은 같은 smoke의 opt-in 모드에서 수행한다. EOF case는 stdin을 닫아도 time-limit까지 실제 frame을 제출해야 한다. blocked-stdout case는 POSIX pipe를 bounded nonblocking write로 미리 채운 뒤 blocking stdout으로 child에 전달하고 읽지 않는다. 작은 capabilities 응답 하나의 writer가 막힌 동안에도 window가 실제 frame을 제출하고 stdin이 열린 채 time-limit/정상 shutdown으로 끝나야 한다. pipe fill·child wait·FD cleanup은 유한하며 setup 불가를 통과로 위조하지 않는다. raw IO thread만 process 수명에 남기는 계약을 실제 OS pipe로 검증하는 시험이지 renderer frame-rate benchmark가 아니다.
 
 Luna xhigh가 runtime shared source/tick-0와 CLI adapter/test를 작성하며 renderer 담당자와 파일 소유권·API·단일 Cargo.lock/target 소유를 맞춘다. 새 의존성 없이 기존 std/serde 경로로 시작한다. focused 검사 후 stable source에서 workspace·managed·패키지 회귀를 수행한다.
 

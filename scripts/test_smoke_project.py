@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from contextlib import redirect_stderr
 from io import StringIO
+import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -11,12 +13,15 @@ from pathlib import Path
 
 from smoke_project import (
     MAX_JSONL_RESPONSE_BYTES,
+    MAX_STDOUT_PIPE_FILL_BYTES,
     SmokeError,
     _JsonlProjectServer,
+    _fill_stdout_pipe,
     _parse_args,
     _v2_poll_until,
     _v2_submit,
     _validate_native_view_report,
+    _validate_native_liveness_report,
     _validate_timeout,
 )
 
@@ -262,6 +267,88 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertTrue(server._stdin.closed)
         self.assertLess(time.monotonic() - started, 2.0)
 
+    def test_devnull_eof_and_uncaptured_stdout_server_cleanup(self) -> None:
+        read_fd, write_fd = os.pipe()
+        binary = self.create_server_stub("import sys\nassert sys.stdin.read() == ''")
+        server = None
+        try:
+            server = _JsonlProjectServer(
+                binary,
+                self.project,
+                cwd=self.root,
+                timeout=1.0,
+                stdin_target=subprocess.DEVNULL,
+                stdout_target=write_fd,
+            )
+            os.close(write_fd)
+            write_fd = -1
+            with server:
+                self.assertIsNone(server._stdin)
+                self.assertIsNone(server._stdout)
+                self.assertIsNone(server._selector)
+                self.assertEqual(server.wait_for_exit(timeout=1.0), 0)
+        finally:
+            if server is not None and not server._closed:
+                try:
+                    server._terminate_if_running()
+                finally:
+                    server._close_streams()
+            for fd in (read_fd, write_fd):
+                if fd >= 0:
+                    os.close(fd)
+
+    def test_filled_stdout_pipe_stays_unread_while_child_exits(self) -> None:
+        if os.name != "posix":
+            self.skipTest("native stdout backpressure uses POSIX pipes")
+        import fcntl
+
+        read_fd, write_fd = os.pipe()
+        server = None
+        try:
+            original_flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+            filled = _fill_stdout_pipe(write_fd)
+            self.assertGreater(filled, 0)
+            self.assertLessEqual(filled, MAX_STDOUT_PIPE_FILL_BYTES)
+            restored_flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+            self.assertEqual(restored_flags & os.O_NONBLOCK, original_flags & os.O_NONBLOCK)
+
+            binary = self.create_server_stub(
+                "import json, os, sys, threading, time\n"
+                "request = json.loads(sys.stdin.readline())\n"
+                "assert request['request']['op'] == 'capabilities'\n"
+                "def exit_after_timeout():\n"
+                "    time.sleep(0.1)\n"
+                "    os._exit(0)\n"
+                "threading.Thread(target=exit_after_timeout, daemon=True).start()\n"
+                "os.write(1, b'x' * (1024 * 1024))"
+            )
+            server = _JsonlProjectServer(
+                binary,
+                self.project,
+                cwd=self.root,
+                timeout=2.0,
+                protocol_version=2,
+                process_label="blocked stdout stub",
+                stdout_target=write_fd,
+            )
+            os.close(write_fd)
+            write_fd = -1
+            with server:
+                server.send_only("capabilities", {"op": "capabilities"})
+                self.assertEqual(server.wait_for_exit(timeout=2.0), 0)
+                self.assertFalse(server._stdin.closed)
+                self.assertIsNone(server._stdout)
+            self.assertEqual(server.process.returncode, 0)
+        finally:
+            if server is not None and not server._closed:
+                try:
+                    server._terminate_if_running()
+                finally:
+                    server._close_streams()
+            for fd in (read_fd, write_fd):
+                if fd >= 0:
+                    os.close(fd)
+
     def test_native_report_requires_presented_identity_to_match_authority_and_latest_frame(self) -> None:
         identity = {
             "session": "9",
@@ -326,6 +413,67 @@ class ProjectSmokeProcessTests(unittest.TestCase):
                 expected_tick="1",
                 expected_exit_reason="TimeLimit",
                 latest_frame=mismatched_latest,
+            )
+
+    def test_native_liveness_report_requires_normal_time_limit_and_transport_identity(self) -> None:
+        identity = {
+            "session": "11",
+            "tick": "0",
+            "sequence": "1",
+            "project_generation": "2",
+            "source_digest": "b" * 64,
+        }
+        report = {
+            "command": "project_view",
+            "session": "11",
+            "source_digest": "b" * 64,
+            "authority_final_tick": "0",
+            "termination": "StopRequested",
+            "accepted_packet": dict(identity),
+            "last_presented": {
+                **identity,
+                "physical_width": 640,
+                "physical_height": 360,
+            },
+            "window": {"exit_reason": "TimeLimit", "rendered_frames": 2},
+            "coordinator": {
+                "protocol_detach_reason": "stdin_eof",
+                "protocol_requests": 0,
+                "protocol_errors": 0,
+            },
+            "resources": {"geometry_upload_count": 1, "geometry_upload_bytes": 12},
+        }
+        validated = _validate_native_liveness_report(
+            report,
+            expected_source_digest="b" * 64,
+            expected_detach_reason="stdin_eof",
+            expected_protocol_requests=0,
+        )
+        self.assertIs(validated, report)
+
+        blocked_stdout = {
+            **report,
+            "coordinator": {
+                "protocol_detach_reason": None,
+                "protocol_requests": 1,
+                "protocol_errors": 0,
+            },
+        }
+        validated_blocked = _validate_native_liveness_report(
+            blocked_stdout,
+            expected_source_digest="b" * 64,
+            expected_detach_reason=None,
+            expected_protocol_requests=1,
+        )
+        self.assertIs(validated_blocked, blocked_stdout)
+
+        not_presented = {**report, "window": {"exit_reason": "TimeLimit", "rendered_frames": 0}}
+        with self.assertRaisesRegex(SmokeError, "presented no surface frames"):
+            _validate_native_liveness_report(
+                not_presented,
+                expected_source_digest="b" * 64,
+                expected_detach_reason="stdin_eof",
+                expected_protocol_requests=0,
             )
 
 

@@ -102,9 +102,9 @@ P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 
 - [x] P02.1a: typed operation/result·attachment별 소유권·admission/outcome credit·clock mode의 public API 고정.
 - [x] P02.1b: 실제 ProjectSession의 generic host/client·manual/realtime·frame·stop/shutdown과 복수 attachment 검증.
 - [ ] P02.1c: 기존 fixture LiveSession의 공통 kernel 재사용·호환 검사, migration 중 임시 중복의 명시/제거.
-- [ ] P02.2a: 외부 project view와 같은 session의 JSONL 제어, 입력/창 종료/포화 실패 처리.
+- [x] P02.2a: 외부 project view와 같은 session의 JSONL 제어, 입력/창 종료/포화 실패 처리.
 - [x] P02.2a.1: shared source·실제 tick 0·같은 actor의 native 창/JSONL·실제 Mac 입력과 정상 종료·단위 수준 포화/실패 검증.
-- [ ] P02.2a.2: 실제 process의 EOF 후 viewer 유지·의도적으로 막힌 stdout·manual F10/일반 입력과 reserved Step 경합까지 추가 검증. a.1만으로 a 전체를 닫지 않는다.
+- [x] P02.2a.2: 실제 process의 EOF 후 viewer 유지·의도적으로 막힌 stdout·manual F10/일반 입력과 reserved Step 경합 검증. native 22-check smoke와 별도 release physical 입력/report로 확인.
 - [x] P02.2b: 불변 loaded generation의 CPU/GPU resource 재사용과 transform-only update 계측. 실제 source watch/reload·asset generation 교체는 P01.2/P03로 남는다.
 - [ ] P02.3: live capture/조건/입력·실제 MCP·SDK attach·trace, 필요한 2D/UI/서버 연결까지 제품 인수.
 

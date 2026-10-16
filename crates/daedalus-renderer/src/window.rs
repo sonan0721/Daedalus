@@ -668,6 +668,11 @@ impl WindowApp {
         width: u32,
         height: u32,
     ) -> Self {
+        let latest_presentation = packet.as_ref().map(|packet| PresentationMetadata {
+            sequence: packet.sequence(),
+            tick: packet.tick().get(),
+            generation: packet.project_generation(),
+        });
         Self {
             messages,
             packet_messages,
@@ -682,7 +687,7 @@ impl WindowApp {
             surface: None,
             scene,
             local_camera: None,
-            latest_presentation: None,
+            latest_presentation,
             loading_since: initial_loading.then_some(now),
             message_source_disconnected: false,
             keys_down: HashSet::new(),
@@ -1483,6 +1488,29 @@ mod tests {
             [0.02, 0.03, 0.04, 1.0],
             Vec::new(),
         ))
+    }
+
+    #[test]
+    fn packet_window_initial_metadata_is_accepted_but_not_presented() {
+        let initial = packet(9, 12, 5, &"ab".repeat(32));
+        let (sender, receiver) = std::sync::mpsc::channel::<super::PacketWindowMessage>();
+        let app = WindowApp::new_packet(
+            initial,
+            receiver,
+            WindowOptions::default(),
+            PacketRendererLimits::default(),
+        );
+
+        assert_eq!(
+            app.latest_presentation,
+            Some(PresentationMetadata {
+                sequence: 12,
+                tick: 9,
+                generation: 5,
+            })
+        );
+        assert!(app.last_presented.is_none());
+        drop(sender);
     }
 
     #[test]

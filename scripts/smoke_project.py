@@ -23,8 +23,10 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 300.0
 MAX_JSONL_RESPONSE_BYTES = 1024 * 1024
 NATIVE_VIEW_SECONDS = 3
+NATIVE_OBSERVER_SECONDS = 2
 NATIVE_VIEW_WIDTH = 640
 NATIVE_VIEW_HEIGHT = 360
+MAX_STDOUT_PIPE_FILL_BYTES = 8 * 1024 * 1024
 ENTITY_ID = "entity:smoke-mesh"
 PROJECT_NAME = "smoke-mesh-project"
 TRANSFORM_AFTER_COMMAND = {
@@ -222,6 +224,8 @@ class _JsonlProjectServer:
         command: Sequence[str] | None = None,
         protocol_version: int = PROTOCOL_VERSION,
         process_label: str = "project serve",
+        stdin_target: Any = subprocess.PIPE,
+        stdout_target: int | None = None,
     ) -> None:
         self.timeout = timeout
         self.protocol_version = protocol_version
@@ -232,20 +236,24 @@ class _JsonlProjectServer:
             self.process = subprocess.Popen(
                 [os.fspath(binary), *process_arguments],
                 cwd=cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                stdin=stdin_target,
+                stdout=subprocess.PIPE if stdout_target is None else stdout_target,
                 stderr=self.process_stderr,
                 bufsize=0,
             )
         except OSError as error:
             self.process_stderr.close()
             raise SmokeError(f"could not start {self.process_label}: {error}") from error
-        assert self.process.stdin is not None
-        assert self.process.stdout is not None
-        self._stdout = self.process.stdout
         self._stdin = self.process.stdin
-        self._selector = selectors.DefaultSelector()
-        self._selector.register(self._stdout, selectors.EVENT_READ)
+        if stdin_target == subprocess.PIPE:
+            assert self._stdin is not None
+        self._stdout = self.process.stdout
+        if stdout_target is None:
+            assert self._stdout is not None
+            self._selector: selectors.BaseSelector | None = selectors.DefaultSelector()
+            self._selector.register(self._stdout, selectors.EVENT_READ)
+        else:
+            self._selector = None
         self._buffer = bytearray()
         self._closed = False
 
@@ -258,6 +266,8 @@ class _JsonlProjectServer:
             return ""
 
     def send_only(self, request_id: str, operation: dict[str, Any]) -> None:
+        if self._stdin is None:
+            raise SmokeError(f"{self.process_label} has no writable stdin")
         envelope = {
             "protocol": self.protocol_version,
             "request_id": request_id,
@@ -281,6 +291,8 @@ class _JsonlProjectServer:
         timeout: float | None = None,
         allow_error: bool = False,
     ) -> dict[str, Any]:
+        if self._stdout is None or self._selector is None:
+            raise SmokeError(f"{self.process_label} stdout is intentionally not captured")
         self.send_only(request_id, operation)
         wait_timeout = self.timeout if timeout is None else min(timeout, self.timeout)
         deadline = time.monotonic() + wait_timeout
@@ -420,16 +432,20 @@ class _JsonlProjectServer:
         if self._closed:
             return
         self._closed = True
-        try:
-            self._selector.unregister(self._stdout)
-        except (KeyError, ValueError):
-            pass
-        self._selector.close()
+        if self._selector is not None:
+            try:
+                self._selector.unregister(self._stdout)
+            except (KeyError, ValueError):
+                pass
+            self._selector.close()
         self._close_stdin()
-        self._stdout.close()
+        if self._stdout is not None:
+            self._stdout.close()
         self.process_stderr.close()
 
     def _close_stdin(self) -> None:
+        if self._stdin is None:
+            return
         try:
             self._stdin.close()
         except OSError:
@@ -1253,6 +1269,224 @@ def _run_native_project_close(
     return report
 
 
+def _validate_native_liveness_report(
+    report: dict[str, Any],
+    *,
+    expected_source_digest: str,
+    expected_detach_reason: str | None,
+    expected_protocol_requests: int,
+) -> dict[str, Any]:
+    _expect(report.get("command") == "project_view", "native liveness report is from another command", report)
+    session = report.get("session")
+    _expect(isinstance(session, str) and session, "native liveness report has no session", report)
+    _expect(report.get("source_digest") == expected_source_digest, "native liveness source digest changed", report)
+    _expect(report.get("authority_final_tick") == "0", "native liveness case advanced authority", report)
+    _expect(report.get("termination") == "StopRequested", "native liveness session did not shut down normally", report)
+
+    window = report.get("window")
+    _expect(isinstance(window, dict), "native liveness report has no window summary", report)
+    _expect(window.get("exit_reason") == "TimeLimit", "native liveness viewer did not reach its time limit", report)
+    _expect(
+        type(window.get("rendered_frames")) is int and window["rendered_frames"] > 0,
+        "native liveness viewer presented no surface frames",
+        window,
+    )
+
+    accepted = report.get("accepted_packet")
+    presented = report.get("last_presented")
+    _expect(isinstance(accepted, dict) and isinstance(presented, dict), "native liveness report has no packet presentation", report)
+    accepted_identity = _packet_identity(accepted, context="liveness accepted packet")
+    presented_identity = _packet_identity(presented, context="liveness presented packet")
+    _expect(accepted_identity == presented_identity, "liveness packet was accepted but not presented", report)
+    _expect(
+        presented_identity["session"] == session
+        and presented_identity["tick"] == "0"
+        and presented_identity["source_digest"] == expected_source_digest,
+        "liveness presentation does not match the initial authority state",
+        presented_identity,
+    )
+    _expect(
+        type(presented.get("physical_width")) is int
+        and presented["physical_width"] > 0
+        and type(presented.get("physical_height")) is int
+        and presented["physical_height"] > 0,
+        "liveness presentation has invalid surface dimensions",
+        presented,
+    )
+
+    coordinator = report.get("coordinator")
+    _expect(isinstance(coordinator, dict), "native liveness report has no coordinator summary", report)
+    _expect(
+        coordinator.get("protocol_detach_reason") == expected_detach_reason,
+        "native liveness control detach reason did not match the transport case",
+        coordinator,
+    )
+    _expect(
+        coordinator.get("protocol_requests") == expected_protocol_requests
+        and coordinator.get("protocol_errors") == 0,
+        "native liveness protocol counters did not match the transport case",
+        coordinator,
+    )
+
+    resources = report.get("resources")
+    _expect(isinstance(resources, dict), "native liveness report has no resource counters", report)
+    _expect(
+        resources.get("geometry_upload_count") == 1
+        and type(resources.get("geometry_upload_bytes")) is int
+        and resources["geometry_upload_bytes"] > 0,
+        "native liveness viewer did not retain the one authored mesh resource",
+        resources,
+    )
+    return report
+
+
+def _fill_stdout_pipe(write_fd: int) -> int:
+    """Fill a POSIX pipe without blocking, restoring its original write mode afterward."""
+
+    if os.name != "posix":
+        raise SmokeError("the native stdout-backpressure case requires POSIX pipes")
+    try:
+        import fcntl
+    except ImportError as error:
+        raise SmokeError("the native stdout-backpressure case requires fcntl") from error
+
+    try:
+        original_flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+        fcntl.fcntl(write_fd, fcntl.F_SETFL, original_flags | os.O_NONBLOCK)
+    except OSError as error:
+        raise SmokeError(f"could not configure native stdout pipe: {error}") from error
+
+    written = 0
+    pipe_is_full = False
+    chunk = b"d" * (64 * 1024)
+    try:
+        while written < MAX_STDOUT_PIPE_FILL_BYTES:
+            try:
+                count = os.write(
+                    write_fd,
+                    chunk[: min(len(chunk), MAX_STDOUT_PIPE_FILL_BYTES - written)],
+                )
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                pipe_is_full = True
+                break
+            if count <= 0:
+                raise SmokeError("native stdout pipe accepted no bytes before its capacity check")
+            written += count
+    except OSError as error:
+        raise SmokeError(f"could not fill native stdout pipe: {error}") from error
+    finally:
+        try:
+            fcntl.fcntl(write_fd, fcntl.F_SETFL, original_flags)
+        except OSError as error:
+            raise SmokeError(f"could not restore native stdout pipe mode: {error}") from error
+
+    if not pipe_is_full or written == 0:
+        raise SmokeError(
+            f"could not fill native stdout pipe within the {MAX_STDOUT_PIPE_FILL_BYTES}-byte bound"
+        )
+    return written
+
+
+def _close_fd(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _run_native_project_eof(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    report_path = root / "native-eof-report.json"
+    command = _project_view_command(project, report_path, seconds=NATIVE_OBSERVER_SECONDS)
+    server = _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="project view stdin EOF case",
+        stdin_target=subprocess.DEVNULL,
+    )
+    with server:
+        server.wait_for_exit(timeout=timeout)
+
+    report = _read_native_report(report_path)
+    return _validate_native_liveness_report(
+        report,
+        expected_source_digest=expected_source_digest,
+        expected_detach_reason="stdin_eof",
+        expected_protocol_requests=0,
+    )
+
+
+def _run_native_project_blocked_stdout(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    if os.name != "posix":
+        raise SmokeError("the native stdout-backpressure case requires POSIX pipes")
+
+    report_path = root / "native-blocked-stdout-report.json"
+    command = _project_view_command(project, report_path, seconds=NATIVE_OBSERVER_SECONDS)
+    read_fd, write_fd = os.pipe()
+    server: _JsonlProjectServer | None = None
+    fill_bytes = 0
+    try:
+        fill_bytes = _fill_stdout_pipe(write_fd)
+        server = _JsonlProjectServer(
+            binary,
+            project,
+            cwd=cwd,
+            timeout=timeout,
+            command=command,
+            protocol_version=VIEW_PROTOCOL_VERSION,
+            process_label="project view blocked stdout case",
+            stdout_target=write_fd,
+        )
+        os.close(write_fd)
+        write_fd = None
+        try:
+            with server:
+                server.send_only("blocked-stdout-capabilities", {"op": "capabilities"})
+                # Keep the pipe read end open and unread while the finite viewer exits.
+                server.wait_for_exit(timeout=timeout)
+        finally:
+            if not server._closed:
+                try:
+                    server._terminate_if_running()
+                finally:
+                    server._close_streams()
+    finally:
+        _close_fd(write_fd)
+        _close_fd(read_fd)
+
+    report = _read_native_report(report_path)
+    validated = _validate_native_liveness_report(
+        report,
+        expected_source_digest=expected_source_digest,
+        expected_detach_reason=None,
+        expected_protocol_requests=1,
+    )
+    return {"stdout_pipe_bytes_filled": fill_bytes, "report": validated}
+
+
 def run_project_smoke(
     cli_binary: str | Path,
     *,
@@ -1409,7 +1643,30 @@ def run_project_smoke(
                 expected_source_digest=validated["source_digest"],
             )
             checks.append("native_view_explicit_close_exit")
-            view_results = {"time_limit_report": timed_view, "close_report": close_view}
+            eof_view = _run_native_project_eof(
+                binary,
+                project,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+                expected_source_digest=validated["source_digest"],
+            )
+            checks.append("native_view_eof_detaches_without_stopping_window")
+            blocked_stdout_view = _run_native_project_blocked_stdout(
+                binary,
+                project,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+                expected_source_digest=validated["source_digest"],
+            )
+            checks.append("native_view_blocked_stdout_does_not_block_shutdown")
+            view_results = {
+                "time_limit_report": timed_view,
+                "close_report": close_view,
+                "eof_report": eof_view,
+                "blocked_stdout": blocked_stdout_view,
+            }
 
     result = {
         "schema_version": 1,

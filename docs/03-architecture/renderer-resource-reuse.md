@@ -42,6 +42,8 @@ CPU source file hash를 사용할 수도 있지만 공개 Rust procedural mesh�
 
 ## packet 창·호환·실패 API
 
+초기 packet도 검증을 통과한 accepted 상태다. 창 생성 시 그 tick/sequence/generation을 title/report에 표시하고, 아직 surface 제출 전인 `last_presented`는 None으로 유지한다. manual tick 0을 영구 미확인 상태(`—`)로 표시하거나 초기 accepted identity를 GPU present 완료로 바꾸지 않는다.
+
 Luna xhigh의 window source 감사에 따라 별도 `PacketWindowMessage::{Present { packet: Arc<RenderPacket>, loading }, SetLoading(bool), Close, Abort(String)}`를 사용한다. `Close`는 AI/CLI의 정상 종료 요청이며 기존 `WindowExitReason::CloseRequested`로 처리한다. 오류용 Abort나 control transport의 EOF를 정상 종료로 대체하지 않는다. `run_packet_windowed_reported(initial_packet, receiver, WindowOptions, PacketRendererLimits)`는 새 `PacketWindowOutcome`을 반환한다. 기존 WindowMessage/WindowOptions/WindowInput/WindowOutcome의 필드나 variant를 바꾸지 않는다.
 
 새 outcome은 공통 WindowReport, 마지막 accepted packet의 Arc, 마지막으로 surface에 제출·present한 packet/view 정보와 resource 통계를 가진다. `PresentedPacket`은 session/tick/sequence/project generation/source digest identity와 그 frame에 사용한 camera·physical width/height를 함께 기록한다. surface 취득/encoding/submission/present 호출까지 진행한 경우만 갱신한다. GPU 완료나 실제 display scanout을 증명하는 표시는 아니다. accepted metadata와 실제 제출 정보를 혼동하지 않는다.

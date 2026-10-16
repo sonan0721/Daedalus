@@ -46,6 +46,10 @@ CI는 read-only contents 권한으로 실행하고 checkout Action을 확인한 
 
 P03.2c에서는 같은 packaged step에 offline audio를 포함했다. P03.3a의 다음 변경은 이 step을 `Verify packaged CLI asset, audio, and preparation smoke`로 이름 붙이고 `--assets --audio --asset-preparation`을 같은 staged binary에 한 번 실행하는 것이다. 장치·다운로드·추가 job 없이 새 native worker/공통 제어도 실제 배포 바이너리에서 검사한다. source/로컬 통과와 두 CI의 실제 새 step 통과를 구분하며, 기존 보호 check3개·제품 gate5개·tag publish 조건은 유지한다.
 
+PR14에서 두 새 combined50 step·Linux linkage·다섯 CI와 main 동일 tree를 인수했다. 이후 cache 감사는 PR에만 저장된 package cache가 다음 PR에 재사용되지 않는 범위 문제를 확인했다. [DEV06/07 개선 계약](development-iteration-pipeline.md)에 따라 같은 workflow의 main push build를 추가할 계획이다. publish job의 tag-only 조건과 read-only build 권한은 유지한다. 현재 main의 manual package run은 cache 초기 공급이며 공개 Release가 아니다.
+
+초기 main manual run은 두 package/staged50 성공·Publish skipped, 실제 main-scoped cache 두 개 생성을 확인했다. Luna가 main push trigger 두 줄을 구현했고 YAML/기존 package14를 통과했지만 자동 trigger·다음 PR cache hit의 실제 인수는 아직 남았다. 새 job이나 별도 packaging backend는 추가하지 않는다.
+
 기여 문서의 구조는 Bevy·Godot의 공식 기여 입구를 참고하되 대규모 팀 규칙을 그대로 복제하지 않았다. [Bevy](https://github.com/bevyengine/bevy/blob/main/CONTRIBUTING.md), [Godot](https://raw.githubusercontent.com/godotengine/godot/master/CONTRIBUTING.md)
 
 ## 개발·CI 파이프라인 최적화

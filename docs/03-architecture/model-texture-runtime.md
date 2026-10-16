@@ -1,6 +1,6 @@
 # P03.2a 모델·텍스처 실행 계약
 
-상태: 로컬 구현·CPU/Metal/native 검증 통과·clean package/PR CI 대기 · 2026-10-16 · P03.2a/DEV01/DEV03/DEV05/DEV08
+상태: 로컬 구현·CPU/Metal/native 검증 통과·clean package 통과·PR CI 대기 · 2026-10-16 · P03.2a/DEV01/DEV03/DEV05/DEV08
 
 ## 목적과 범위
 
@@ -129,6 +129,6 @@ focused 검사 → source 통합 → 필요한 workspace/managed 회귀 → 실�
 
 ## 현재 구현과 근거
 
-Luna xhigh source를 조정자가 통합 리뷰한 뒤 workspace CPU254·Python54·strict Clippy/fmt·assets31·실제 Metal4·native/model24를 통과했다. public Cube 두 entity에서 geometry1/texture1 공유와 실제 대리석 texture를 확인했다. 창이 살아 있는 동안 별도 capture와 이후 authority 제어도 통과했다. 상세 command·binary/source identity와 한계는 [작업 기록](../06-worklog/2026-10-16-model-texture-runtime.md)을 따른다. clean release package와 PR 최종 다섯 CI/main 병합은 아직 대기하므로 P03.2a 체크박스는 열어 둔다.
+Luna xhigh source를 조정자가 통합 리뷰한 뒤 workspace CPU254·Python54·strict Clippy/fmt·assets31·실제 Metal4·native/model24를 통과했다. public Cube 두 entity에서 geometry1/texture1 공유와 실제 대리석 texture를 확인했다. 창이 살아 있는 동안 별도 capture와 이후 authority 제어도 통과했다. 상세 command·binary/source identity와 한계는 [작업 기록](../06-worklog/2026-10-16-model-texture-runtime.md)을 따른다. clean release package/extracted assets31/native-model24도 통과했다. PR 최종 다섯 CI/main 병합은 아직 대기하므로 P03.2a 체크박스는 열어 둔다.
 
 `active_texture_entries`는 asset texture를 센다. untextured model용 내부 white texture는 별도 고정 자원이며 resident bytes에는 포함한다. resident/staging/scratch/bookkeeping 수치는 명시적으로 charge한 logical resource 비용이다. allocator·driver·attachment를 포함한 실제 전체 VRAM/RSS 측정값으로 해석하지 않는다.

@@ -89,7 +89,7 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 
 ## P03.2a의 반복 제거와 로컬 근거
 
-[모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)은 다음 중복과 실패를 source 감사로 확인해 구현 대상으로 고정했다. 공통 loader·packet·stats 변환·cache pin 해제·기존 opt-in smoke로 구현했고 로컬 CPU/GPU/native를 검증했다. clean package/PR CI는 대기다.
+[모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)은 다음 중복과 실패를 source 감사로 확인해 구현 대상으로 고정했다. 공통 loader·packet·stats 변환·cache pin 해제·기존 opt-in smoke로 구현했고 로컬 CPU/GPU/native를 검증했다. clean package/extracted 검사도 통과했고 PR CI는 대기다.
 
 | 현재 반복 또는 장애 | 이번 공통 책임 | 효과를 확인할 근거 |
 | --- | --- | --- |

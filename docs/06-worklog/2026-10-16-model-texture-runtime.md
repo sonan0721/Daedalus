@@ -109,3 +109,17 @@ capture의 resident charge는4,283,124 bytes, bookkeeping reservation5,491,200 b
 ## 남은 인수
 
 clean source commit의 local release archive/extracted binary, 최종 PR 다섯 CI와 두 packaged-assets step, main 동일 tree가 아직 남아 있다. P03.2a는 이 하위 gate가 끝난 뒤에만 체크한다. P03.2b sprite·P03.2c audio·P03.3 reload·P03.4 반복 루프 품질과 P02 live capture/MCP/SDK, 전체 D1→D2→D3는 계속 미완료다.
+
+## clean local release CLI
+
+renderer source를 `1d901f1`, CLI/자동화/검증 문서를 `96fe951ad66467ae0138514fae700db66c8c8630`에 주기적으로 커밋한 뒤 clean source에서 기존 `python3 scripts/package_cli.py`를 실행했다. native release compile12.71초 관찰이며 toolchain/target cache를 재사용했다. backend의 archive/extracted CPU18 검증이 통과했다. 새로운 package 도구나 공개 tag/Release는 만들지 않았다.
+
+- local package directory: `dist/local/daedalus-0.1.0-aarch64-apple-darwin-96fe951ad664-clean-20261016T051756Z-9c4515dda04c4253b76981c59118edac/`
+- manifest: version0.1.0, target `aarch64-apple-darwin`, features `[window]`, profile `release`, `dirty:false`, exact commit `96fe951ad66467ae0138514fae700db66c8c8630`.
+- archive SHA-256: `d335d62bb26bd054f0f3484e747bf90db8dab1fcec320e1eb999f08170454bcc`.
+- binary SHA-256: `c1124f675fe4f4fecf6256e87d06bfa5dc8fa2b48ab08f497f7972689da106c2`.
+- dependency inventory SHA-256: `435b720646dbdb5c1e9b6885b6437b8bb53bb95d39593532eea2a560fb6a6d3f`; notices SHA-256: `90f06b4836dab77d568a9d2cd903f19659f1de15135941f81511d3f2c009ca72`.
+
+archive를 ignored `dist/qa-assets/p03-model-release-extracted/`에 별도 압축 해제하고 그 binary에서 `--assets`31건/0.620610초, `--view --models`24건/11.063168초를 통과했다. 두 report의 binary hash는 위 release hash와 같다. 보고서는 `p03-model-release-assets-smoke.json`, `p03-model-release-native-smoke.json`이고 build log는 `p03-model-local-package.log`다. 이 검사는 실제 archive의 모델 창/동시 capture/authority 및 기존 CPU importer 경로를 확인하며, C# SDK/.NET/game export를 archive에 포함했다는 뜻은 아니다.
+
+로컬 package 조건은 충족했다. 다음은 최종 PR 다섯 CI·두 packaged-assets step과 main 동일 tree 확인이다. P03.2a와 전체 제품 체크는 아직 열려 있다.

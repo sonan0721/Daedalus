@@ -73,6 +73,15 @@ cargo run -p daedalus-cli --features capture -- project capture /path/to/authore
 
 The report records source digest, authored scene revision, authority tick, snapshot tick, geometry counts, and actual adapter. A batch capture opens a new session; it is not a capture of another running `serve` or the fixture window. No adapter is an error. The 2026-10-16 coordinator check rendered an external one-triangle project with its own material on Apple M3 Pro/Metal, and independently checked real command application, stale-revision rejection, and matching snapshots. Whole-engine and game acceptance remain open.
 
+Reuse the CPU project smoke with an already-built binary:
+
+```sh
+cargo build -p daedalus-cli --locked
+python3 scripts/smoke_project.py --cli target/debug/daedalus
+```
+
+The helper does not build or initialize a GPU. It creates and removes external temporary projects, derives handles from the active session, and checks empty initialization/no-overwrite, shared load identity, accepted versus applied commands, actual transforms/revisions/snapshots, stale-command rejection, and unsupported-component diagnostics. Processes and JSONL responses have finite timeouts; malformed, oversized, and stalled responses are failure cases with child cleanup tests. The success JSON includes the executable hash, 18 checks, and observed wall time. It does not certify gameplay, live-window behavior, or product acceptance. Native archive verification reuses this same helper on the extracted executable.
+
 An optional GPU CLI build is explicit:
 
 ```sh
@@ -124,7 +133,7 @@ Recheck a generated archive using its printed path:
 python3 scripts/package_cli.py --verify-archive /path/to/daedalus-package.tar.gz
 ```
 
-Verification checks the archive SHA-256, entry names and types, embedded manifest and file hashes, executable permissions, and extracted CLI `--version` and CPU `inspect`. This does not exercise GPU capture; use the separate real GPU check above. The dependency inventory is a conservative Cargo graph with recorded target/features, not a binary-symbol SBOM. Missing license texts fail packaging unless an exact package/checksum has explicitly curated upstream or declared-SPDX evidence; canonical reference texts are labeled separately from upstream originals.
+Verification checks the archive SHA-256, entry names and types, embedded manifest and file hashes, executable permissions, extracted CLI `--version` and CPU `inspect`, and the shared external-project CPU smoke. This does not exercise GPU capture; use the separate real GPU check above. The dependency inventory is a conservative Cargo graph with recorded target/features, not a binary-symbol SBOM. Missing license texts fail packaging unless an exact package/checksum has explicitly curated upstream or declared-SPDX evidence; canonical reference texts are labeled separately from upstream originals.
 
 The `release` workflow performs native packaging on macOS arm64 and Linux x64 for PRs and manual runs with read-only repository permissions. A future pushed `v<CLI SemVer>` tag must match the crate version, resolve to a commit in main history, and build cleanly on both targets before the publish job creates a GitHub Release. Only that job receives write permission. Tag publication, signing/notarization, Windows packaging, and managed runtime distribution have not been verified by a PR dry build. No tag or public release is created as part of the initial setup.
 

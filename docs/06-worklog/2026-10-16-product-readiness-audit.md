@@ -67,4 +67,8 @@ P01.1a~c의 좁은 기반만 체크했다. P01 전체·D1, 이후 별도 D2/D3�
 
 새 [에셋 상세 문서](../03-architecture/asset-import-cook-and-residency.md)는 공식 glTF/PNG/WAV 조사, CPU cook와 GPU residency identity, 부분 변경 무효화와 last-good generation을 명세하기 위해 만들었다. 새 importer 구현/측정 결과는 아니다. 기존 제작 개요·출처 등록부·문서 지도와 연결했다.
 
-수동으로 외부 project를 작성하고 JSONL 명령/결과를 조립하는 반복을 줄이기 위해 [DEV06 smoke 계약](../04-plan/development-iteration-pipeline.md)에 reusable CPU 검사와 archive 재사용 경로를 먼저 적고 Luna xhigh에게 구현을 맡겼다. CLI·package가 같은 검사를 사용하고 새 Rust build를 불필요하게 실행하지 않는 것이 목적이다. 자동화 구현·실행 결과는 확인 후 기록한다.
+수동으로 외부 project를 작성하고 JSONL 명령/결과를 조립하는 반복을 줄이기 위해 [DEV06 smoke 계약](../04-plan/development-iteration-pipeline.md)에 reusable CPU 검사와 archive 재사용 경로를 먼저 적고 Luna xhigh에게 구현을 맡겼다. CLI·package가 같은 검사를 사용하고 새 Rust build를 불필요하게 실행하지 않는 것이 목적이다.
+
+조정자는 `python3 scripts/smoke_project.py --cli target/debug/daedalus`로 18 checks를 독립 통과했다. empty init/no-overwrite, source identity, dynamic handle, 수락 전후 실제 state, exact command ID·Applied revision, stale RevisionConflict, snapshot/current tick, unsupported 오류와 정상 종료를 대조한다. 입력은 임시 external project이며 종료 후 정리한다. 같은 코드가 archive 추출 binary 검사에도 사용된다. CPU smoke는 GPU·visible window·managed 검사를 대체하지 않는다.
+
+`dist/project-evidence/cpu-smoke.json`의 executable SHA-256은 `532017431c2b982718c843cda6b489f7cbb9c93ff2c493e11aef53b8302b1d54`, warm 단일 관찰 wall time은 0.093575초다. 이전 수동 작업과 통제된 시간 비교는 없으므로 개선 배율을 쓰지 않는다. Python 전체 regression은 41건 통과했으며 응답 timeout/잘못된 JSON/과대 line 때 자식 process와 file handle 정리도 검사한다. package stub unit test의 project smoke는 mock 경계를 명시하고 실제 binary 시험과 구분한다.

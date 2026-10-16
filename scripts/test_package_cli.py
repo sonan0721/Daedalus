@@ -81,21 +81,32 @@ class PackageCliTests(unittest.TestCase):
 
     def create_package(self, output_directory: Path, binary: Path | None = None) -> package_cli.PackagePaths:
         with patch.dict(os.environ, {"CARGO_HOME": str(self.cargo_home)}):
-            return package_cli.create_package(
-                binary_path=binary or self.binary,
-                output_directory=output_directory,
-                repository=REPOSITORY,
-                version=VERSION,
-                commit=COMMIT,
-                dirty=True,
-                target=TARGET,
-                rust_toolchain=RUST_TOOLCHAIN,
-                build_id=BUILD_ID,
-                build_timestamp_utc=BUILD_TIMESTAMP,
-                metadata=empty_cli_metadata(REPOSITORY),
-            )
+            # This fixture only implements --version and inspect. Keep archive/version checks
+            # real, but make the external-project smoke boundary explicit instead of claiming
+            # this stub exercised JSONL or project lifecycle behavior.
+            with patch.object(
+                package_cli,
+                "run_project_smoke",
+                return_value={"status": "passed", "checks": [{"name": "mocked-unit-boundary"}]},
+            ) as project_smoke:
+                package = package_cli.create_package(
+                    binary_path=binary or self.binary,
+                    output_directory=output_directory,
+                    repository=REPOSITORY,
+                    version=VERSION,
+                    commit=COMMIT,
+                    dirty=True,
+                    target=TARGET,
+                    rust_toolchain=RUST_TOOLCHAIN,
+                    build_id=BUILD_ID,
+                    build_timestamp_utc=BUILD_TIMESTAMP,
+                    metadata=empty_cli_metadata(REPOSITORY),
+                )
+                self.project_smoke_mock_calls = project_smoke.call_count
+                self.project_smoke_mock_arguments = project_smoke.call_args_list
+                return package
 
-    def test_creates_and_smoke_tests_real_archive_with_manifest_and_checksums(self) -> None:
+    def test_packages_archive_with_stub_cli_and_preserves_manifest_and_checksums(self) -> None:
         output_directory = self.root / "output"
         package = self.create_package(output_directory)
 
@@ -103,8 +114,12 @@ class PackageCliTests(unittest.TestCase):
             package.archive,
             expected_tag=f"v{VERSION}",
             expected_commit=COMMIT,
-            run_smoke=True,
+            run_smoke=False,
         )
+        self.assertEqual(self.project_smoke_mock_calls, 1)
+        smoke_binary = self.project_smoke_mock_arguments[0].args[0]
+        self.assertEqual(smoke_binary.name, package_cli.ARCHIVE_BINARY)
+        self.assertEqual(self.project_smoke_mock_arguments[0].kwargs["cwd"], smoke_binary.parent)
         self.assertEqual(manifest["cli_version"], VERSION)
         self.assertEqual(manifest["exact_commit"], COMMIT)
         self.assertTrue(manifest["dirty"])

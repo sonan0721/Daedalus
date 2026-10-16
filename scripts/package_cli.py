@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from collect_cli_notices import NoticeCollectionError, collect_cli_notices
+from smoke_project import SmokeError, run_project_smoke
 
 
 SCHEMA_VERSION = 1
@@ -457,6 +458,12 @@ def _run_binary_smoke(binary: Path, version: str, cwd: Path) -> None:
         raise PackageError("extracted CLI inspect smoke did not return JSON") from error
     if not isinstance(output, dict) or output.get("command") != "inspect" or output.get("entity_count") != 2:
         raise PackageError("extracted CLI inspect smoke returned unexpected CPU state")
+    try:
+        smoke_result = run_project_smoke(binary, cwd=cwd)
+    except SmokeError as error:
+        raise PackageError(f"extracted CLI project smoke failed: {error}") from error
+    if smoke_result.get("status") != "passed" or not smoke_result.get("checks"):
+        raise PackageError("extracted CLI project smoke returned no passing checks")
 
 
 def verify_archive(

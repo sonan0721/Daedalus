@@ -1,6 +1,6 @@
 # 실제 공개 에셋의 import 검증 출처
 
-상태: 원본·라이선스·hash와 실제 CPU import/미지원 진단 확인, runtime 소비 전 · 2026-10-16 · P03.1/DEV03
+상태: 원본·라이선스·hash와 CPU import 확인, Cube 실제 GPU 표시 확인·2D/audio 소비 전 · 2026-10-16 · P03.1/DEV03
 
 ## 목적과 범위
 
@@ -22,7 +22,7 @@
 | LICENSE.md | 766 | 9f5611b2615694034748e579fd3b61bf760b2ae9cd084b6c5d3822132f391b3c |
 | README.md | 776 | 63b36a9a36b751d00ca02bd7f63802d1ac3ab8177aabd0be92dae19ab55d2a63 |
 
-실제 JSON/IHDR/chunk를 확인한 결과 scene/node/mesh/material은 각 1개이며 indexed triangles는 36 vertices/36 indices, POSITION/NORMAL/UV0와 추가 TANGENT를 가진다. 재질은 opaque base-color PNG, metallic 0, roughness 0.079다. PNG는 512×512, 8-bit RGB이며 IHDR/IDAT/IEND만 있다. 미사용 TANGENT와 normal map 등이 요구하는 tangent의 의미를 구분한다. 후속 실제 CLI CPU cook은 같은 모델2개 ID의 geometry1회 cook/공유 key와36/36 counts를 확인했다. 실제 화면 표시 인수는 아니다.
+실제 JSON/IHDR/chunk를 확인한 결과 scene/node/mesh/material은 각 1개이며 indexed triangles는 36 vertices/36 indices, POSITION/NORMAL/UV0와 추가 TANGENT를 가진다. 재질은 opaque base-color PNG, metallic 0, roughness 0.079다. PNG는 512×512, 8-bit RGB이며 IHDR/IDAT/IEND만 있다. 미사용 TANGENT와 normal map 등이 요구하는 tangent의 의미를 구분한다. 후속 실제 CLI CPU cook은 같은 모델2개 ID의 geometry1회 cook/공유 key와36/36 counts를 확인했다. 후속 P03.2a에서 원본 두 entity의 texture 실제 표시와 geometry/texture 단1회 upload, native redraw/capture를 확인했다. 정확한 command/counter와 한계는 [모델 실행 기록](../06-worklog/2026-10-16-model-texture-runtime.md)을 따른다. 이것은 static subset이며 일반 엔진/게임 인수는 아니다.
 
 ## 2D: Kenney Tiny Dungeon
 

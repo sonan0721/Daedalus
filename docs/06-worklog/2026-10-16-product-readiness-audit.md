@@ -150,3 +150,11 @@ read-only credit 재감사에서는 실제 reader lease·pending/종료·panic c
 Luna xhigh renderer 담당자는 renderer 전체·Cargo.lock·공유 Cargo target을 단독 소유한다. runtime 담당자는 disjoint project/session/lib의 shared source/tick-0와 테스트 source부터 작성하며 Cargo는 기다린다. 별도 Luna는 새 계약을 read-only 검토한다. root는 문서·리뷰·통합 검증을 맡는다. 새 범용 개발 도구나 cold target을 만들어 작업을 중복하지 않는다. 아직 새 코드의 최종 검증·개선 수치는 없다.
 
 read-only 계약 감사는 별도 input client가 session-wide Step reserve까지 분리한다는 문구 오류를 찾았다. 실제 native reserve는 한 lane이며 per-client quota와 다르다. 계약을 먼저 수락한 Step이 점유하고 다른 client는 ResultCapacity를 받는 것으로 바로잡았다. UI 입력 결과는 즉시 회수하되 protocol의 retained Step 결과는 ack/forget까지 보존한다. 추가 무제한 lane이나 hidden retry를 넣지 않는다.
+
+## P02.2 중간 library 검증과 남은 연결
+
+renderer owner의 첫 source handoff 뒤 root는 `cargo test -p daedalus-runtime --locked`의 unit 52건+integration 2건과 `cargo test -p daedalus-renderer --all-features --locked`의 CPU 33건을 통과했다. renderer hardware 2건은 해당 기본 실행에서 ignored다. 두 package all-target/all-feature strict Clippy도 통과했다. scoped format check는 runtime의 match 들여쓰기 차이로 실패해 담당자에게 수정 요청했으며, 이 시점을 전체 검사 통과로 표시하지 않는다.
+
+Luna xhigh의 별도 실제 native GPU 시험 `packet_gpu_reuse_matches_legacy_capture_and_dirty_counters`는 통과했고 root는 남긴 PNG의 foreground를 직접 확인했다. rotation/nonuniform scale을 포함한 legacy 대비 pixel 허용 오차·visible material 차이, unchanged/generation-only reuse, transform/material-only dirty, 변경 payload/resize·invalid 후보 보존을 검사한다. 첫 결과는 geometry upload 1회/84 bytes, instance 2행/256 bytes, material 2행/96 bytes였다. 마지막 누적 geometry upload는 실제 payload 변경을 포함한 2회, instance 3행, material 3행, depth 생성 2회(initial+resize), active 1/84 bytes와 retired 1/84 bytes다. capture는 `/var/folders/fm/9kct1n9d3lxc2dxqmwh_6jhr0000gn/T/daedalus-packet-initial-47374.png`와 같은 경로의 `daedalus-packet-legacy-47374.png`에 있다. 이는 작은 실제 GPU fixture이며 상용 화질/144fps/실행 창의 증거가 아니다.
+
+normal inverse overflow와 generation/source/sequence 충돌은 source 감사에서 수정했고 CPU 회귀를 추가했다. validated normal의 private memoization과 이전 transform 재사용으로 불필요한 inverse 반복을 피하며 GPU/cache mutation 전에 후보 slot을 준비한다. 다음 변경은 두 synchronous capture의 private readback helper 공통화다. 위 결과는 그 refactor 이전이며 refactor·CLI 연결 뒤 실제 검사를 별도로 기록한다. CLI protocol-2/project window adapter는 아직 작성 중이다. Cargo target은 renderer→root의 focused 검사→CLI 담당자 순서로 한 명씩 넘겼다. P02 전체/D1/D2/D3는 계속 진행 중이다.

@@ -63,6 +63,8 @@ AI 루프는 GUI automation만 반복하는 방식에 의존하지 않는다. CL
 
 ## DEV01/DEV08 후속 설계
 
+P02.2 adapter 다음 DEV06 작업은 기존 `scripts/smoke_project.py`의 opt-in `--view` 확장이다. 기본 CPU 18-check/package 검증 의미를 유지하고 빌드·GPU 초기화를 자동 강제하지 않는다. native viewer 모드는 같은 외부 임시 project·binary hash·유한 JSONL 읽기·cleanup을 재사용하며 protocol 2 manual submit→authority poll→Step→terminal→get/latest_frame과 report를 대조한다. 실제 표시의 확인은 window가 time limit으로 종료한 report의 presented identity와 state를 비교하고, 별도 짧은 Close 요청 사례로 정상 종료를 검사할 수 있다. latest_frame metadata만 보고 presented/capture 성공이라 판정하지 않는다. stderr는 임시 파일로 흘려 pipe deadlock을 피하고 모든 대기/child 종료에는 deadline을 둔다. 실제 GPU/display가 필요한 opt-in이며 CPU CI/package의 기존 smoke를 이 모드로 바꾸지 않는다. 이 문단은 다음 구현 계약이지 실행 결과가 아니다.
+
 P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 typed 요청·owned 결과·clock·포화/종료를 먼저 고정했다. 계약 감사에서 Manual Step admission deadlock, client-held frame retention, 유한 replay의 의미를 보완한 뒤 Luna xhigh가 runtime/world를 구현했다. root는 backing 회수 수정 후 workspace CPU 157건을 통과했고 기존 control/managed/fixture window는 별도 회귀로 확인한다. actor panic 때 in-flight ticket이 남는 문제와 중복 ticket의 종료 통계도 regression으로 막았다.
 
 실제 공통화는 native service와 legacy mailbox/stop까지다. legacy count-only result guard/receiver, JSONL·visible project·MCP·SDK attach는 남아 있다. 따라서 DEV01 전체 완료나 제작 속도 배율을 주장하지 않는다. 새 frontend는 이 kernel을 사용하고 adapter-specific envelope·동기/비동기 수명만 추가하는 것이 다음 검증 대상이다.

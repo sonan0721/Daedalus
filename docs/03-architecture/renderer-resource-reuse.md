@@ -88,6 +88,8 @@ eviction은 active packet과 미완료 submission이 쓰는 자원을 보호한�
 
 ## 실패와 검증
 
+source 리뷰에서 legacy PNG capture와 packet PNG capture의 row alignment·copy/readback·map/poll·PNG 저장 코드가 중복된 것도 확인했다. 첫 synchronous capture는 renderer-private 공통 helper로 모아 같은 크기/byte 한도·finite timeout·오류 의미를 사용한다. legacy는 이미 기록한 render encoder에 copy를 추가하고 packet은 선행 render submission 뒤 copy를 수행할 수 있다. geometry의 in-flight 추적은 실제 geometry를 참조한 submission을 보호한다. 이 blocking helper를 window callback이나 후속 asynchronous live capture에 그대로 사용하지 않는다.
+
 packet 준비는 mesh/layout/indices·finite transform/material·instance ID 중복·예산을 검사하고 required geometry를 임의 cube로 바꾸지 않는다. 실패 후보를 complete packet으로 게시하지 않는다. surface/device/capture 실패는 원인을 구분하고 정상 cache hit로 계수하지 않는다.
 
 검증은 실제 외부 project의 동일 device에서 수행한다.

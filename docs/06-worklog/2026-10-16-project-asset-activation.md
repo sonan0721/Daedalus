@@ -1,6 +1,6 @@
 # P03.3b/c 에셋 세대 전환 설계·작업 기록
 
-상태: 선행 P03.3a 인수 후 상세 계약 리뷰 시작·activation source 구현 미착수 · 2026-10-16
+상태: P03.3b.1 로컬 선행 검증·b.2 runtime/CLI/process 구현 중. 실제 generation 전환·b/c 통합 인수 전 · 2026-10-16
 
 ## 문서 목적
 
@@ -61,5 +61,21 @@ raw는 `p03-compatibility-focused-luna-attempt01..05.log`, `...content-luna-atte
 [headless CPU 세대 계약](../03-architecture/headless-asset-generation.md)을 작성했다. 공통 Stage/Commit/Cancel/Status·consuming owner·worker reclamation Arc·같은 snapshot의 새 frame sequence를 명시했다. renderer/audio를 지원한 것으로 우회하지 않고 CPU identity/수명을 먼저 검사하는 b의 내부 단계다. b.1 검증/source 리뷰와 다음 계약의 구현 가능성 확인을 마친 뒤 runtime 코드를 배정한다.
 
 runtime read-only 재검토는 동일 worker/cache·기존 public API 보존과 새 headless factory가 구현 가능함을 확인했다. 같은 후보의 두 번째 다른 Stage는 effect-free Busy, 같은 CommandId는 공통 replay로 고정했다. operation/result/outcome/status/getter·오류 unit variant·inspect/mutate 권한·단조 frame/authority snapshot sequence·CLI decimal wire도 먼저 공유했다. CLI는 기존 네 capability 조합의 base7 반복을 bounded extension composer로 줄이는 좁은 개선을 함께 구현할 계획이다. source 구현/실제 process 통과는 아직 아니다.
+
+b.1 source와 다음 public API/CLI 계약은 `ddcec71`로 branch에 commit/push했다. main에 새 activation이 들어간 것으로 보고하지 않는다. b.1 로컬 선행 검증 뒤 Luna runtime 담당에게 worker/actor/source swap/lib 전체를 함께 맡겨 private handoff를 서로 추측하며 병렬 구현하지 않도록 했다. 별도 CLI 담당은 고정 public API를 사용하는 CLI Rust/DTO/tests만, process 담당은 기존 Python helper/tests만 수정한다. 파일 소유권은 disjoint이고 runtime 담당 한 명만 shared-target Cargo를 사용한다. 나머지는 source-only이며 Python/process 검사는 다음 별도 lease 뒤 실행한다. 조정자는 MD·API/코드 review·통합/실제 artifact/Git을 맡는다.
+
+병행 root renderer read-only 감사는 stage-only의 추가 선행 조건을 찾았다. 현재 resource planner는 같은 제출에서 active를 바꾸므로 geometry `no_active`/새 texture requested set으로 old completed 자원을 victim으로 삼을 수 있다. stage-only에서 active+staged pin/회수를 바꾸지 않으면 last-good을 보존하지 못한다. 전체 upload/draw가 한 submission인 현재 구조도 pump별 진행/예산으로 나누어야 한다. source는 `packet_renderer.rs::plan_resources/submit_packet_frame/commit_resources`, `window.rs::redraw`이며 renderer source를 변경하거나 장치 검사를 실행하지 않았다. 후속 render 상세 동결 때 사용할 gap으로 기록했다.
+
+## b.2 source 분담과 첫 검증 도구 리뷰
+
+공개 API를 먼저 고정한 뒤 CLI는 activation 전용 protocol을 새로 만들지 않고 기존 protocol2 stdio loop를 공유하도록 소스를 작성했다. composer는 기존 base7·audio5·preparation3·activation4 이름을 조합한다. runtime·실제 CLI 연결은 아직 검증 전이다. 구현 body를 기다리느라 adapter source까지 멈추지 않도록, 동결한 factory/getter/outcome을 기준으로 source-only 작업을 진행하고 실제 compile은 provider와 통합 후 수행한다.
+
+runtime source 작업 중 Cargo를 잠깐 명시적으로 보류하고 Python 담당에게 한정 lease를 주었다. fake subprocess/transport/ACK/deadline 검사28개가6.894초에 통과했다. raw `p03-generation-python-luna-attempt01.log` SHA-256은 `66f4cb35716fe1dd91adaea80c386d8f61b314faacf954ef6d591c360e5149c8`다. 검사 뒤 Cargo를 runtime 담당에게 돌려줬다. 실제 engine/CLI 세대 전환은 실행하지 않았으며 stub의 고정 응답을 그 근거로 사용하지 않는다. source-only와 짧은 Python 검사를 겹친 실행 순서의 이전 대비 절감 시간은 측정하지 않았다.
+
+root 후속 source 리뷰는 실제 multi-commit helper의 명령 ID 오류를 찾았다. 첫 Prepare930001→Stage940001→Commit940002 다음에 Prepare930002를 쓰므로 공통 caller high-water보다 작아진다. 실제 CLI 실패를 실행한 것은 아니며 소스와 기존 ledger 계약의 충돌이다. 기능별 번호대 대신 세션 하나의 증가 issuer를 initial transform부터 사용하도록 수정했다. 새 명령은930001~930018 순서이며 replay·stale-generation 오류 뒤 같은 ID 재시도만 의도적으로 재사용한다. owner 종료도 exit0만 보지 않고 실제 `asset_activation_owner=stopped` stderr를 요구한다. 수정 source SHA-256은 smoke `f82180635164046e58a4ee332fd089fbe028b4ecbf4036f9f714d492c8b27edd`, tests `87bd9e399ba29f4817785bac0fac8b83e0a7f3020fab193df8e5bdb582baaa78`다. diff check만 통과했고 이 수정 뒤 Python/실제 CLI는 다음 lease 대기다.
+
+worker 구현에는 commit metadata→pending promotion과 다음 Prepare의 순서도 review 대상으로 공유했다. committed 후보를 stale ready처럼 지우지 않도록 promotion을 먼저 처리하고, handed-off/cancelled candidate의 실제 final backing release 전 quota를 돌려주지 않는다. 이 순서의 테스트 통과는 아직 기록하지 않는다.
+
+CLI adapter source는 고정한 public API 기준으로 먼저 완성해 scoped rustfmt/diff를 통과했다. 기존 stdio pump·capability composer를 공유하고 실제 service를 쓰는 stage→commit→status/frame test를 추가했지만, runtime actor integration/Cargo 검증은 아직 대기다. root는 worker Stop에서 candidate reclamation Arc를 먼저 비우는 경로도 발견해 수정/지연 reader 테스트를 요청했다. 종료 요청이나 actor 종료만으로 worker final drop을 증명하지 않는다.
 
 audio read-only 리뷰도 마쳤다. pinned Kira0.12.5의 render-owned sound가 실제 Frame Arc를 잡고 있고 handle reap은 이를 증명하지 않는다. weak observer만으로 callback의 마지막 큰 free를 막을 수 없어 실제 leaf 공유 store·generation alias/voice·cleanup strong sentinel과 정확한 owner baseline이 필요하다. project-audio/service source map은 명세에 반영했으며 audio 새 API·multibank/실제 회수는 아직 구현하지 않았다. 리뷰 담당은 source 수정과 tests를 실행하지 않았다.

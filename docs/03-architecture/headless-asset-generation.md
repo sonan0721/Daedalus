@@ -67,6 +67,8 @@ metadata 타입은 `Clone + Debug + PartialEq`와 private field/read-only getter
 
 `AssetActivationState`는 `Idle`, `StagePending`, `Staging`, `Staged`, `CancelRequested`, `Cancelled`, `Superseded`, `Committed`, `Failed`, `Stopping`, `Stopped`다. 마지막 summary/failure 한 개만 유지하고 과거 operation 목록을 늘리지 않는다. commit의 actor identity가 worker의 promotion 처리보다 먼저 보이더라도 status의 active generation/source는 실제 actor commit과 일치해야 한다. retirement는 별도 memory 장부로 드러낸다.
 
+기존 `AssetPreparationStatus`의 active_generation/active_source_digest도 commit 후 실제 actor identity로 갱신한다. startup1을 계속 반환하지 않는다. 다음 후보 준비는 이 현재 source와 모든 retained charge를 기준으로 하며 activation status·ProjectInfo·새 published frame의 source identity를 대조할 수 있어야 한다. worker가 retired backing을 늦게 회수하는 것은 identity를 과거로 돌려보낼 이유가 아니다.
+
 status logical cap은 기존 preparation과 같은32KiB, wire encoded-result는 기존1MiB다. failure code64/message2048 UTF-8 bytes와 기존 bounded StableId 진단만 보관한다. 큰 JSON/source path/payload를 오류에 복사하지 않는다. compatibility failure code는 `incompatible_topology`, 기타 비동기 실패는 기존 bounded capacity/internal 의미를 유지한다.
 
 공통 request error에 다음 의미를 추가하고 CLI 연결 시 이름을 그대로 사용한다: `asset_activation_unavailable`, `invalid_activation`, `activation_expired`, `activation_not_staged`, `active_generation_mismatch`, `activation_sequence_exhausted`, `project_generation_exhausted`, `activation_capacity`. 기존 `busy`, `invalid_candidate`, `candidate_expired`, `candidate_not_active`, `preparation_stopped`, replay/권한 오류는 재사용한다. new enum variant의 Rust 이름은 해당 PascalCase인 unit variant다. capability 없음은 unavailable이고 해당 factory에서 지원하지 않는 consumer 조합을 수락한 것으로 표시하지 않는다.
@@ -84,6 +86,8 @@ status logical cap은 기존 preparation과 같은32KiB, wire encoded-result는 
 8. 새 Prepare는 pre-commit Stage/lease를 supersede할 수 있다. Cancel은 pre-commit 작업을 취소하고 실제 payload release 전 charge를 유지한다. 이미 commit한 activation의 Cancel은 activation_not_staged로 거부하며 source rollback을 하지 않는다. 기존 preparation Cancel도 handed-off candidate를 무시하지 않는다.
 
 candidate/staging은 하나의 backing/slot reservation이 이동하는 것이다. 같은 payload를 둘로 세지 않으며 별도 allocation이면 각각 charge한다. commit 뒤 다음 Stage는 retired slot/예산이 회복될 때까지 Busy/Capacity일 수 있다. receipt ACK가 공간을 돌려주지 않는다.
+
+commit의 작은 metadata 갱신 뒤 worker promotion이 아직 남아 있을 수 있다. 다음 Prepare가 도착해도 committed candidate를 stale ready처럼 폐기하거나 그 backing을 새 candidate로 덮지 않는다. promotion을 새 import/ready 폐기보다 먼저 처리하며 필요하면 Prepare에 효과 전 Busy를 반환한다. pre-commit candidate를 supersede한 경우도 actor/channel이 잡은 lease를 실제로 회수하기 전에는 해당 charge를 새 import의 여유로 쓰지 않는다.
 
 ## worker 소유권과 종료
 

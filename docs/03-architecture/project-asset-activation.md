@@ -1,12 +1,14 @@
 # P03.3b/c 에셋 세대의 staged activation과 회수
 
-상태: 선행 P03.3a 인수·source 감사 기반 설계 초안. public API/consumer handshake/세부 한도 리뷰 전, 구현 미착수 · 2026-10-16
+상태: P03.3b.1 로컬 선행 검증·b.2 headless 계약 동결/구현 중. render/audio handshake·전체 b/c 인수 전 · 2026-10-16
 
 ## 목적과 선행 조건
 
 [P03.3a](project-asset-preparation.md)는 같은 session에서 다음 CPU 후보를 준비한다. 이 문서는 그 후보를 기존 entity·현재 gameplay state를 유지하며 실제 render/audio consumer에 적용하는 다음 계약이다. [PR14](https://github.com/sonan0721/Daedalus/pull/14)의 verified main `275ea360fb53dde3713aca84910781a4c895a8e4`를 출발점으로 삼는다. CPU 준비, actor commit, device 자원 준비, 실제 표시와 backing 회수는 서로 다른 관찰 지점이다.
 
 이번 경로는 **scene entity/component topology를 보존하는 에셋 교체**다. 일반 scene patch·entity 추가/제거·reparent·게임플레이 module reload·watcher는 별도 계약이다. 전체 P03/D1/D2/D3는 열려 있다. 이 초안이나 이름 있는 API만으로 구현을 체크하지 않는다.
+
+현재 구체 구현 범위는 [authored 비교기](asset-replacement-compatibility.md)와 그 다음 [headless CPU 세대 계약](headless-asset-generation.md)이다. headless의 같은 Engine commit/worker 회수를 먼저 검증하고, 실제 renderer/audio consumer의 장치 준비·표시·voice 수명을 이어서 연결한다. 아래 render/audio 상세 미결을 headless factory가 지원한 것으로 우회하지 않는다.
 
 ## 확인한 현재 경계
 
@@ -100,6 +102,10 @@ actor의 generation N이 commit돼도 실제 surface가 아직 N-1을 보일 수
 candidate의 parse·topology·CPU/GPU 예산·device staging 실패는 기존 active 자원을 유지하며 bounded 진단으로 끝난다. 기존 일반 draw의 fatal error를 모든 candidate 오류에 그대로 적용하지 않는다. 반대로 device loss·surface fatal failure를 성공으로 바꾸지 않는다. commit 후 장치 실패의 retry/보존·명시적 복구 범위를 구현 전 동결하고, committed generation을 조용히 감소시키지 않는다.
 
 GPU staging은 기존 device와 completion tracking을 사용한다. CPU upload descriptor 준비와 device 생성/업로드를 분리하고 한 번의 UI callback에 전체 import를 넣지 않는다. 실제 upload 작업량·staging bytes·completion/backpressure를 계측하며, 모든 driver call이 1ms 미만이라는 보장은 하지 않는다. 로딩 중 입력/Step/실제 표시의 진행은 따로 검증한다.
+
+현재 `PacketRenderer::plan_resources`는 같은 제출에서 ready packet을 바꾸는 전제라 geometry admission에 `no_active`를 전달하고 texture/sampler도 새 packet의 requested set을 기준으로 victim을 고른다. stage-only API에서 이 planner를 그대로 호출하면 GPU 완료된 이전 정상 자원을 actor commit 전에 축출할 수 있다. 후속 장치 계약은 active+staged pin 집합과 실제 retirement를 함께 다뤄야 한다. 기존 `commit_resources`/upload/draw/ready 교체의 한 경로를 중간에서 단순 분리하지 않는다.
+
+또한 현재 submission은 한 candidate의 전체 geometry/texture upload와 draw를 묶는다. 비동기 CPU import만으로 UI의 device 작업이 작아지는 것은 아니다. 후속 설계에서는 pump별 upload bytes·resource 생성 수·단계별 실패/취소 회수와 기존 in-flight 한도 안의 presentation 진행 여유를 동결하고 실제 driver/GPU/표시 시간을 측정해야 한다. 아직 숫자·stage API·성능을 확정한 구현은 아니다.
 
 ## audio bank와 old voice
 

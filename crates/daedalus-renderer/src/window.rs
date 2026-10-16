@@ -23,7 +23,8 @@ pub use winit::keyboard::KeyCode as WindowKeyCode;
 
 use crate::{
     Camera, PacketAssetLimits, PacketRenderError, PacketRenderer, PacketRendererLimits,
-    PacketResourceStats, RenderPacket, RenderScene, Renderer, RendererError, RendererInfo,
+    PacketResourceStats, RenderPacket, RenderScene, RenderView, Renderer, RendererError,
+    RendererInfo,
 };
 use daedalus_core::{SessionId, Tick};
 
@@ -328,6 +329,53 @@ pub struct PacketAssetWindowOutcome {
     pub asset_resource_stats: crate::PacketAssetResourceStats,
 }
 
+/// Metadata for the exact packet and camera/projection shown by one successful surface present.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentedView {
+    packet: PresentedPacket,
+    view: RenderView,
+}
+
+impl PresentedView {
+    pub fn packet(&self) -> &PresentedPacket {
+        &self.packet
+    }
+
+    pub fn view(&self) -> &RenderView {
+        &self.view
+    }
+}
+
+/// Native packet outcome with the exact last-presented and final viewer state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PacketPresentationWindowOutcome {
+    asset_outcome: PacketAssetWindowOutcome,
+    last_presented: Option<PresentedView>,
+    final_view: RenderView,
+}
+
+impl PacketPresentationWindowOutcome {
+    pub fn packet_outcome(&self) -> &PacketWindowOutcome {
+        &self.asset_outcome.packet
+    }
+
+    pub fn asset_resource_stats(&self) -> &crate::PacketAssetResourceStats {
+        &self.asset_outcome.asset_resource_stats
+    }
+
+    pub fn last_presented(&self) -> Option<&PresentedView> {
+        self.last_presented.as_ref()
+    }
+
+    pub fn final_view(&self) -> &RenderView {
+        &self.final_view
+    }
+
+    pub fn into_asset_outcome(self) -> PacketAssetWindowOutcome {
+        self.asset_outcome
+    }
+}
+
 /// Opens a native winit window and returns its report and final owned scene.
 /// The event loop stays on the calling/main thread. Messages are drained with
 /// a bounded `try_recv` loop; callbacks do not wait for a producer or perform
@@ -387,6 +435,17 @@ pub fn run_packet_windowed_reported_with_asset_limits(
     limits: PacketRendererLimits,
     asset_limits: PacketAssetLimits,
 ) -> Result<PacketAssetWindowOutcome, PacketWindowError> {
+    run_packet_windowed_presented(initial_packet, messages, options, limits, asset_limits)
+        .map(PacketPresentationWindowOutcome::into_asset_outcome)
+}
+
+pub fn run_packet_windowed_presented(
+    initial_packet: Arc<RenderPacket>,
+    messages: Receiver<PacketWindowMessage>,
+    options: WindowOptions,
+    limits: PacketRendererLimits,
+    asset_limits: PacketAssetLimits,
+) -> Result<PacketPresentationWindowOutcome, PacketWindowError> {
     validate_options(&options)
         .map_err(|error| PacketWindowError::InvalidOptions(error.to_string()))?;
     limits.validate().map_err(PacketWindowError::Packet)?;
@@ -410,9 +469,15 @@ pub fn run_packet_windowed_reported_with_asset_limits(
         crate::PacketAssetResourceStats::default,
         PacketRenderer::asset_resource_stats,
     );
-    Ok(PacketAssetWindowOutcome {
-        packet: app.into_packet_outcome(),
-        asset_resource_stats,
+    let last_presented = app.last_presented_view.clone();
+    let final_view = app.current_view();
+    Ok(PacketPresentationWindowOutcome {
+        asset_outcome: PacketAssetWindowOutcome {
+            packet: app.into_packet_outcome(),
+            asset_resource_stats,
+        },
+        last_presented,
+        final_view,
     })
 }
 
@@ -619,10 +684,12 @@ struct WindowApp {
     asset_limits: PacketAssetLimits,
     packet: Option<Arc<RenderPacket>>,
     last_presented: Option<PresentedPacket>,
+    last_presented_view: Option<PresentedView>,
     renderer_info: Option<RendererInfo>,
     surface: Option<SurfaceState>,
     scene: RenderScene,
     local_camera: Option<Camera>,
+    local_view: Option<RenderView>,
     latest_presentation: Option<PresentationMetadata>,
     loading_since: Option<Instant>,
     message_source_disconnected: bool,
@@ -722,10 +789,12 @@ impl WindowApp {
             asset_limits,
             packet,
             last_presented: None,
+            last_presented_view: None,
             renderer_info: None,
             surface: None,
             scene,
             local_camera: None,
+            local_view: None,
             latest_presentation,
             loading_since: initial_loading.then_some(now),
             message_source_disconnected: false,
@@ -746,10 +815,23 @@ impl WindowApp {
     }
 
     fn current_camera(&self) -> &Camera {
-        self.local_camera.as_ref().unwrap_or_else(|| {
-            self.packet
-                .as_ref()
-                .map_or(&self.scene.camera, |packet| packet.camera())
+        self.local_view
+            .as_ref()
+            .map(RenderView::camera)
+            .or(self.local_camera.as_ref())
+            .unwrap_or_else(|| {
+                self.packet
+                    .as_ref()
+                    .map_or(&self.scene.camera, |packet| packet.camera())
+            })
+    }
+
+    fn current_view(&self) -> RenderView {
+        self.local_view.clone().unwrap_or_else(|| {
+            self.packet.as_ref().map_or_else(
+                || RenderView::perspective(self.scene.camera.clone()),
+                |packet| packet.view().clone(),
+            )
         })
     }
 
@@ -879,11 +961,7 @@ impl WindowApp {
             height: size.height.max(1),
             present_mode,
             desired_maximum_frame_latency: 2,
-            alpha_mode: capabilities
-                .alpha_modes
-                .first()
-                .copied()
-                .unwrap_or(wgpu::CompositeAlphaMode::Auto),
+            alpha_mode: preferred_surface_alpha_mode(&capabilities.alpha_modes),
             view_formats: vec![],
         };
         let renderer = pollster::block_on(Renderer::from_adapter(instance, adapter, format))?;
@@ -1030,34 +1108,66 @@ impl WindowApp {
     }
 
     fn apply_camera_movement(&mut self, elapsed: f32) {
-        let initial_camera = self.current_camera().clone();
-        let camera = self.local_camera.get_or_insert(initial_camera);
-        let previous = camera.clone();
+        if elapsed <= 0.0 {
+            return;
+        }
+        let current_view = self.current_view();
+        let mut camera = current_view.camera().clone();
         let forward = (Vec3::from_array(camera.target) - Vec3::from_array(camera.position))
             .normalize_or_zero();
-        let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-        let right = forward_flat.cross(Vec3::Y).normalize_or_zero();
+        let camera_up = Vec3::from_array(camera.up).normalize_or_zero();
+        let right = forward.cross(camera_up).normalize_or_zero();
         let mut movement = Vec3::ZERO;
-        if self.keys_down.contains(&KeyCode::KeyW) {
-            movement += forward_flat;
+        if matches!(
+            current_view.projection(),
+            crate::RenderProjection::Orthographic { .. }
+        ) {
+            if self.keys_down.contains(&KeyCode::KeyW) {
+                movement += camera_up;
+            }
+            if self.keys_down.contains(&KeyCode::KeyS) {
+                movement -= camera_up;
+            }
+            if self.keys_down.contains(&KeyCode::KeyD) {
+                movement += right;
+            }
+            if self.keys_down.contains(&KeyCode::KeyA) {
+                movement -= right;
+            }
+        } else {
+            let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+            let legacy_right = forward_flat.cross(Vec3::Y).normalize_or_zero();
+            if self.keys_down.contains(&KeyCode::KeyW) {
+                movement += forward_flat;
+            }
+            if self.keys_down.contains(&KeyCode::KeyS) {
+                movement -= forward_flat;
+            }
+            if self.keys_down.contains(&KeyCode::KeyD) {
+                movement += legacy_right;
+            }
+            if self.keys_down.contains(&KeyCode::KeyA) {
+                movement -= legacy_right;
+            }
+            if self.keys_down.contains(&KeyCode::KeyE) {
+                movement += Vec3::Y;
+            }
+            if self.keys_down.contains(&KeyCode::KeyQ) {
+                movement -= Vec3::Y;
+            }
         }
-        if self.keys_down.contains(&KeyCode::KeyS) {
-            movement -= forward_flat;
+        if movement.length_squared() == 0.0 {
+            return;
         }
-        if self.keys_down.contains(&KeyCode::KeyD) {
-            movement += right;
-        }
-        if self.keys_down.contains(&KeyCode::KeyA) {
-            movement -= right;
-        }
-        if self.keys_down.contains(&KeyCode::KeyE) {
-            movement += Vec3::Y;
-        }
-        if self.keys_down.contains(&KeyCode::KeyQ) {
-            movement -= Vec3::Y;
-        }
-        move_camera(camera, movement, elapsed);
-        if *camera != previous {
+        let previous = camera.clone();
+        move_camera(&mut camera, movement, elapsed);
+        if camera != previous {
+            let updated = current_view.with_camera(camera.clone());
+            if self.packet.is_some() {
+                self.local_view = Some(updated);
+            } else {
+                self.local_camera = Some(camera);
+            }
             self.sync_legacy_camera();
             self.counters.local_camera_changes =
                 self.counters.local_camera_changes.saturating_add(1);
@@ -1113,19 +1223,19 @@ impl WindowApp {
         let loading_elapsed = self
             .loading_since
             .map(|start| now.saturating_duration_since(start).as_secs_f32());
-        let rendered_packet = if let Some(packet) = self.packet.as_ref() {
+        let rendered_submission = if let Some(packet) = self.packet.as_ref() {
             let Some(renderer) = self.packet_renderer.as_mut() else {
                 return;
             };
-            match renderer.render_packet_view(
+            match renderer.render_packet_view_with_view(
                 &view,
                 width,
                 height,
                 Arc::clone(packet),
-                self.local_camera.as_ref(),
+                self.local_view.as_ref(),
                 loading_elapsed,
             ) {
-                Ok(packet) => Some(packet),
+                Ok(submission) => Some(submission),
                 Err(PacketRenderError::ResidencyBusy) => {
                     // The acquired surface texture is deliberately dropped without
                     // presenting or advancing presented-packet metadata.
@@ -1150,13 +1260,10 @@ impl WindowApp {
         };
         window.pre_present_notify();
         frame.present();
-        if let Some(packet) = rendered_packet {
-            let camera = self
-                .local_camera
-                .as_ref()
-                .unwrap_or_else(|| packet.camera())
-                .clone();
-            self.last_presented = Some(PresentedPacket {
+        if let Some(submission) = rendered_submission {
+            let packet = submission.packet();
+            let camera = submission.view().camera().clone();
+            let presented = PresentedPacket {
                 session: packet.session(),
                 tick: packet.tick(),
                 sequence: packet.sequence(),
@@ -1165,6 +1272,11 @@ impl WindowApp {
                 camera,
                 physical_width: width,
                 physical_height: height,
+            };
+            self.last_presented = Some(presented.clone());
+            self.last_presented_view = Some(PresentedView {
+                packet: presented,
+                view: submission.view().clone(),
             });
         }
         self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(1);
@@ -1280,6 +1392,19 @@ impl WindowApp {
     }
 }
 
+fn preferred_surface_alpha_mode(
+    supported: &[wgpu::CompositeAlphaMode],
+) -> wgpu::CompositeAlphaMode {
+    if supported.contains(&wgpu::CompositeAlphaMode::Opaque) {
+        wgpu::CompositeAlphaMode::Opaque
+    } else {
+        supported
+            .first()
+            .copied()
+            .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+    }
+}
+
 impl ApplicationHandler for WindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -1383,14 +1508,43 @@ impl ApplicationHandler for WindowApp {
                 {
                     let dx = (position.x - previous.x) as f32;
                     let dy = (position.y - previous.y) as f32;
-                    let initial_camera = self.current_camera().clone();
-                    let camera = self.local_camera.get_or_insert(initial_camera);
-                    let previous_camera = camera.clone();
-                    camera.orbit(-dx * 0.006, -dy * 0.006, 0.0);
-                    if *camera != previous_camera {
-                        self.sync_legacy_camera();
-                        self.counters.local_camera_changes =
-                            self.counters.local_camera_changes.saturating_add(1);
+                    let view = self.current_view();
+                    let mut camera = view.camera().clone();
+                    if let crate::RenderProjection::Orthographic { vertical_size } =
+                        view.projection()
+                    {
+                        let height = self
+                            .surface
+                            .as_ref()
+                            .map_or(self.final_height.max(1), |surface| {
+                                surface.config.height.max(1)
+                            });
+                        let forward = (Vec3::from_array(camera.target)
+                            - Vec3::from_array(camera.position))
+                        .normalize_or_zero();
+                        let up = Vec3::from_array(camera.up).normalize_or_zero();
+                        let right = forward.cross(up).normalize_or_zero();
+                        let delta = (-right * dx + up * dy) * (vertical_size / height as f32);
+                        camera.position = (Vec3::from_array(camera.position) + delta).to_array();
+                        camera.target = (Vec3::from_array(camera.target) + delta).to_array();
+                        if delta.length_squared() > 0.0 {
+                            self.local_view = Some(view.with_camera(camera));
+                            self.counters.local_camera_changes =
+                                self.counters.local_camera_changes.saturating_add(1);
+                        }
+                    } else {
+                        let previous_camera = camera.clone();
+                        camera.orbit(-dx * 0.006, -dy * 0.006, 0.0);
+                        if camera != previous_camera {
+                            if self.packet.is_some() {
+                                self.local_view = Some(view.with_camera(camera));
+                            } else {
+                                self.local_camera = Some(camera);
+                            }
+                            self.sync_legacy_camera();
+                            self.counters.local_camera_changes =
+                                self.counters.local_camera_changes.saturating_add(1);
+                        }
                     }
                 }
                 self.last_cursor = Some(position);
@@ -1404,14 +1558,31 @@ impl ApplicationHandler for WindowApp {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(position) => (position.y as f32) * 0.01,
                 };
-                let initial_camera = self.current_camera().clone();
-                let camera = self.local_camera.get_or_insert(initial_camera);
-                let previous_camera = camera.clone();
-                camera.orbit(0.0, 0.0, -lines * 0.12);
-                if *camera != previous_camera {
-                    self.sync_legacy_camera();
-                    self.counters.local_camera_changes =
-                        self.counters.local_camera_changes.saturating_add(1);
+                let view = self.current_view();
+                if let crate::RenderProjection::Orthographic { vertical_size } = view.projection() {
+                    let zoom = (vertical_size * (-lines * 0.12).exp()).clamp(0.001, 1_000_000.0);
+                    if zoom.is_finite() && zoom != vertical_size {
+                        self.local_view =
+                            Some(view.with_projection(crate::RenderProjection::Orthographic {
+                                vertical_size: zoom,
+                            }));
+                        self.counters.local_camera_changes =
+                            self.counters.local_camera_changes.saturating_add(1);
+                    }
+                } else {
+                    let mut camera = view.camera().clone();
+                    let previous_camera = camera.clone();
+                    camera.orbit(0.0, 0.0, -lines * 0.12);
+                    if camera != previous_camera {
+                        if self.packet.is_some() {
+                            self.local_view = Some(view.with_camera(camera));
+                        } else {
+                            self.local_camera = Some(camera);
+                        }
+                        self.sync_legacy_camera();
+                        self.counters.local_camera_changes =
+                            self.counters.local_camera_changes.saturating_add(1);
+                    }
                 }
                 self.emit_input(WindowInput::MouseWheel { lines });
             }
@@ -1502,8 +1673,8 @@ mod tests {
     use super::{
         FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, PacketTransition, PresentationMetadata,
         WindowApp, WindowInput, WindowOptions, apply_presentation, max_frames_reached,
-        max_run_time_reached, presentation_disconnect_error, validate_options,
-        validate_packet_transition, validate_window_scene, window_controls_hint,
+        max_run_time_reached, preferred_surface_alpha_mode, presentation_disconnect_error,
+        validate_options, validate_packet_transition, validate_window_scene, window_controls_hint,
         window_input_channel,
     };
 
@@ -1516,6 +1687,25 @@ mod tests {
         assert_eq!(
             window_controls_hint(false),
             "WASD/QE + drag/wheel · Arrows move · R regenerate · Esc close"
+        );
+    }
+
+    #[test]
+    fn surface_alpha_mode_prefers_opaque_and_has_bounded_fallback() {
+        assert_eq!(
+            preferred_surface_alpha_mode(&[
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Opaque,
+            ]),
+            wgpu::CompositeAlphaMode::Opaque
+        );
+        assert_eq!(
+            preferred_surface_alpha_mode(&[wgpu::CompositeAlphaMode::PostMultiplied]),
+            wgpu::CompositeAlphaMode::PostMultiplied
+        );
+        assert_eq!(
+            preferred_surface_alpha_mode(&[]),
+            wgpu::CompositeAlphaMode::Auto
         );
     }
 
@@ -1859,5 +2049,25 @@ mod tests {
 
         assert_ne!(app.scene.camera, starting_camera);
         assert_eq!(app.counters.local_camera_changes, 1);
+    }
+
+    #[test]
+    fn packet_camera_without_input_keeps_the_authority_view_unmodified() {
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let authoritative = packet(0, 1, 1, &"ab".repeat(32));
+        let expected_view = authoritative.view().clone();
+        let mut app = WindowApp::new_packet(
+            authoritative,
+            receiver,
+            WindowOptions::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        );
+
+        app.apply_camera_movement(1.0 / 60.0);
+
+        assert!(app.local_view.is_none());
+        assert_eq!(app.current_view(), expected_view);
+        assert_eq!(app.counters.local_camera_changes, 0);
     }
 }

@@ -5,6 +5,7 @@ from contextlib import redirect_stderr
 from io import StringIO
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from smoke_project import (
     _decode_glb,
     _write_asset_project,
     _write_model_view_project,
+    _write_sprite_view_project,
     ENTITY_ID,
     _validate_native_view_report,
     _validate_native_liveness_report,
@@ -119,6 +121,41 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertEqual(model["images"][0]["uri"], "../images/base.png")
         self.assertTrue((project / "images" / "base.png").is_file())
 
+    def test_sprite_view_fixture_authors_orthographic_camera_and_nearest_atlas(self) -> None:
+        project = self.root / "sprite-view-fixture"
+        _write_sprite_view_project(project)
+        manifest = json.loads((project / "daedalus.project.json").read_text(encoding="utf-8"))
+        scene = json.loads((project / "scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "offline-sprite-view-smoke")
+        self.assertEqual(
+            {asset["id"] for asset in scene["assets"]},
+            {"asset:sprite-atlas", "asset:image-atlas"},
+        )
+        self.assertEqual(len(scene["entities"]), 2)
+        camera, sprite = scene["entities"]
+        self.assertEqual(camera["id"], ENTITY_ID)
+        camera_components = {item["type_id"]: item for item in camera["components"]}
+        self.assertEqual(
+            camera_components["daedalus.camera_2d"]["data"],
+            {"vertical_size": 10.0, "near": 0.1, "far": 100.0},
+        )
+        self.assertEqual(sprite["id"], "entity:smoke-sprite")
+        sprite_components = {item["type_id"]: item for item in sprite["components"]}
+        self.assertEqual(
+            sprite_components["daedalus.sprite_renderer"]["data"]["region"],
+            "sprite:stone",
+        )
+        self.assertEqual(
+            sprite_components["daedalus.transform"]["data"]["translation"],
+            [0.0, 0.0, -5.0],
+        )
+        atlas = json.loads((project / "atlases" / "sprites.json").read_text(encoding="utf-8"))
+        self.assertEqual(atlas["regions"][0]["rect"], [0, 0, 16, 16])
+        self.assertEqual(atlas["regions"][0]["pivot"], [0.25, 0.75])
+        image = (project / "images" / "atlas.png").read_bytes()
+        self.assertEqual(image[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(struct.unpack_from(">II", image, 16), (16, 16))
+
     def test_timeout_parser_rejects_zero_non_finite_and_non_numeric_values(self) -> None:
         self.assertEqual(_validate_timeout("1"), 1.0)
         for value in ("0", "nan", "bad"):
@@ -131,12 +168,15 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertFalse(arguments.view)
         self.assertFalse(arguments.assets)
         self.assertFalse(arguments.models)
+        self.assertFalse(arguments.sprites)
         view_arguments = _parse_args(["--cli", "/bin/true", "--view"])
         self.assertTrue(view_arguments.view)
         asset_arguments = _parse_args(["--cli", "/bin/true", "--assets"])
         self.assertTrue(asset_arguments.assets)
         model_arguments = _parse_args(["--cli", "/bin/true", "--models"])
         self.assertTrue(model_arguments.models)
+        sprite_arguments = _parse_args(["--cli", "/bin/true", "--sprites"])
+        self.assertTrue(sprite_arguments.sprites)
         combined_arguments = _parse_args(["--cli", "/bin/true", "--assets", "--view"])
         self.assertTrue(combined_arguments.assets)
         self.assertTrue(combined_arguments.view)
@@ -144,6 +184,9 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertTrue(combined_models.assets)
         self.assertTrue(combined_models.view)
         self.assertTrue(combined_models.models)
+        combined_sprites = _parse_args(["--cli", "/bin/true", "--models", "--sprites"])
+        self.assertTrue(combined_sprites.models)
+        self.assertTrue(combined_sprites.sprites)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])
@@ -456,10 +499,16 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             "last_presented": {
                 **identity,
                 "camera": {},
+                "render_view": {"camera": {}, "projection": {"kind": "perspective"}},
                 "physical_width": 640,
                 "physical_height": 360,
             },
-            "window": {"exit_reason": "TimeLimit", "rendered_frames": 1},
+            "window": {
+                "exit_reason": "TimeLimit",
+                "rendered_frames": 1,
+                "final_camera": {},
+                "final_render_view": {"camera": {}, "projection": {"kind": "perspective"}},
+            },
             "coordinator": {"protocol_requests": 5, "duplicate_submissions": 1, "protocol_errors": 1},
             "resources": {
                 "active_bytes": 12,

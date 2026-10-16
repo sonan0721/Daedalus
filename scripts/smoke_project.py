@@ -34,11 +34,17 @@ NATIVE_VIEW_WIDTH = 640
 NATIVE_VIEW_HEIGHT = 360
 MAX_STDOUT_PIPE_FILL_BYTES = 8 * 1024 * 1024
 ENTITY_ID = "entity:smoke-mesh"
+SPRITE_ENTITY_ID = "entity:smoke-sprite"
 PROJECT_NAME = "smoke-mesh-project"
 TRANSFORM_AFTER_COMMAND = {
     "translation": [7.0, 2.0, -3.0],
     "rotation": [0.0, 0.0, 0.0, 1.0],
     "scale": [1.5, 2.0, 0.75],
+}
+SPRITE_CAMERA_TRANSFORM_AFTER_COMMAND = {
+    "translation": [0.25, 0.5, 0.0],
+    "rotation": [0.0, 0.0, 0.0, 1.0],
+    "scale": [1.0, 1.0, 1.0],
 }
 
 
@@ -218,8 +224,16 @@ def _write_project(directory: Path, *, unsupported_component: bool = False) -> N
 
 
 def _png_rgba(width: int, height: int, color: tuple[int, int, int, int]) -> bytes:
-    row = b"\x00" + bytes(color) * width
-    pixels = row * height
+    return _png_rgba_pixels(width, height, bytes(color) * width * height)
+
+
+def _png_rgba_pixels(width: int, height: int, pixels: bytes) -> bytes:
+    if width <= 0 or height <= 0 or len(pixels) != width * height * 4:
+        raise SmokeError("offline smoke received invalid RGBA fixture dimensions")
+    rows = b"".join(
+        b"\x00" + pixels[row * width * 4 : (row + 1) * width * 4]
+        for row in range(height)
+    )
 
     def chunk(kind: bytes, payload: bytes) -> bytes:
         body = kind + payload
@@ -228,7 +242,7 @@ def _png_rgba(width: int, height: int, color: tuple[int, int, int, int]) -> byte
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(pixels, level=9))
+        + chunk(b"IDAT", zlib.compress(rows, level=9))
         + chunk(b"IEND", b"")
     )
 
@@ -420,6 +434,104 @@ def _write_model_view_project(directory: Path) -> None:
         }
     ]
     scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def _write_sprite_view_project(directory: Path) -> None:
+    """Build a small offline atlas scene with an authority-owned orthographic camera."""
+
+    _write_asset_project(directory)
+    manifest_path = directory / "daedalus.project.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["name"] = "offline-sprite-view-smoke"
+    manifest_path.write_text(
+        json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+    colors = (
+        (230, 30, 20, 255),
+        (20, 210, 40, 255),
+        (25, 50, 235, 160),
+        (250, 220, 30, 0),
+    )
+    pixels = bytearray()
+    for y in range(16):
+        for x in range(16):
+            quadrant = (0 if y < 8 else 2) + (0 if x < 8 else 1)
+            pixels.extend(colors[quadrant])
+    (directory / "images" / "atlas.png").write_bytes(
+        _png_rgba_pixels(16, 16, bytes(pixels))
+    )
+
+    scene_path = directory / "scene.json"
+    scene = json.loads(scene_path.read_text(encoding="utf-8"))
+    scene["assets"] = [
+        asset
+        for asset in scene["assets"]
+        if asset["id"] in {"asset:sprite-atlas", "asset:image-atlas"}
+    ]
+    scene["entities"] = [
+        {
+            "id": ENTITY_ID,
+            "name": "Smoke Orthographic Camera",
+            "components": [
+                {
+                    "id": "component:smoke-camera-transform",
+                    "type_id": "daedalus.transform",
+                    "data": {
+                        "translation": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                },
+                {
+                    "id": "component:smoke-camera-2d",
+                    "type_id": "daedalus.camera_2d",
+                    "asset_refs": [],
+                    "data": {"vertical_size": 10.0, "near": 0.1, "far": 100.0},
+                },
+            ],
+        },
+        {
+            "id": SPRITE_ENTITY_ID,
+            "name": "Smoke Atlas Sprite",
+            "components": [
+                {
+                    "id": "component:smoke-sprite-transform",
+                    "type_id": "daedalus.transform",
+                    "data": {
+                        "translation": [0.0, 0.0, -5.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                },
+                {
+                    "id": "component:smoke-sprite-renderer",
+                    "type_id": "daedalus.sprite_renderer",
+                    "asset_refs": ["asset:sprite-atlas"],
+                    "data": {
+                        "atlas": "asset:sprite-atlas",
+                        "region": "sprite:stone",
+                        "tint": [1.0, 1.0, 1.0, 1.0],
+                        "sorting_layer": 0,
+                        "order_in_layer": 0,
+                    },
+                },
+            ],
+        },
+    ]
+    scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    atlas_path = directory / "atlases" / "sprites.json"
+    atlas = json.loads(atlas_path.read_text(encoding="utf-8"))
+    atlas["regions"] = [
+        {
+            "id": "sprite:stone",
+            "rect": [0, 0, 16, 16],
+            "pivot": [0.25, 0.75],
+            "pixels_per_unit": 16.0,
+        }
+    ]
+    atlas_path.write_text(json.dumps(atlas, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -1489,6 +1601,24 @@ def _validate_native_view_report(
         "presented packet has invalid surface dimensions or camera metadata",
         presented,
     )
+    render_view = presented.get("render_view")
+    window_render_view = window.get("final_render_view")
+    _expect(
+        isinstance(render_view, dict)
+        and isinstance(render_view.get("camera"), dict)
+        and isinstance(render_view.get("projection"), dict)
+        and isinstance(window_render_view, dict)
+        and isinstance(window_render_view.get("camera"), dict)
+        and isinstance(window_render_view.get("projection"), dict),
+        "native report omitted the actual presented/final render view",
+        {"last_presented": presented, "window": window},
+    )
+    _expect(
+        presented["camera"] == render_view["camera"]
+        and window.get("final_camera") == window_render_view["camera"],
+        "legacy camera fields differ from the camera in the actual render view",
+        {"last_presented": presented, "window": window},
+    )
 
     if expected_exit_reason == "TimeLimit":
         _expect(isinstance(latest_frame, dict), "latest-frame identity was not supplied", report)
@@ -1514,7 +1644,7 @@ def _validate_native_view_report(
             _expect(type(value) is int and value >= 0, f"invalid native resource counter {counter}", resources)
         _expect(
             resources["geometry_upload_count"] == 1 and resources["geometry_upload_bytes"] > 0,
-            "the single authored mesh was not uploaded exactly once",
+            "the single authored draw geometry was not uploaded exactly once",
             resources,
         )
         _expect(
@@ -1553,6 +1683,8 @@ def _run_native_project_view(
     timeout: float,
     expected_source_digest: str,
     on_ready: Callable[[_JsonlProjectServer, str], None] | None = None,
+    expected_entity_count: int = 1,
+    authority_transform: dict[str, Any] = TRANSFORM_AFTER_COMMAND,
 ) -> dict[str, Any]:
     report_path = root / "native-view-report.json"
     command = _project_view_command(project, report_path, seconds=NATIVE_VIEW_SECONDS)
@@ -1589,6 +1721,11 @@ def _run_native_project_view(
         _expect(
             info.get("source_digest") == expected_source_digest,
             "native project view loaded a different source digest",
+            info,
+        )
+        _expect(
+            info.get("entity_count") == expected_entity_count,
+            "native project view reported an unexpected authored entity count",
             info,
         )
         _v2_ack(server, "view-info-ack", info_ticket)
@@ -1652,7 +1789,7 @@ def _run_native_project_view(
                 "op": "set_transform",
                 "target": {"stable_id": ENTITY_ID},
                 "expected_revision": "0",
-                "transform": TRANSFORM_AFTER_COMMAND,
+                "transform": authority_transform,
             },
         )
         _expect(not reused, "set_transform submit was unexpectedly reused")
@@ -1736,7 +1873,7 @@ def _run_native_project_view(
             and final_state.get("entity", {}).get("revision") == "1"
             and final_state.get("entity", {}).get("stable_id") == ENTITY_ID
             and final_state.get("entity", {}).get("handle", {}).get("session") == session
-            and final_state.get("entity", {}).get("transform") == TRANSFORM_AFTER_COMMAND,
+            and final_state.get("entity", {}).get("transform") == authority_transform,
             "final get_transform does not contain the authoritative tick-one state",
             final_get_result,
         )
@@ -1765,7 +1902,7 @@ def _run_native_project_view(
     )
 
 
-def _run_model_project_capture(
+def _run_project_packet_capture(
     binary: Path,
     project: Path,
     *,
@@ -1773,8 +1910,11 @@ def _run_model_project_capture(
     root: Path,
     timeout: float,
     expected_source_digest: str,
+    image_filename: str,
+    expected_projection: dict[str, Any],
+    asset_label: str,
 ) -> dict[str, Any]:
-    image_path = root / "textured-model-capture.png"
+    image_path = root / image_filename
     command = [
         "project",
         "capture",
@@ -1789,28 +1929,28 @@ def _run_model_project_capture(
         "1",
     ]
     output = _json_output(_run_cli(binary, command, cwd=cwd, timeout=timeout), command)
-    _expect(output.get("command") == "project_capture", "model capture returned another command", output)
+    _expect(output.get("command") == "project_capture", "project capture returned another command", output)
     _expect(
         isinstance(output.get("session"), str) and output["session"],
-        "model capture omitted its new session identity",
+        "project capture omitted its new session identity",
         output,
     )
     _expect(
         output.get("authority_tick") == 1
         and output.get("snapshot_tick") == 1
         and output.get("source_digest") == expected_source_digest,
-        "model capture identity/tick differs from its authored project",
+        "project capture identity/tick differs from its authored project",
         output,
     )
     projection = output.get("projection")
-    _expect(isinstance(projection, dict), "model capture omitted packet projection counters", output)
+    _expect(isinstance(projection, dict), "project capture omitted packet projection counters", output)
     _expect(
         projection.get("object_count") == 1
         and isinstance(projection.get("packet_expanded_gpu_geometry_bytes"), int)
         and projection["packet_expanded_gpu_geometry_bytes"] > 0
         and projection.get("expanded_geometry_bytes_basis")
         == "per_draw_packed_geometry_plus_legacy_object_record",
-        "model capture did not report one packed imported draw with the compatibility basis",
+        "project capture did not report one packed draw with the compatibility basis",
         projection,
     )
     resources = output.get("resources")
@@ -1819,25 +1959,25 @@ def _run_model_project_capture(
         and resources.get("geometry_upload_count") == 1
         and isinstance(resources.get("geometry_upload_bytes"), int)
         and resources["geometry_upload_bytes"] > 0,
-        "model capture did not upload its imported geometry exactly once",
+        "project capture did not upload its geometry exactly once",
         resources,
     )
     asset_resources = output.get("asset_resources")
-    _expect(isinstance(asset_resources, dict), "model capture omitted imported asset GPU counters", output)
+    _expect(isinstance(asset_resources, dict), "project capture omitted imported asset GPU counters", output)
     _expect(
         asset_resources.get("texture_upload_count") == 1
         and isinstance(asset_resources.get("texture_upload_bytes"), int)
         and asset_resources["texture_upload_bytes"] > 0,
-        "model capture did not upload the referenced base-color texture",
+        f"project capture did not upload the {asset_label} texture",
         asset_resources,
     )
-    _expect(image_path.is_file(), "model capture did not write a PNG artifact", image_path)
+    _expect(image_path.is_file(), "project capture did not write a PNG artifact", image_path)
     image_bytes = image_path.stat().st_size
-    _expect(image_bytes > 64, "model capture wrote an unexpectedly small PNG artifact", image_bytes)
+    _expect(image_bytes > 64, "project capture wrote an unexpectedly small PNG artifact", image_bytes)
     with image_path.open("rb") as image_file:
         _expect(
             image_file.read(8) == b"\x89PNG\r\n\x1a\n",
-            "model capture output is not a PNG file",
+            "project capture output is not a PNG file",
             image_path,
         )
     capture = output.get("capture")
@@ -1847,13 +1987,65 @@ def _run_model_project_capture(
         and capture.get("width") == NATIVE_VIEW_WIDTH
         and capture.get("height") == NATIVE_VIEW_HEIGHT
         and capture.get("rgba8_bytes") == NATIVE_VIEW_WIDTH * NATIVE_VIEW_HEIGHT * 4,
-        "model capture returned unexpected image dimensions",
+        "project capture returned unexpected image dimensions",
         output,
+    )
+    render_view = capture.get("render_view")
+    _expect(
+        isinstance(render_view, dict)
+        and isinstance(render_view.get("camera"), dict)
+        and render_view.get("projection") == expected_projection,
+        "project capture did not report the projection used by its rendered packet",
+        capture,
     )
     return {
         "report": output,
         "image_artifact": {"format": "PNG", "byte_len": image_bytes},
     }
+
+
+def _run_model_project_capture(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    return _run_project_packet_capture(
+        binary,
+        project,
+        cwd=cwd,
+        root=root,
+        timeout=timeout,
+        expected_source_digest=expected_source_digest,
+        image_filename="textured-model-capture.png",
+        expected_projection={"kind": "perspective"},
+        asset_label="base-color",
+    )
+
+
+def _run_sprite_project_capture(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    return _run_project_packet_capture(
+        binary,
+        project,
+        cwd=cwd,
+        root=root,
+        timeout=timeout,
+        expected_source_digest=expected_source_digest,
+        image_filename="orthographic-sprite-capture.png",
+        expected_projection={"kind": "orthographic", "vertical_size": 10.0},
+        asset_label="sprite-atlas",
+    )
 
 
 def _run_model_project_smoke(
@@ -1938,6 +2130,120 @@ def _run_model_project_smoke(
         },
         "native_view": {
             "invocation_kind": "native_window_process",
+            "report": view,
+        },
+    }
+
+
+def _run_sprite_project_smoke(
+    binary: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    project = root / "authored-orthographic-sprite-project"
+    _write_sprite_view_project(project)
+    validate_args = ["project", "validate", os.fspath(project)]
+    validated = _json_output(_run_cli(binary, validate_args, cwd=cwd, timeout=timeout), validate_args)
+    _expect(validated.get("valid") is True, "orthographic sprite project did not validate", validated)
+    _expect(
+        validated.get("entity_count") == 2 and validated.get("asset_count") == 2,
+        "orthographic sprite project must contain its camera, sprite, atlas, and image",
+        validated,
+    )
+    source_digest = validated.get("source_digest")
+    _expect(isinstance(source_digest, str) and source_digest, "sprite validation omitted source identity", validated)
+
+    capture_during_view: dict[str, Any] = {}
+
+    def capture_when_view_is_ready(server: _JsonlProjectServer, view_session: str) -> None:
+        capture_during_view["result"] = _run_sprite_project_capture(
+            binary,
+            project,
+            cwd=cwd,
+            root=root,
+            timeout=timeout,
+            expected_source_digest=source_digest,
+        )
+        _expect(
+            server.process.poll() is None,
+            "native sprite viewer exited while its concurrent batch capture was running",
+            {"view_session": view_session, "capture": capture_during_view["result"]},
+        )
+        capture_during_view["view_session"] = view_session
+
+    view = _run_native_project_view(
+        binary,
+        project,
+        cwd=cwd,
+        root=root,
+        timeout=timeout,
+        expected_source_digest=source_digest,
+        on_ready=capture_when_view_is_ready,
+        expected_entity_count=2,
+        authority_transform=SPRITE_CAMERA_TRANSFORM_AFTER_COMMAND,
+    )
+    capture = capture_during_view.get("result")
+    _expect(
+        isinstance(capture, dict),
+        "native sprite view did not capture while the viewer was active",
+        capture_during_view,
+    )
+    capture_view = capture["report"]["capture"]["render_view"]
+    _expect(
+        capture_view["camera"].get("position") == [0.0, 0.0, 0.0]
+        and capture_view.get("projection") == {"kind": "orthographic", "vertical_size": 10.0},
+        "batch sprite capture did not use the authored tick-zero orthographic camera",
+        capture_view,
+    )
+
+    presented = view.get("last_presented")
+    presented_view = presented.get("render_view") if isinstance(presented, dict) else None
+    camera = presented_view.get("camera") if isinstance(presented_view, dict) else None
+    expected_projection = {"kind": "orthographic", "vertical_size": 10.0}
+    _expect(
+        isinstance(camera, dict)
+        and camera.get("position") == SPRITE_CAMERA_TRANSFORM_AFTER_COMMAND["translation"]
+        and camera.get("target") == [0.25, 0.5, -1.0]
+        and camera.get("up") == [0.0, 1.0, 0.0]
+        and type(camera.get("vertical_fov_radians")) in (int, float)
+        and math.isfinite(camera["vertical_fov_radians"])
+        and camera.get("near") == struct.unpack("<f", struct.pack("<f", 0.1))[0]
+        and camera.get("far") == 100.0
+        and isinstance(presented_view, dict)
+        and presented_view.get("projection") == expected_projection
+        and view.get("window", {}).get("final_render_view") == presented_view,
+        "presented and final window views did not follow the authority camera without local input",
+        {"last_presented": presented, "window": view.get("window")},
+    )
+    geometry_resources = view.get("resources")
+    _expect(
+        isinstance(geometry_resources, dict)
+        and geometry_resources.get("geometry_upload_count") == 1
+        and type(geometry_resources.get("global_write_count")) is int
+        and geometry_resources["global_write_count"] >= 2,
+        "sprite window did not reuse one unit quad and refresh camera globals after authority movement",
+        geometry_resources,
+    )
+    texture_resources = view.get("asset_resources")
+    _expect(
+        isinstance(texture_resources, dict)
+        and texture_resources.get("texture_upload_count") == 1,
+        "sprite window did not upload its atlas image exactly once",
+        texture_resources,
+    )
+    return {
+        "source_digest": source_digest,
+        "capture": {
+            "invocation_kind": "batch_capture_process_while_native_window_active",
+            "concurrent_with_native_view": True,
+            "native_view_session": capture_during_view["view_session"],
+            **capture,
+        },
+        "native_view": {
+            "invocation_kind": "native_window_process",
+            "authority_camera_transform": SPRITE_CAMERA_TRANSFORM_AFTER_COMMAND,
             "report": view,
         },
     }
@@ -2222,6 +2528,7 @@ def run_project_smoke(
     view: bool = False,
     assets: bool = False,
     models: bool = False,
+    sprites: bool = False,
 ) -> dict[str, Any]:
     """Exercise CPU lifecycle checks plus any explicitly requested native/model checks."""
 
@@ -2422,6 +2729,21 @@ def run_project_smoke(
                 ]
             )
 
+        sprite_results: dict[str, Any] | None = None
+        if sprites:
+            sprite_results = _run_sprite_project_smoke(
+                binary,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+            )
+            checks.extend(
+                [
+                    "orthographic_sprite_project_batch_capture",
+                    "orthographic_sprite_native_authority_view_and_atlas_upload",
+                ]
+            )
+
     result = {
         "schema_version": 1,
         "smoke": "external_project_cpu",
@@ -2441,6 +2763,8 @@ def run_project_smoke(
         result["asset_cook"] = asset_results
     if model_results is not None:
         result["models"] = model_results
+    if sprite_results is not None:
+        result["sprites"] = sprite_results
     return result
 
 
@@ -2470,6 +2794,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also capture and open an offline textured glTF project in the native GPU viewer",
     )
+    parser.add_argument(
+        "--sprites",
+        action="store_true",
+        help="also capture and open an offline orthographic atlas-sprite project in the native GPU viewer",
+    )
     return parser.parse_args(argv)
 
 
@@ -2482,6 +2811,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             view=arguments.view,
             assets=arguments.assets,
             models=arguments.models,
+            sprites=arguments.sprites,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

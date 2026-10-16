@@ -144,7 +144,7 @@ GPU는 비대칭 colored/transparent atlas의 top/bottom·인접 region 경계·
 
 기존 smoke의 opt-in sprite mode를 사용하고 CPU/assets/view/models 기본 의미를 유지한다. 같은 창의 실제 authority 변경 후 표시/view JSON을 대조하고 가능하면 resize/2D pan/zoom도 실제 OS 입력과 report로 확인한다. 실제 공개 Kenney Tiny Dungeon 원본 PNG/CC0와 [provenance](../02-research/asset-validation-provenance.md)를 재사용해 화면을 확인하며 네트워크 다운로드는 CI에 추가하지 않는다. 작은 sprite 장면은 엔진 fixture이고 Terraria 구현이 아니다.
 
-하위 gate는 source 고정→focused→workspace/Python/managed CI→실제 Metal/native/public asset→clean archive/extracted smoke→최종 다섯 PR CI·main 동일 tree까지 확인한 뒤에만 P03.2b를 체크한다. 첫 구현의 독립 CPU259건은 통과했으나 리뷰 보완과 최종 GPU/native/package 검사가 남았다. 이 문서로 gate를 체크하지 않는다.
+하위 gate는 source 고정→focused→workspace/Python/managed CI→실제 Metal/native/public asset→clean archive/extracted smoke→최종 다섯 PR CI·main 동일 tree까지 확인한 뒤에만 P03.2b를 체크한다. 리뷰 보완 후 CPU264·Python55·Metal9·통합 smoke39와 공개 원본 표시를 확인했다. clean archive/최종 PR CI·main 인수는 남아 있으며 이 문서만으로 gate를 체크하지 않는다.
 
 ## 조사 근거와 적용 범위
 

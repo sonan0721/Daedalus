@@ -15,12 +15,15 @@ use wgpu::util::DeviceExt;
 use crate::{
     Camera, CaptureArtifact, CaptureOptions, Material, MeshHandle, PacketAssetLimits,
     PacketRenderError, PacketRendererLimits, RenderInstance, RenderInstanceId, RenderPacket,
-    Renderer, RendererError,
+    RenderView, Renderer, RendererError,
     packet::{
         GeometryKey, ModelTextureUpload, PacketValidation, SamplerKey, TextureKey,
         TextureSamplerKey, sampler_key,
     },
-    renderer::{GlobalsUniform, GpuModelVertex, MaterialUniform, OverlayUniform},
+    renderer::{
+        ClearAlphaPolicy, GlobalsUniform, GpuModelVertex, MaterialUniform, OverlayUniform,
+        PngAlphaRepresentation, target_clear_color,
+    },
 };
 
 /// Cumulative packet path writes and current cache residency.
@@ -120,10 +123,12 @@ struct SlotState {
     id: RenderInstanceId,
     instance: GpuInstance,
     material: MaterialUniform,
+    sprite_uv: Option<SpriteUvUniform>,
 }
 
 struct PreparedSlotUpdate {
     planned: HashMap<RenderInstanceId, usize>,
+    sprite_uv: HashMap<RenderInstanceId, SpriteUvUniform>,
 }
 
 struct PacketFrameWrites<'a> {
@@ -133,10 +138,17 @@ struct PacketFrameWrites<'a> {
     loading_elapsed: Option<f32>,
     globals: &'a GlobalsUniform,
     globals_changed: bool,
-    slot_write_counts: &'a (usize, usize),
+    slot_write_counts: &'a SlotWriteCounts,
     validation: Option<&'a PacketValidation>,
     slot_update: Option<&'a PreparedSlotUpdate>,
     resource_plan: Option<&'a ResourceAdmissionPlan>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SlotWriteCounts {
+    instances: usize,
+    materials: usize,
+    sprite_uv: usize,
 }
 
 struct ResourceAdmissionPlan {
@@ -157,6 +169,7 @@ struct ResourceAdmissionPlan {
     active_bind_groups: HashSet<TextureSamplerKey>,
     default_texture_requested: bool,
     default_texture_missing: bool,
+    sprite_uv_buffer_missing: bool,
     staging_new_bytes: usize,
     scratch_bytes: usize,
 }
@@ -194,6 +207,8 @@ pub struct PacketRenderer {
     slot_state: Vec<Option<SlotState>>,
     instance_buffer: wgpu::Buffer,
     material_buffer: wgpu::Buffer,
+    sprite_uv_buffer: Option<wgpu::Buffer>,
+    sprite_uv_buffer_bytes: usize,
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     materials_bind_group: wgpu::BindGroup,
@@ -211,6 +226,32 @@ pub struct PacketRenderer {
     cpu_scratch_peak_bytes: usize,
     fixed_resident_bytes: usize,
     touch_serial: u64,
+}
+
+/// The packet and exact camera/projection used for one successful submission.
+#[derive(Clone, Debug)]
+pub struct PacketViewSubmission {
+    packet: Arc<RenderPacket>,
+    view: RenderView,
+}
+
+impl PacketViewSubmission {
+    pub fn packet(&self) -> &Arc<RenderPacket> {
+        &self.packet
+    }
+
+    pub fn view(&self) -> &RenderView {
+        &self.view
+    }
+
+    pub fn into_packet(self) -> Arc<RenderPacket> {
+        self.packet
+    }
+}
+
+enum ViewOverride<'a> {
+    Full(&'a RenderView),
+    Camera(&'a Camera),
 }
 
 impl PacketRenderer {
@@ -232,12 +273,19 @@ impl PacketRenderer {
             .ok_or_else(|| {
                 PacketRenderError::DeviceLimit("material buffer size overflowed".into())
             })?;
+        let sprite_uv_buffer_bytes = limits
+            .max_instances
+            .checked_mul(std::mem::size_of::<SpriteUvUniform>())
+            .ok_or_else(|| {
+                PacketRenderError::DeviceLimit("sprite UV buffer size overflowed".into())
+            })?;
         if device_limits.max_vertex_attributes < 10
             || device_limits.max_vertex_buffer_array_stride
                 < std::mem::size_of::<GpuInstance>() as u32
             || instance_size > device_limits.max_buffer_size
             || material_size > device_limits.max_buffer_size
             || material_size > u64::from(device_limits.max_storage_buffer_binding_size)
+            || sprite_uv_buffer_bytes as u64 > device_limits.max_buffer_size
         {
             return Err(PacketRenderError::DeviceLimit(format!(
                 "requires 10 vertex attributes, a {} byte instance stride, {instance_size} instance bytes and {material_size} material bytes; device exposes {} attributes, {} stride, {} buffer bytes, {} storage binding bytes",
@@ -324,6 +372,8 @@ impl PacketRenderer {
             slot_state,
             instance_buffer,
             material_buffer,
+            sprite_uv_buffer: None,
+            sprite_uv_buffer_bytes,
             globals_buffer,
             globals_bind_group,
             materials_bind_group,
@@ -451,12 +501,51 @@ impl PacketRenderer {
         camera_override: Option<&Camera>,
         loading_elapsed: Option<f32>,
     ) -> Result<Arc<RenderPacket>, PacketRenderError> {
-        self.renderer.validate_dimensions(width, height)?;
-        if let Some(camera) = camera_override {
-            camera
-                .validate()
-                .map_err(|error| PacketRenderError::InvalidPacket(error.to_string()))?;
+        let camera_override = camera_override.map(ViewOverride::Camera);
+        self.render_packet_view_internal(
+            view,
+            width,
+            height,
+            packet,
+            camera_override,
+            loading_elapsed,
+        )
+        .map(PacketViewSubmission::into_packet)
+    }
+
+    pub fn render_packet_view_with_view(
+        &mut self,
+        target: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        packet: Arc<RenderPacket>,
+        view_override: Option<&RenderView>,
+        loading_elapsed: Option<f32>,
+    ) -> Result<PacketViewSubmission, PacketRenderError> {
+        self.render_packet_view_internal(
+            target,
+            width,
+            height,
+            packet,
+            view_override.map(ViewOverride::Full),
+            loading_elapsed,
+        )
+    }
+
+    fn render_packet_view_internal(
+        &mut self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        packet: Arc<RenderPacket>,
+        view_override: Option<ViewOverride<'_>>,
+        loading_elapsed: Option<f32>,
+    ) -> Result<PacketViewSubmission, PacketRenderError> {
+        if let Err(error) = self.validate_packet_target_format(&packet) {
+            self.asset_stats.rejected_count = self.asset_stats.rejected_count.saturating_add(1);
+            return Err(error);
         }
+        self.renderer.validate_dimensions(width, height)?;
         self.poll_retirement()?;
         let unchanged = self
             .ready_packet
@@ -469,8 +558,9 @@ impl PacketRenderer {
                 view,
                 width,
                 height,
-                camera_override,
+                view_override.as_ref(),
                 loading_elapsed,
+                ClearAlphaPolicy::Opaque,
             ) {
                 Ok(submitted) => return Ok(submitted),
                 Err(PacketRenderError::ResidencyBusy) => {
@@ -489,8 +579,9 @@ impl PacketRenderer {
                         view,
                         width,
                         height,
-                        camera_override,
+                        view_override.as_ref(),
                         loading_elapsed,
+                        ClearAlphaPolicy::Opaque,
                     );
                 }
                 Err(error) => {
@@ -512,8 +603,9 @@ impl PacketRenderer {
             view,
             width,
             height,
-            camera_override,
+            view_override.as_ref(),
             loading_elapsed,
+            ClearAlphaPolicy::Opaque,
         )
     }
 
@@ -523,6 +615,10 @@ impl PacketRenderer {
         packet: &RenderPacket,
         options: &CaptureOptions,
     ) -> Result<CaptureArtifact, PacketRenderError> {
+        if let Err(error) = self.validate_packet_target_format(packet) {
+            self.asset_stats.rejected_count = self.asset_stats.rejected_count.saturating_add(1);
+            return Err(error);
+        }
         self.renderer
             .validate_dimensions(options.width, options.height)?;
         self.poll_retirement()?;
@@ -553,6 +649,7 @@ impl PacketRenderer {
             options.height,
             None,
             None,
+            ClearAlphaPolicy::Premultiplied,
         ) {
             if matches!(error, PacketRenderError::ResidencyBusy) {
                 self.asset_stats.busy_count = self.asset_stats.busy_count.saturating_add(1);
@@ -572,9 +669,23 @@ impl PacketRenderer {
             copy_encoder,
             options,
             "Daedalus packet capture readback",
+            PngAlphaRepresentation::SrgbPremultiplied,
         )?;
         self.poll_retirement()?;
         Ok(artifact)
+    }
+
+    fn validate_packet_target_format(
+        &self,
+        packet: &RenderPacket,
+    ) -> Result<(), PacketRenderError> {
+        if !packet.sprite_order.is_empty() && !self.renderer.format.is_srgb() {
+            return Err(PacketRenderError::UnsupportedPresentationFormat(format!(
+                "sprite packets require an sRGB surface; adapter supplied {:?}",
+                self.renderer.format
+            )));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)] // Owns the validation, admission and submission transaction.
@@ -585,11 +696,29 @@ impl PacketRenderer {
         view: &wgpu::TextureView,
         width: u32,
         height: u32,
-        camera_override: Option<&Camera>,
+        view_override: Option<&ViewOverride<'_>>,
         loading_elapsed: Option<f32>,
-    ) -> Result<Arc<RenderPacket>, PacketRenderError> {
-        let camera = camera_override.unwrap_or(packet.camera());
-        let globals = make_globals(&packet, camera, width, height, self.renderer.manual_srgb);
+        clear_alpha_policy: ClearAlphaPolicy,
+    ) -> Result<PacketViewSubmission, PacketRenderError> {
+        if !packet.sprite_order.is_empty() && !self.renderer.format.is_srgb() {
+            return Err(PacketRenderError::UnsupportedPresentationFormat(format!(
+                "sprite packets require an sRGB surface; adapter supplied {:?}",
+                self.renderer.format
+            )));
+        }
+        let used_view = match view_override {
+            Some(ViewOverride::Full(view)) => (*view).clone(),
+            Some(ViewOverride::Camera(camera)) => packet.view().with_camera((*camera).clone()),
+            None => packet.view().clone(),
+        };
+        used_view.validate()?;
+        let globals = make_globals(
+            &packet,
+            &used_view,
+            width,
+            height,
+            self.renderer.manual_srgb,
+        )?;
         let validation = if activate {
             let previous = self
                 .pending_packet
@@ -607,7 +736,7 @@ impl PacketRenderer {
             if let (Some(validation), Some(update)) = (validation.as_ref(), slot_update.as_ref()) {
                 self.slot_write_counts(&packet, validation, update)?
             } else {
-                (0, 0)
+                SlotWriteCounts::default()
             };
         let resource_plan = validation
             .as_ref()
@@ -618,13 +747,19 @@ impl PacketRenderer {
         let overlay_bytes =
             usize::from(loading_elapsed.is_some()) * std::mem::size_of::<OverlayUniform>();
         let frame_write_bytes = slot_write_counts
-            .0
+            .instances
             .checked_mul(std::mem::size_of::<GpuInstance>())
             .and_then(|bytes| {
                 slot_write_counts
-                    .1
+                    .materials
                     .checked_mul(std::mem::size_of::<MaterialUniform>())
                     .and_then(|material| bytes.checked_add(material))
+            })
+            .and_then(|bytes| {
+                slot_write_counts
+                    .sprite_uv
+                    .checked_mul(std::mem::size_of::<SpriteUvUniform>())
+                    .and_then(|uv| bytes.checked_add(uv))
             })
             .and_then(|bytes| bytes.checked_add(global_bytes))
             .and_then(|bytes| bytes.checked_add(overlay_bytes))
@@ -666,6 +801,17 @@ impl PacketRenderer {
         {
             self.renderer.ensure_model_packet_pipeline()?;
         }
+        if let Some(validation) = &validation
+            && !validation.sprite_bindings.is_empty()
+        {
+            if !self.renderer.format.is_srgb() {
+                return Err(PacketRenderError::UnsupportedPresentationFormat(format!(
+                    "sprite packets require an sRGB surface; adapter supplied {:?}",
+                    self.renderer.format
+                )));
+            }
+            self.renderer.ensure_sprite_packet_pipeline()?;
+        }
         if activate {
             self.validate_candidate_draws(
                 &packet,
@@ -697,7 +843,13 @@ impl PacketRenderer {
         let draw_slots = slot_update
             .as_ref()
             .map_or(&self.slots, |update| &update.planned);
-        let submission = self.encode_packet(view, &packet, loading_elapsed, draw_slots);
+        let submission = self.encode_packet(
+            view,
+            &packet,
+            loading_elapsed,
+            draw_slots,
+            clear_alpha_policy,
+        );
         self.note_submission(submission, total_staging, &packet);
         if let (Some(validation), Some(update)) = (&validation, slot_update) {
             self.commit_slot_update_state(&packet, validation, update);
@@ -724,7 +876,10 @@ impl PacketRenderer {
             }
         }
         self.asset_stats.pending_candidate = self.pending_packet.is_some();
-        Ok(packet)
+        Ok(PacketViewSubmission {
+            packet,
+            view: used_view,
+        })
     }
 
     fn prepare_slot_update(
@@ -750,7 +905,19 @@ impl PacketRenderer {
                 })?;
             let _ = GpuInstance::new(instance, slot, normal)?;
         }
-        Ok(PreparedSlotUpdate { planned })
+        let sprite_uv = validation
+            .sprite_bindings
+            .iter()
+            .map(|(id, binding)| {
+                (
+                    *id,
+                    SpriteUvUniform {
+                        rect: binding.uv_rect,
+                    },
+                )
+            })
+            .collect();
+        Ok(PreparedSlotUpdate { planned, sprite_uv })
     }
 
     fn slot_write_counts(
@@ -758,9 +925,8 @@ impl PacketRenderer {
         packet: &RenderPacket,
         validation: &PacketValidation,
         update: &PreparedSlotUpdate,
-    ) -> Result<(usize, usize), PacketRenderError> {
-        let mut instances = 0usize;
-        let mut materials = 0usize;
+    ) -> Result<SlotWriteCounts, PacketRenderError> {
+        let mut counts = SlotWriteCounts::default();
         for instance in packet.instances() {
             let slot = update.planned[&instance.id];
             let previous = self.slot_state[slot].as_ref();
@@ -781,20 +947,29 @@ impl PacketRenderer {
             let next = SlotState {
                 id: instance.id,
                 instance: next_instance,
-                material: MaterialUniform::from_material(&instance.material),
+                material: material_uniform(instance, validation),
+                sprite_uv: update.sprite_uv.get(&instance.id).copied(),
             };
-            instances = instances
+            counts.instances = counts
+                .instances
                 .checked_add(usize::from(needs_instance_write(previous, &next)))
                 .ok_or_else(|| {
                     PacketRenderError::InvalidPacket("instance write count overflowed".into())
                 })?;
-            materials = materials
+            counts.materials = counts
+                .materials
                 .checked_add(usize::from(needs_material_write(previous, &next)))
                 .ok_or_else(|| {
                     PacketRenderError::InvalidPacket("material write count overflowed".into())
                 })?;
+            counts.sprite_uv = counts
+                .sprite_uv
+                .checked_add(usize::from(needs_sprite_uv_write(previous, &next)))
+                .ok_or_else(|| {
+                    PacketRenderError::InvalidPacket("sprite UV write count overflowed".into())
+                })?;
         }
-        Ok((instances, materials))
+        Ok(counts)
     }
 
     fn commit_slot_update_state(
@@ -822,7 +997,8 @@ impl PacketRenderer {
             self.slot_state[slot] = Some(SlotState {
                 id: instance.id,
                 instance: next_instance,
-                material: MaterialUniform::from_material(&instance.material),
+                material: material_uniform(instance, validation),
+                sprite_uv: update.sprite_uv.get(&instance.id).copied(),
             });
         }
         self.slots = update.planned;
@@ -852,6 +1028,17 @@ impl PacketRenderer {
                 if !self.texture_bind_groups.contains_key(&key) {
                     return Err(PacketRenderError::InvalidPacket(
                         "model texture bind group is missing".into(),
+                    ));
+                }
+            }
+            if let Some(binding) = packet.sprite_binding(&instance.id) {
+                let key = TextureSamplerKey {
+                    texture: Some(binding.texture.key),
+                    sampler: sampler_key(binding.sampler),
+                };
+                if !self.texture_bind_groups.contains_key(&key) || self.sprite_uv_buffer.is_none() {
+                    return Err(PacketRenderError::InvalidPacket(
+                        "active sprite draw resources are incomplete".into(),
                     ));
                 }
             }
@@ -890,6 +1077,17 @@ impl PacketRenderer {
                     ));
                 }
             }
+            if let Some(binding) = validation.sprite_bindings.get(&instance.id) {
+                let key = TextureSamplerKey {
+                    texture: Some(binding.texture.key),
+                    sampler: sampler_key(binding.sampler),
+                };
+                if !plan.requested_bind_groups.contains(&key) {
+                    return Err(PacketRenderError::InvalidPacket(
+                        "candidate sprite bind group was not preflighted".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -917,6 +1115,19 @@ impl PacketRenderer {
             requested_samplers.insert(sampler);
             requested_bind_groups.insert(TextureSamplerKey { texture, sampler });
         }
+        for binding in validation.sprite_bindings.values() {
+            requested_textures
+                .entry(binding.texture.key)
+                .or_insert_with(|| Arc::clone(&binding.texture));
+            let sampler = sampler_key(binding.sampler);
+            requested_samplers.insert(sampler);
+            requested_bind_groups.insert(TextureSamplerKey {
+                texture: Some(binding.texture.key),
+                sampler,
+            });
+        }
+        let sprite_uv_buffer_missing =
+            !validation.sprite_bindings.is_empty() && self.sprite_uv_buffer.is_none();
         let active_textures: HashSet<_> = requested_textures.keys().copied().collect();
         let active_samplers = requested_samplers.clone();
         let active_bind_groups = requested_bind_groups.clone();
@@ -937,6 +1148,13 @@ impl PacketRenderer {
         )?;
 
         let mut active_bytes = self.fixed_resident_bytes;
+        if sprite_uv_buffer_missing {
+            active_bytes = active_bytes
+                .checked_add(self.sprite_uv_buffer_bytes)
+                .ok_or_else(|| {
+                    PacketRenderError::InvalidPacket("sprite UV buffer size overflowed".into())
+                })?;
+        }
         for mesh in requested_geometries.values() {
             active_bytes = active_bytes.checked_add(mesh.gpu_bytes()).ok_or_else(|| {
                 PacketRenderError::InvalidPacket("candidate resident size overflowed".into())
@@ -949,7 +1167,7 @@ impl PacketRenderer {
                     > self.renderer.device.limits().max_texture_dimension_2d
             {
                 return Err(PacketRenderError::DeviceLimit(
-                    "model texture exceeds the adapter's 2D texture dimension limit".into(),
+                    "asset texture exceeds the adapter's 2D texture dimension limit".into(),
                 ));
             }
             active_bytes = active_bytes.checked_add(upload.byte_len).ok_or_else(|| {
@@ -1062,6 +1280,13 @@ impl PacketRenderer {
             new_resident = new_resident.checked_add(4).ok_or_else(|| {
                 PacketRenderError::InvalidPacket("default texture resident size overflowed".into())
             })?;
+        }
+        if sprite_uv_buffer_missing {
+            new_resident = new_resident
+                .checked_add(self.sprite_uv_buffer_bytes)
+                .ok_or_else(|| {
+                    PacketRenderError::InvalidPacket("sprite UV buffer size overflowed".into())
+                })?;
         }
         let geometry_staging = missing_geometries
             .iter()
@@ -1229,6 +1454,7 @@ impl PacketRenderer {
             active_bind_groups,
             default_texture_requested,
             default_texture_missing,
+            sprite_uv_buffer_missing,
             staging_new_bytes,
             scratch_bytes,
         })
@@ -1273,6 +1499,14 @@ impl PacketRenderer {
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("Daedalus cached imported model vertices"),
                         contents: bytemuck::cast_slice(&packed),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            } else if let Some(geometry) = mesh.sprite_quad_geometry() {
+                self.renderer
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Daedalus shared immutable sprite unit quad"),
+                        contents: bytemuck::cast_slice(&geometry.vertices),
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             } else {
@@ -1354,6 +1588,18 @@ impl PacketRenderer {
                     last_touch: self.touch_serial.saturating_add(1),
                 },
             );
+        }
+        if plan.sprite_uv_buffer_missing {
+            self.sprite_uv_buffer =
+                Some(self.renderer.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Daedalus persistent sprite UV rectangles"),
+                    size: self.sprite_uv_buffer_bytes as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            self.fixed_resident_bytes = self
+                .fixed_resident_bytes
+                .saturating_add(self.sprite_uv_buffer_bytes);
         }
         if plan.default_texture_missing {
             let texture = self
@@ -1621,10 +1867,25 @@ impl PacketRenderer {
                 GpuInstance::new(instance, slot, normal).expect("slot conversion was preflighted")
             };
             let material = MaterialUniform::from_material(&instance.material);
+            let sprite_uv =
+                validation
+                    .sprite_bindings
+                    .get(&instance.id)
+                    .map(|binding| SpriteUvUniform {
+                        rect: binding.uv_rect,
+                    });
             let next = SlotState {
                 id: instance.id,
                 instance: gpu,
-                material,
+                material: if let Some(binding) = validation.sprite_bindings.get(&instance.id) {
+                    MaterialUniform {
+                        base_color: binding.tint,
+                        ..material
+                    }
+                } else {
+                    material
+                },
+                sprite_uv,
             };
             if needs_instance_write(old, &next) {
                 self.renderer.queue.write_buffer(
@@ -1656,6 +1917,25 @@ impl PacketRenderer {
                     .upload_staging_write_bytes
                     .saturating_add(std::mem::size_of::<MaterialUniform>() as u64);
             }
+            if needs_sprite_uv_write(old, &next) {
+                let uv_buffer = self
+                    .sprite_uv_buffer
+                    .as_ref()
+                    .expect("sprite UV buffer was allocated after admission");
+                self.renderer.queue.write_buffer(
+                    uv_buffer,
+                    (slot * std::mem::size_of::<SpriteUvUniform>()) as u64,
+                    bytemuck::bytes_of(&next.sprite_uv.expect("checked Some above")),
+                );
+                self.asset_stats.upload_staging_write_count = self
+                    .asset_stats
+                    .upload_staging_write_count
+                    .saturating_add(1);
+                self.asset_stats.upload_staging_write_bytes = self
+                    .asset_stats
+                    .upload_staging_write_bytes
+                    .saturating_add(std::mem::size_of::<SpriteUvUniform>() as u64);
+            }
         }
     }
 
@@ -1666,19 +1946,21 @@ impl PacketRenderer {
             }
             if let Some(update) = frame.slot_update {
                 self.write_slot_updates(frame.packet, validation, update);
-                self.stats.instance_write_count = self
-                    .stats
-                    .instance_write_count
-                    .saturating_add(frame.slot_write_counts.0 as u64);
+                self.stats.instance_write_count = self.stats.instance_write_count.saturating_add(
+                    (frame.slot_write_counts.instances + frame.slot_write_counts.sprite_uv) as u64,
+                );
                 self.stats.instance_write_bytes = self.stats.instance_write_bytes.saturating_add(
-                    (frame.slot_write_counts.0 * std::mem::size_of::<GpuInstance>()) as u64,
+                    (frame.slot_write_counts.instances * std::mem::size_of::<GpuInstance>()
+                        + frame.slot_write_counts.sprite_uv
+                            * std::mem::size_of::<SpriteUvUniform>()) as u64,
                 );
                 self.stats.material_write_count = self
                     .stats
                     .material_write_count
-                    .saturating_add(frame.slot_write_counts.1 as u64);
+                    .saturating_add(frame.slot_write_counts.materials as u64);
                 self.stats.material_write_bytes = self.stats.material_write_bytes.saturating_add(
-                    (frame.slot_write_counts.1 * std::mem::size_of::<MaterialUniform>()) as u64,
+                    (frame.slot_write_counts.materials * std::mem::size_of::<MaterialUniform>())
+                        as u64,
                 );
             }
         }
@@ -1737,6 +2019,7 @@ impl PacketRenderer {
         packet: &RenderPacket,
         loading_elapsed: Option<f32>,
         slots: &HashMap<RenderInstanceId, usize>,
+        clear_alpha_policy: ClearAlphaPolicy,
     ) -> wgpu::SubmissionIndex {
         let depth_view = &self.depth.as_ref().expect("depth target initialized").view;
         let mut encoder =
@@ -1745,6 +2028,11 @@ impl PacketRenderer {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Daedalus packet render encoder"),
                 });
+        let clear_color = target_clear_color(
+            packet.clear_color,
+            self.renderer.manual_srgb,
+            clear_alpha_policy,
+        );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Daedalus shared PBR packet pass"),
@@ -1753,12 +2041,7 @@ impl PacketRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(packet.clear_color[0]),
-                            g: f64::from(packet.clear_color[1]),
-                            b: f64::from(packet.clear_color[2]),
-                            a: f64::from(packet.clear_color[3]),
-                        }),
+                        load: wgpu::LoadOp::Clear(clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1775,6 +2058,9 @@ impl PacketRenderer {
             });
             pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             for instance in packet.instances() {
+                if instance.mesh.is_sprite_quad() {
+                    continue;
+                }
                 let slot = slots[&instance.id];
                 let resource = &self.geometry[&instance.mesh.key()];
                 if instance.mesh.imported_geometry().is_some() {
@@ -1810,6 +2096,55 @@ impl PacketRenderer {
                 pass.set_vertex_buffer(0, resource.vertex.slice(..));
                 pass.set_index_buffer(resource.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..resource.index_count, 0, slot as u32..slot as u32 + 1);
+            }
+        }
+        if !packet.sprite_order.is_empty() {
+            let mut sprites = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Daedalus sorted unlit sprite pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            sprites.set_pipeline(
+                self.renderer
+                    .sprite_packet_pipeline()
+                    .expect("sprite packet pipeline was prepared before writes"),
+            );
+            sprites.set_bind_group(0, &self.globals_bind_group, &[]);
+            sprites.set_bind_group(1, &self.materials_bind_group, &[]);
+            sprites.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            sprites.set_vertex_buffer(
+                2,
+                self.sprite_uv_buffer
+                    .as_ref()
+                    .expect("sprite UV buffer was prepared before writes")
+                    .slice(..),
+            );
+            let quad = &self.geometry[&packet
+                .sprite_geometry
+                .expect("validated sprite packet has shared quad geometry")];
+            for id in packet.sprite_order.iter() {
+                let binding = packet
+                    .sprite_binding(id)
+                    .expect("validated sprite order has a binding");
+                let key = TextureSamplerKey {
+                    texture: Some(binding.texture.key),
+                    sampler: sampler_key(binding.sampler),
+                };
+                let slot = slots[id];
+                sprites.set_bind_group(2, &self.texture_bind_groups[&key].bind_group, &[]);
+                sprites.set_vertex_buffer(0, quad.vertex.slice(..));
+                sprites.set_index_buffer(quad.index.slice(..), wgpu::IndexFormat::Uint32);
+                sprites.draw_indexed(0..quad.index_count, 0, slot as u32..slot as u32 + 1);
             }
         }
         if loading_elapsed.is_some() {
@@ -1910,6 +2245,23 @@ impl PacketRenderer {
                     && let Some(texture) = self.default_model_texture.as_mut()
                 {
                     texture.last_submission = serial;
+                }
+            }
+            if let Some(binding) = packet.sprite_binding(&instance.id) {
+                let texture_key = binding.texture.key;
+                let sampler = sampler_key(binding.sampler);
+                let bind_group = TextureSamplerKey {
+                    texture: Some(texture_key),
+                    sampler,
+                };
+                if let Some(texture) = self.textures.get_mut(&texture_key) {
+                    texture.last_submission = serial;
+                }
+                if let Some(sampler) = self.samplers.get_mut(&sampler) {
+                    sampler.last_submission = serial;
+                }
+                if let Some(group) = self.texture_bind_groups.get_mut(&bind_group) {
+                    group.last_submission = serial;
                 }
             }
         }
@@ -2204,6 +2556,19 @@ fn needs_material_write(previous: Option<&SlotState>, next: &SlotState) -> bool 
     previous.is_none_or(|old| old.id != next.id || old.material != next.material)
 }
 
+fn needs_sprite_uv_write(previous: Option<&SlotState>, next: &SlotState) -> bool {
+    next.sprite_uv.is_some()
+        && previous.is_none_or(|old| old.id != next.id || old.sprite_uv != next.sprite_uv)
+}
+
+fn material_uniform(instance: &RenderInstance, validation: &PacketValidation) -> MaterialUniform {
+    let mut uniform = MaterialUniform::from_material(&instance.material);
+    if let Some(binding) = validation.sprite_bindings.get(&instance.id) {
+        uniform.base_color = binding.tint;
+    }
+    uniform
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 struct GpuVertex {
@@ -2220,6 +2585,12 @@ struct GpuInstance {
     normal_2: [f32; 4],
     material_index: u32,
     padding: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+struct SpriteUvUniform {
+    rect: [f32; 4],
 }
 
 impl GpuInstance {
@@ -2264,15 +2635,16 @@ impl MaterialUniform {
 
 fn make_globals(
     packet: &RenderPacket,
-    camera: &Camera,
+    view: &RenderView,
     width: u32,
     height: u32,
     manual_srgb: bool,
-) -> GlobalsUniform {
+) -> Result<GlobalsUniform, PacketRenderError> {
+    let camera = view.camera();
     let direction = Vec3::from_array(packet.directional_light.direction).normalize();
-    GlobalsUniform {
-        view_projection: camera
-            .view_projection(width as f32 / height as f32)
+    Ok(GlobalsUniform {
+        view_projection: view
+            .view_projection(width as f32 / height as f32)?
             .to_cols_array_2d(),
         camera_position: [
             camera.position[0],
@@ -2298,7 +2670,7 @@ fn make_globals(
             packet.ambient_color[2],
             if manual_srgb { 1.0 } else { 0.0 },
         ],
-    }
+    })
 }
 
 #[cfg(test)]
@@ -2312,6 +2684,8 @@ mod tests {
     };
 
     use daedalus_content::{
+        ByteMapSourceResolver, ImportCancellation, ImportLimits, MemoryCookCache,
+        prepare_project_with_assets,
         project::{ProjectLimits, prepare_project_from_bytes},
         scene::StableId,
     };
@@ -2319,16 +2693,19 @@ mod tests {
         EntityHandle, RenderEntitySnapshot, RenderSnapshot, SessionId, Tick, Transform,
     };
     use glam::{EulerRot, Mat4, Quat};
+    use serde_json::json;
 
     use super::{
         CacheEntryPlan, GpuInstance, MaterialUniform, SlotState, check_submission_admission,
-        needs_instance_write, needs_material_write, packet_bookkeeping_bytes, plan_cache_admission,
-        plan_entry_victims, plan_instance_slots,
+        make_globals, needs_instance_write, needs_material_write, packet_bookkeeping_bytes,
+        plan_cache_admission, plan_entry_victims, plan_instance_slots,
     };
+    use crate::renderer::PngAlphaRepresentation;
     use crate::{
-        CaptureOptions, Material, Mesh, MeshHandle, MeshResourceLimits, PacketAssetLimits,
-        PacketRenderError, PacketRendererLimits, ProjectRenderResources, RenderInstanceId,
-        RenderObject, RenderPacket, RenderScene, Renderer, Vertex, packet::GeometryKey,
+        Camera, CaptureOptions, DirectionalLight, Material, Mesh, MeshHandle, MeshResourceLimits,
+        PacketAssetLimits, PacketRenderError, PacketRendererLimits, ProjectRenderResources,
+        RenderInstanceId, RenderObject, RenderPacket, RenderProjection, RenderScene, RenderView,
+        Renderer, Vertex, packet::GeometryKey, renderer::GlobalsUniform,
     };
 
     fn key(byte: u8) -> GeometryKey {
@@ -2483,11 +2860,13 @@ mod tests {
             id: id(1),
             instance,
             material,
+            sprite_uv: None,
         };
         let same = SlotState {
             id: id(1),
             instance,
             material,
+            sprite_uv: None,
         };
         assert!(!needs_instance_write(Some(&old), &same));
         assert!(!needs_material_write(Some(&old), &same));
@@ -2499,6 +2878,7 @@ mod tests {
                 ..instance
             },
             material,
+            sprite_uv: None,
         };
         assert!(needs_instance_write(Some(&old), &moved));
         assert!(!needs_material_write(Some(&old), &moved));
@@ -2510,6 +2890,7 @@ mod tests {
                 base_color: [0.1, 0.2, 0.3],
                 ..Material::default()
             }),
+            sprite_uv: None,
         };
         assert!(!needs_instance_write(Some(&old), &changed_material));
         assert!(needs_material_write(Some(&old), &changed_material));
@@ -2531,6 +2912,143 @@ mod tests {
         .unwrap()
     }
 
+    fn sprite_packet() -> RenderPacket {
+        let scene = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "revision": 1,
+            "entities": [
+                {
+                    "id": "entity:camera",
+                    "components": [
+                        {
+                            "id": "component:transform:camera",
+                            "type_id": "daedalus.transform",
+                            "asset_refs": [],
+                            "data": {"translation":[0.0,0.0,5.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0]}
+                        },
+                        {
+                            "id": "component:camera2d",
+                            "type_id": "daedalus.camera_2d",
+                            "asset_refs": [],
+                            "data": {"vertical_size":4.0,"near":0.1,"far":20.0}
+                        }
+                    ]
+                },
+                {
+                    "id": "entity:sprite",
+                    "components": [
+                        {
+                            "id": "component:transform:sprite",
+                            "type_id": "daedalus.transform",
+                            "asset_refs": [],
+                            "data": {"translation":[0.0,0.0,0.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0]}
+                        },
+                        {
+                            "id": "component:sprite",
+                            "type_id": "daedalus.sprite_renderer",
+                            "asset_refs": ["asset:atlas"],
+                            "data": {"atlas":"asset:atlas","region":"region:full","tint":[1.0,1.0,1.0,1.0],"sorting_layer":0,"order_in_layer":0}
+                        }
+                    ]
+                }
+            ],
+            "assets": [
+                {
+                    "id": "asset:image",
+                    "kind": "daedalus.image",
+                    "uri": "sprites/sheet.png",
+                    "metadata": {
+                        "schema_version": 1,
+                        "role": "sprite_atlas_srgb",
+                        "mip_policy": "none",
+                        "sampler": {
+                            "min_filter":"nearest",
+                            "mag_filter":"nearest",
+                            "mipmap_filter":"none",
+                            "wrap_u":"clamp_to_edge",
+                            "wrap_v":"clamp_to_edge"
+                        }
+                    }
+                },
+                {
+                    "id":"asset:atlas",
+                    "kind":"daedalus.sprite_atlas",
+                    "uri":"sprites/atlas.json",
+                    "metadata":{"schema_version":1}
+                }
+            ]
+        }))
+        .unwrap();
+        let manifest =
+            br#"{"schema_version":1,"name":"non-sRGB sprite test","scene":"scene.json"}"#;
+        let atlas = br#"{"schema_version":1,"image_asset":"asset:image","filter_policy":"nearest_no_mip_v1","regions":[{"id":"region:full","rect":[0,0,2,2],"pivot":[0.5,0.5],"pixels_per_unit":2.0}]}"#;
+        let mut encoded_png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded_png, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&[
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+                ])
+                .unwrap();
+        }
+        let mut resolver = ByteMapSourceResolver::from_bytes(BTreeMap::from([
+            ("sprites/sheet.png".to_owned(), encoded_png),
+            ("sprites/atlas.json".to_owned(), atlas.to_vec()),
+        ]))
+        .unwrap();
+        let mut cache = MemoryCookCache::default();
+        let project = prepare_project_with_assets(
+            manifest,
+            &scene,
+            &mut resolver,
+            &mut cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+        let session = SessionId::from_raw(987);
+        let bindings: BTreeMap<_, _> = project
+            .entities()
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| {
+                (
+                    entity.id.clone(),
+                    EntityHandle {
+                        session,
+                        index: index as u32,
+                        generation: 1,
+                    },
+                )
+            })
+            .collect();
+        let resources = ProjectRenderResources::prepare(
+            &project,
+            1,
+            session,
+            &bindings,
+            PacketRendererLimits::default(),
+        )
+        .unwrap();
+        let snapshot = RenderSnapshot {
+            sequence: 1,
+            tick: Tick(1),
+            entities: project
+                .entities()
+                .iter()
+                .map(|entity| RenderEntitySnapshot {
+                    entity: bindings[&entity.id],
+                    transform: Transform::IDENTITY,
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        resources.extract(&snapshot, None).unwrap()
+    }
+
     fn capture_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("daedalus-packet-{name}-{}.png", std::process::id()))
     }
@@ -2542,6 +3060,84 @@ mod tests {
         let frame = reader.next_frame(&mut data).unwrap();
         data.truncate(frame.buffer_size());
         data
+    }
+
+    fn capture_target(
+        renderer: &crate::Renderer,
+        texture: &wgpu::Texture,
+        options: &CaptureOptions,
+        label: &'static str,
+    ) {
+        let encoder = renderer
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        renderer
+            .capture_texture_png(
+                texture,
+                encoder,
+                options,
+                label,
+                PngAlphaRepresentation::Straight,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a native wgpu adapter; checks opaque packet-view target alpha by readback"]
+    fn packet_view_target_forces_clear_alpha_opaque() {
+        let mut renderer = Renderer::new_offscreen_blocking()
+            .unwrap()
+            .into_packet_renderer(PacketRendererLimits::default())
+            .unwrap();
+        let packet = Arc::new(RenderPacket::new(
+            SessionId::from_raw(9_876),
+            Tick(1),
+            1,
+            1,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            Camera::default(),
+            DirectionalLight::default(),
+            [0.16, 0.18, 0.22],
+            [0.2, 0.4, 0.6, 0.25],
+            Vec::new(),
+        ));
+        let target = renderer.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("Daedalus packet opaque clear-alpha target"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        renderer
+            .render_packet_view(&view, 8, 8, packet, None, None)
+            .unwrap();
+
+        let path = capture_path("packet-view-opaque-alpha");
+        let _ = std::fs::remove_file(&path);
+        let options = CaptureOptions::new(8, 8, &path);
+        capture_target(
+            &renderer.renderer,
+            &target,
+            &options,
+            "Daedalus packet opaque clear-alpha readback",
+        );
+        let pixels = decoded_rgba(&path);
+        assert_eq!(pixels.len(), 8 * 8 * 4);
+        for pixel in pixels.chunks_exact(4) {
+            assert_eq!(pixel[3], u8::MAX);
+            assert!((pixel[0] as i16 - 124).abs() <= 1);
+            assert!((pixel[1] as i16 - 170).abs() <= 1);
+            assert!((pixel[2] as i16 - 203).abs() <= 1);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -2819,6 +3415,74 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a native wgpu adapter; checks non-sRGB sprite rejection before allocation or upload"]
+    fn non_srgb_sprite_targets_reject_view_and_capture_without_gpu_mutation() {
+        let packet = sprite_packet();
+        let mut renderer = Renderer::new_offscreen_blocking()
+            .unwrap()
+            .into_packet_renderer_with_asset_limits(
+                PacketRendererLimits::default(),
+                PacketAssetLimits::default(),
+            )
+            .unwrap();
+        renderer.renderer.format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = renderer.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("Daedalus non-sRGB sprite rejection test target"),
+            size: wgpu::Extent3d {
+                width: 32,
+                height: 32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let baseline_packet = renderer.resource_stats();
+        let baseline_assets = renderer.asset_resource_stats();
+
+        assert!(matches!(
+            renderer.render_packet_view(&view, 32, 32, Arc::new(packet.clone()), None, None),
+            Err(PacketRenderError::UnsupportedPresentationFormat(_))
+        ));
+        assert_eq!(renderer.resource_stats(), baseline_packet);
+        let mut expected_assets = baseline_assets.clone();
+        expected_assets.rejected_count += 1;
+        assert_eq!(renderer.asset_resource_stats(), expected_assets);
+        assert!(renderer.geometry.is_empty());
+        assert!(renderer.textures.is_empty());
+        assert!(renderer.samplers.is_empty());
+        assert!(renderer.texture_bind_groups.is_empty());
+        assert!(renderer.staging_submissions.is_empty());
+        assert!(renderer.ready_packet.is_none());
+        assert!(renderer.pending_packet.is_none());
+        assert!(renderer.last_globals.is_none());
+        assert!(renderer.slots.is_empty());
+        assert!(renderer.renderer.sprite_packet_pipeline.is_none());
+
+        let path = capture_path("non-srgb-sprite-rejection");
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(
+            renderer.render_packet_png(&packet, &CaptureOptions::new(32, 32, &path)),
+            Err(PacketRenderError::UnsupportedPresentationFormat(_))
+        ));
+        assert!(!path.exists());
+        assert_eq!(renderer.resource_stats(), baseline_packet);
+        expected_assets.rejected_count += 1;
+        assert_eq!(renderer.asset_resource_stats(), expected_assets);
+        assert!(renderer.geometry.is_empty());
+        assert!(renderer.textures.is_empty());
+        assert!(renderer.samplers.is_empty());
+        assert!(renderer.texture_bind_groups.is_empty());
+        assert!(renderer.staging_submissions.is_empty());
+        assert!(renderer.ready_packet.is_none());
+        assert!(renderer.last_globals.is_none());
+    }
+
+    #[test]
     #[ignore = "requires a native wgpu adapter; checks bounded submission backpressure"]
     fn asset_backpressure_preserves_ready_packet_and_does_not_count_busy_candidate_as_drawn() {
         let project = external_project();
@@ -2867,7 +3531,12 @@ mod tests {
         };
         let initial = Arc::new(resources.extract(&snapshot(1, 1, 1.5), None).unwrap());
         let unchanged = Arc::new(resources.extract(&snapshot(2, 2, 1.5), None).unwrap());
-        let moved = Arc::new(resources.extract(&snapshot(3, 3, 1.75), None).unwrap());
+        let moved = Arc::new(
+            resources
+                .extract(&snapshot(3, 3, 1.75), None)
+                .unwrap()
+                .with_projection(RenderProjection::Orthographic { vertical_size: 4.0 }),
+        );
         let asset_limits = PacketAssetLimits {
             upload_staging_bytes: 4096,
             ..PacketAssetLimits::default()
@@ -2887,7 +3556,7 @@ mod tests {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2985,14 +3654,49 @@ mod tests {
 
         let staging_serial = future + 100;
         let staging_capacity = renderer.asset_limits.upload_staging_bytes;
+        let globals_bytes = std::mem::size_of::<GlobalsUniform>();
+        let fallback_bytes = staging_capacity - globals_bytes;
         renderer
             .staging_submissions
-            .push_back((staging_serial, staging_capacity));
-        renderer.staging_in_flight_bytes = staging_capacity;
+            .push_back((staging_serial, fallback_bytes));
+        renderer.staging_in_flight_bytes = fallback_bytes;
+        let camera_override = Camera {
+            position: [0.0, 0.0, 6.0],
+            ..Camera::default()
+        };
         let submitted = renderer
-            .render_packet_view(&view, 64, 64, Arc::clone(&moved), None, None)
+            .render_packet_view(
+                &view,
+                64,
+                64,
+                Arc::clone(&moved),
+                Some(&camera_override),
+                None,
+            )
             .unwrap();
         assert!(Arc::ptr_eq(&submitted, &unchanged));
+        assert_eq!(submitted.projection(), RenderProjection::Perspective);
+        assert!(
+            renderer.last_globals
+                == Some(
+                    make_globals(
+                        &unchanged,
+                        &RenderView::new(camera_override.clone(), RenderProjection::Perspective),
+                        64,
+                        64,
+                        false,
+                    )
+                    .unwrap()
+                )
+        );
+        let fallback_path = capture_path("backpressure-fallback-view");
+        let fallback_options = CaptureOptions::new(64, 64, &fallback_path);
+        capture_target(
+            &renderer.renderer,
+            &target,
+            &fallback_options,
+            "Daedalus fallback view readback",
+        );
         assert!(Arc::ptr_eq(
             renderer.ready_packet.as_ref().unwrap(),
             &unchanged
@@ -3013,6 +3717,106 @@ mod tests {
             .completion_watermark
             .store(staging_serial, std::sync::atomic::Ordering::Release);
         renderer.poll_retirement().unwrap();
+        renderer.staging_submissions.clear();
+        renderer.staging_in_flight_bytes = 0;
+
+        let reference_target = renderer.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("Daedalus explicit old-ready view reference target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let reference_view = reference_target.create_view(&wgpu::TextureViewDescriptor::default());
+        let expected_camera_view =
+            RenderView::new(camera_override.clone(), RenderProjection::Perspective);
+        let reference_submission = renderer
+            .render_packet_view_with_view(
+                &reference_view,
+                64,
+                64,
+                Arc::clone(&unchanged),
+                Some(&expected_camera_view),
+                None,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(reference_submission.packet(), &unchanged));
+        assert_eq!(reference_submission.view(), &expected_camera_view);
+        let reference_path = capture_path("backpressure-reference-view");
+        let reference_options = CaptureOptions::new(64, 64, &reference_path);
+        capture_target(
+            &renderer.renderer,
+            &reference_target,
+            &reference_options,
+            "Daedalus explicit old-ready view reference readback",
+        );
+        assert_eq!(decoded_rgba(&fallback_path), decoded_rgba(&reference_path));
+        let _ = std::fs::remove_file(&fallback_path);
+        let _ = std::fs::remove_file(&reference_path);
+
+        let explicit_view = RenderView::new(
+            Camera {
+                position: [0.25, 0.0, 6.0],
+                ..Camera::default()
+            },
+            RenderProjection::Orthographic { vertical_size: 7.0 },
+        );
+        let staged_serial = renderer
+            .staging_submissions
+            .iter()
+            .map(|(serial, _)| *serial)
+            .max()
+            .unwrap_or(0);
+        let full_override_base = renderer
+            .completion_watermark
+            .load(std::sync::atomic::Ordering::Acquire)
+            .max(renderer.submission_serial)
+            .max(staged_serial);
+        let full_override_serial = full_override_base
+            .checked_add(1)
+            .expect("test submission serial has headroom");
+        let full_override_staging = staging_capacity - globals_bytes;
+        renderer
+            .staging_submissions
+            .push_back((full_override_serial, full_override_staging));
+        renderer.staging_in_flight_bytes = full_override_staging;
+        let full_override_submission = renderer
+            .render_packet_view_with_view(
+                &view,
+                64,
+                64,
+                Arc::clone(&moved),
+                Some(&explicit_view),
+                None,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(full_override_submission.packet(), &unchanged));
+        assert_eq!(full_override_submission.view(), &explicit_view);
+        assert!(Arc::ptr_eq(
+            renderer.ready_packet.as_ref().unwrap(),
+            &unchanged
+        ));
+        assert_eq!(
+            renderer
+                .asset_resource_stats()
+                .upload_staging_in_flight_bytes,
+            staging_capacity
+        );
+        assert!(renderer.asset_resource_stats().pending_candidate);
+
+        renderer
+            .completion_watermark
+            .store(full_override_serial, std::sync::atomic::Ordering::Release);
+        renderer.poll_retirement().unwrap();
+        renderer.staging_submissions.clear();
+        renderer.staging_in_flight_bytes = 0;
         let before_move = renderer.resource_stats();
         renderer
             .render_packet_view(&view, 64, 64, Arc::clone(&moved), None, None)
@@ -3027,6 +3831,10 @@ mod tests {
             1
         );
         assert_eq!(
+            after_move.global_write_count - before_move.global_write_count,
+            1
+        );
+        assert_eq!(
             after_move.material_write_count,
             before_move.material_write_count
         );
@@ -3034,7 +3842,7 @@ mod tests {
             renderer
                 .asset_resource_stats()
                 .upload_staging_in_flight_bytes,
-            128
+            globals_bytes + 128
         );
     }
 }

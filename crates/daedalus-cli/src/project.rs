@@ -320,6 +320,7 @@ fn capture_project(
             "width":artifact.width,
             "height":artifact.height,
             "rgba8_bytes":artifact.rgba8_bytes,
+            "render_view":super::project_assets::render_view_json(packet.view()),
             "renderer":{
                 "adapter_name":artifact.renderer.adapter_name,
                 "backend":artifact.renderer.backend,

@@ -1,6 +1,6 @@
 # P03.2b 스프라이트·정사영 실행 작업 기록
 
-상태: 상세 계약 확정·Luna 구현 진행·인수 미통과 · 2026-10-16
+상태: source/로컬 CPU·Metal·native 검증 통과·clean package/CI 인수 대기 · 2026-10-16
 
 ## 두 문서를 만든 이유
 
@@ -24,9 +24,9 @@
 | 소유자 | 범위 | 상태 |
 | --- | --- | --- |
 | Luna xhigh content | private sprite/camera2d binding·strict schema/revalidation·metadata precharge·CPU 검사 | source 고정·focused72/strict Clippy/Wasm/fmt 통과; 별도 renderer 검사 source 작성 |
-| Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | 초기 focused 통과·투명 PNG 리뷰 보완 중 |
+| Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | source 고정·focused49/strict Clippy·조정자 Metal9 통과 |
 | Luna xhigh CLI | 기존 공통 report·opt-in sprite smoke·timeout/cleanup 회귀 | source 고정·focused36/strict Clippy/build·Python55 통과 |
-| 조정자 | MD·source/API 리뷰·통합/실제 Mac·원본 QA·Git/PR | 첫 workspace CPU259 통과·추가 리뷰·최종 hardware/package 인수 대기 |
+| 조정자 | MD·source/API 리뷰·통합/실제 Mac·원본 QA·Git/PR | CPU264/Metal9/smoke39/원본 QA 확인·clean package/CI 인수 대기 |
 
 content→renderer→CLI→조정자 순서로 Cargo/shared target 소유권을 넘긴다. source 파일 소유권을 분리하고 새 dependency/두 번째 cold target/새 packaging backend는 계획하지 않는다. focused→통합→hardware→clean package→최종 다섯 PR CI/main 동일 tree가 모두 필요하다. 검사 명령/입력/소스·binary identity/counter는 실제 실행 후에만 추가한다.
 
@@ -67,3 +67,34 @@ Luna renderer의 위 리뷰 보완 focused 결과는45 CPU pass/5GPU ignored, al
 code 전 [상세 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)에 capture의 premultiplied-linear clear/target, 공통 readback의 in-place straight PNG 변환, alpha255 fast path/alpha0 정규화와 일반 native window의 불투명 정책을 추가했다. 새 target/RGBA buffer/PNG writer를 중복 만들지 않는 제작 파이프라인 선택이다. alpha0/.25/1 nonblack 배경과 overlap의 실제 GPU 검사·양자화 tolerance 및 기존 opaque 색/자원 회귀가 필요하다. 이 추가는 구현/실행 결과가 아니다.
 
 조정자가 frozen scripts의 전체 `python3 -m unittest discover -s scripts -p 'test_*.py'`를 Cargo 실행과 겹치지 않게 독립 수행해55건/7.007초/0 fail을 확인했다. 이는 Python/프로세스 회귀 근거이며 후속 renderer source의 GPU·native 동작 근거는 아니다. 앞선 timeout 실패는 로그에서 보존하며 원인을 확정하지 않는다.
+
+## 최종 source 고정과 조정자 CPU 검증
+
+Luna가 private capture alpha policy와 공통 in-place PNG 변환, packet/legacy native의 opaque clear 및 Opaque surface 우선 선택을 구현했다. metadata estimator는 빈 painter Arc header도 charge하고 HashMap bucket을 checked power-of-two/load-factor로 계산한다. 56/57-entry 경계·alpha0/255·clear encoding 검사를 추가했다. 새 GPU fixture의 borrowed manifest compile 오류는 해당 Luna 담당자가 수정한 뒤 source를 고정했다.
+
+focused CPU49건 뒤 strict Clippy가 `No space left on device`로 실패했다. `cargo clean -p daedalus-renderer`로 해당 패키지의 재생성 가능한 출력만 정리하고 다른 crate의 의존 캐시·소스·dist/QA 자료는 유지했다. 약400 MiB에서8.6 GiB 여유를 회복한 뒤 같은 target으로 CPU49·strict Clippy/fmt/diff를 통과했다. 이는 디스크 장애 복구이며 성능 개선 배율이나 전체 cache 삭제가 아니다.
+
+Cargo handoff 뒤 조정자가 frozen 통합 source로 `cargo test --workspace --all-features --locked`를 실행해 **264 CPU pass/0 fail/10 hardware ignored**를 확인했다(compile7.67초; 전체 wall time과 구분). all-target/all-feature workspace strict Clippy와 workspace fmt/docs/diff도 통과했다. 로그는 ignored `dist/project-evidence/p03-sprite-final-workspace-tests.log`, `p03-sprite-final-clippy.log`다. 실제 Metal/native/public asset와 clean package/CI는 별도 확인한다.
+
+첫 실제 Metal 명령 `cargo test -p daedalus-renderer --all-features --locked -- --ignored --nocapture --test-threads=1`은 library8건 중5 pass/3 fail로 중단됐다. integration GPU 시험은 이 실패 뒤 실행되지 않았다. 실패 로그를 `p03-sprite-metal-tests-first-failure.log`로 보존했다. 조정자 source 리뷰는 투명 overlap reference의 blue/red StableId 순서 불일치, opaque-view fixture의 잘못된 digest, Busy fixture의 두 번째 주입 serial이 이전 synthetic completion watermark보다 낮아질 가능성을 확인했다. 담당 Luna에게 각각 원인 검토·해당 fixture 수정을 맡겼으며 tolerance·계약을 완화하지 않는다. 이 실행을 GPU 통과로 계산하지 않는다.
+
+세 fixture를 수정했다: 독립 reference를 실제 ASCII 순서 blue→red→gold로 맞췄고, 유효한64hex digest를 사용하며, 새 synthetic serial을 기존 watermark/submission/ledger 최대보다 높게 주입한다. renderer production/tolerance는 변경하지 않았다. Luna focused49/strict Clippy/fmt/diff 후 조정자가 같은 명령을 다시 실행해 **Metal library8 + 기존 GPU integration1 = 9 pass/0 fail**를 확인했다. 최종 로그는 `p03-sprite-metal-tests.log`다. Apple M3 Pro/Metal이며 이 실행은 실제 장시간 GPU stall latency·144fps·다른 플랫폼의 증거가 아니다.
+
+통과 항목은 model scalar PBR/sRGB/wrap/filter, sprite UV/pivot/mirror/order/tint·dirty/reuse, nonblack clear alpha0/.25/1의 독립 straight-PNG reference, old-ready 실제 projection/target readback, early non-sRGB rejection, legacy packet parity, packet/legacy native-view opaque target readback과 기존513×289 padded capture다. RGBA tolerance는 투명 PNG reference의 RGB4/alpha1 byte, 기존 opaque sprite RGB3 byte이며 두 종류의 target 표현을 구분한다.
+
+## 실제 CLI·공개 원본 검증
+
+`cargo build -p daedalus-cli --features window --locked`가6.23초 compile로 성공했다. debug executable SHA-256은 `942d1b6224279c15eff3ad52eeb45c69b6281a60b98d5bdf41ec256443eddbed`다. 첫 combined smoke는 sprite camera의 near를 f64 literal0.1과 비교해 실패했다. 실제 report는 올바른 authority pose/정사영·일치하는 last-presented/final view와 f32 near0.10000000149011612를 보였다. engine output은 바꾸지 않고 해당 기대값을 정확한 f32 round-trip으로 고쳤다. 실패 stderr는 `p03-sprite-debug-smoke-first-failure.stderr`에 보존했다. Luna Python55/6.774초·py_compile·diff 후 source를 고정했다.
+
+조정자의 `python3 scripts/smoke_project.py --cli target/debug/daedalus --assets --view --models --sprites`는 **39/39 pass·14.288578초**다. CPU18+assets13+native4+models2+sprites2이며 과거24건과 범위가 달라 speedup 비교가 아니다. `p03-sprite-debug-smoke.json`에 binary/체크/실제 authority·view·resource 근거를 저장했다. model/sprite 모두 viewer가 살아 있는 동안 별도 batch capture를 실행했다. live-window capture나 source reload는 아니다.
+
+같은 binary로 아래 원본 QA를 수행했다.
+
+```sh
+target/debug/daedalus project capture dist/qa-assets/sprite-runtime-project --output dist/project-evidence/p03-public-sprites.png --width 960 --height 640 --ticks 1
+target/debug/daedalus project view dist/qa-assets/sprite-runtime-project --seconds 8 --width 960 --height 640 --report dist/project-evidence/p03-public-sprites-native.json
+```
+
+원본 PNG hash는 위 착수 때와 동일하다. project digest는 `sha256:992a19db4c46f2f4875cb78fc7ad03a29bc307f061cec36ef7ac84160ce32906`, 출력 PNG SHA-256은 `b593ea465c69dc97a70aa70485fa459ffe97f9bd22458355326dd120ca028008`다. 실제 이미지를 열어 네 캐릭터의 upright orientation·nearest 픽셀·투명 영역을 확인했다. offscreen PNG이며 물리 window screenshot과 구분한다.
+
+네 sprite/two atlas ID는 unit quad1개/geometry upload88 bytes, texture upload1회/135,168 bytes, sampler1/pair1을 공유했다. 최초 instance write8회/576 bytes(각128+16), material4회/192 bytes, globals1회/128 bytes다. native는960×640/8초/939 present/TimeLimit, last-presented tick482/sequence483/ortho span4였다. geometry/texture/instance/material/globals 업로드가 최초 이후 증가하지 않았다. native counters/report와 offscreen 이미지가 별도 근거이며 이 run은144fps·고부하 품질·physical2D pan/zoom 입력 인수가 아니다.

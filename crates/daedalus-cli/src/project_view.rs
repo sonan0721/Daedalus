@@ -15,9 +15,9 @@ use daedalus_content::project::PreparedProject;
 use daedalus_content::scene::StableId;
 use daedalus_core::EntityHandle;
 use daedalus_renderer::{
-    PacketAssetLimits, PacketRendererLimits, PacketWindowMessage, ProjectRenderResources,
-    WindowInput, WindowKeyCode, WindowOptions, run_packet_windowed_reported_with_asset_limits,
-    window_input_channel,
+    PacketAssetLimits, PacketPresentationWindowOutcome, PacketRendererLimits, PacketWindowMessage,
+    ProjectRenderResources, WindowInput, WindowKeyCode, WindowOptions,
+    run_packet_windowed_presented, window_input_channel,
 };
 use daedalus_runtime::{
     EngineConfig, ProjectInfoPage, RequestPhase, RequestReadError, RequestTicket, SessionClockMode,
@@ -260,13 +260,8 @@ fn run_window(
         ..WindowOptions::default()
     };
 
-    let window_result = run_packet_windowed_reported_with_asset_limits(
-        initial_packet,
-        packet_rx,
-        options,
-        limits,
-        asset_limits,
-    );
+    let window_result =
+        run_packet_windowed_presented(initial_packet, packet_rx, options, limits, asset_limits);
     worker_stop.store(true, Ordering::Release);
     let coordinator = worker.join().map_err(|payload| {
         format!(
@@ -282,7 +277,7 @@ fn run_window(
 }
 
 struct WindowRun {
-    outcome: daedalus_renderer::PacketAssetWindowOutcome,
+    outcome: PacketPresentationWindowOutcome,
     coordinator: CoordinatorReport,
 }
 
@@ -686,70 +681,74 @@ fn build_report(
     run: WindowRun,
     shutdown: daedalus_runtime::SessionShutdownReport,
 ) -> Value {
+    let outcome = run.outcome;
     let asset_resources =
-        super::project_assets::asset_resource_stats_json(&run.outcome.asset_resource_stats);
-    let outcome = run.outcome.packet;
-    let presented = outcome.last_presented.as_ref().map(|frame| json!({
-        "session":frame.session.get().to_string(), "tick":frame.tick.get().to_string(),
-        "sequence":frame.sequence.to_string(), "project_generation":frame.project_generation.to_string(),
-        "source_digest":frame.source_digest, "physical_width":frame.physical_width,
-        "physical_height":frame.physical_height,
-        "camera":{"position":frame.camera.position,"target":frame.camera.target,"up":frame.camera.up,"vertical_fov_radians":frame.camera.vertical_fov_radians,"near":frame.camera.near,"far":frame.camera.far},
-    }));
-    let final_packet = &outcome.final_packet;
-    let frame_intervals = json!({
-        "sample_capacity":outcome.report.frame_intervals.sample_capacity,
-        "samples_ms":outcome.report.frame_intervals.samples_ms,
-        "p50_ms":outcome.report.frame_intervals.p50_ms,
-        "p95_ms":outcome.report.frame_intervals.p95_ms,
-        "p99_ms":outcome.report.frame_intervals.p99_ms,
-        "max_ms":outcome.report.frame_intervals.max_ms,
-    });
-    let latest_presentation = outcome.report.latest_presentation.as_ref().map(|metadata| {
+        super::project_assets::asset_resource_stats_json(outcome.asset_resource_stats());
+    let packet_outcome = outcome.packet_outcome();
+    let presented = outcome.last_presented().map(|presentation| {
+        let frame = presentation.packet();
         json!({
-            "sequence":metadata.sequence.to_string(),
-            "tick":metadata.tick.to_string(),
-            "generation":metadata.generation.to_string(),
+            "session":frame.session.get().to_string(), "tick":frame.tick.get().to_string(),
+            "sequence":frame.sequence.to_string(), "project_generation":frame.project_generation.to_string(),
+            "source_digest":frame.source_digest, "physical_width":frame.physical_width,
+            "physical_height":frame.physical_height,
+            "camera":super::project_assets::camera_json(&frame.camera),
+            "render_view":super::project_assets::render_view_json(presentation.view()),
         })
     });
-    let final_camera = json!({
-        "position":outcome.report.final_camera.position,
-        "target":outcome.report.final_camera.target,
-        "up":outcome.report.final_camera.up,
-        "vertical_fov_radians":outcome.report.final_camera.vertical_fov_radians,
-        "near":outcome.report.final_camera.near,
-        "far":outcome.report.final_camera.far,
+    let final_packet = &packet_outcome.final_packet;
+    let frame_intervals = json!({
+        "sample_capacity":packet_outcome.report.frame_intervals.sample_capacity,
+        "samples_ms":packet_outcome.report.frame_intervals.samples_ms,
+        "p50_ms":packet_outcome.report.frame_intervals.p50_ms,
+        "p95_ms":packet_outcome.report.frame_intervals.p95_ms,
+        "p99_ms":packet_outcome.report.frame_intervals.p99_ms,
+        "max_ms":packet_outcome.report.frame_intervals.max_ms,
     });
+    let latest_presentation = packet_outcome
+        .report
+        .latest_presentation
+        .as_ref()
+        .map(|metadata| {
+            json!({
+                "sequence":metadata.sequence.to_string(),
+                "tick":metadata.tick.to_string(),
+                "generation":metadata.generation.to_string(),
+            })
+        });
+    let final_camera = super::project_assets::camera_json(&packet_outcome.report.final_camera);
     let window = json!({
-        "exit_reason":format!("{:?}", outcome.report.exit_reason),
-        "rendered_frames":outcome.report.rendered_frames,
-        "loading_frames":outcome.report.loading_frames,
-        "input_events":outcome.report.input_events,
-        "loading_input_events":outcome.report.loading_input_events,
-        "key_events":outcome.report.key_events,
-        "loading_key_events":outcome.report.loading_key_events,
-        "mouse_button_events":outcome.report.mouse_button_events,
-        "loading_mouse_button_events":outcome.report.loading_mouse_button_events,
-        "cursor_events":outcome.report.cursor_events,
-        "loading_cursor_events":outcome.report.loading_cursor_events,
-        "wheel_events":outcome.report.wheel_events,
-        "loading_wheel_events":outcome.report.loading_wheel_events,
-        "resize_events":outcome.report.resize_events,
-        "loading_resize_events":outcome.report.loading_resize_events,
-        "focus_events":outcome.report.focus_events,
-        "loading_focus_events":outcome.report.loading_focus_events,
-        "local_camera_changes":outcome.report.local_camera_changes,
-        "resize_count":outcome.report.resize_count,
-        "physical_width":outcome.report.final_width,
-        "physical_height":outcome.report.final_height,
+        "exit_reason":format!("{:?}", packet_outcome.report.exit_reason),
+        "rendered_frames":packet_outcome.report.rendered_frames,
+        "loading_frames":packet_outcome.report.loading_frames,
+        "input_events":packet_outcome.report.input_events,
+        "loading_input_events":packet_outcome.report.loading_input_events,
+        "key_events":packet_outcome.report.key_events,
+        "loading_key_events":packet_outcome.report.loading_key_events,
+        "mouse_button_events":packet_outcome.report.mouse_button_events,
+        "loading_mouse_button_events":packet_outcome.report.loading_mouse_button_events,
+        "cursor_events":packet_outcome.report.cursor_events,
+        "loading_cursor_events":packet_outcome.report.loading_cursor_events,
+        "wheel_events":packet_outcome.report.wheel_events,
+        "loading_wheel_events":packet_outcome.report.loading_wheel_events,
+        "resize_events":packet_outcome.report.resize_events,
+        "loading_resize_events":packet_outcome.report.loading_resize_events,
+        "focus_events":packet_outcome.report.focus_events,
+        "loading_focus_events":packet_outcome.report.loading_focus_events,
+        "local_camera_changes":packet_outcome.report.local_camera_changes,
+        "resize_count":packet_outcome.report.resize_count,
+        "physical_width":packet_outcome.report.final_width,
+        "physical_height":packet_outcome.report.final_height,
         "frame_intervals":frame_intervals,
-        "message_source_disconnected":outcome.report.message_source_disconnected,
-        "final_loading":outcome.report.final_loading,
+        "message_source_disconnected":packet_outcome.report.message_source_disconnected,
+        "final_loading":packet_outcome.report.final_loading,
         "latest_presentation":latest_presentation,
-        "window_title":outcome.report.window_title,
+        "window_title":packet_outcome.report.window_title,
         "final_camera":final_camera,
+        "final_render_view":super::project_assets::render_view_json(outcome.final_view()),
     });
-    let resources = super::project_assets::packet_resource_stats_json(&outcome.resource_stats);
+    let resources =
+        super::project_assets::packet_resource_stats_json(&packet_outcome.resource_stats);
     let coordinator = json!({
         "observed_frames":run.coordinator.observed_frames,
         "presented_candidates":run.coordinator.presented_candidates,

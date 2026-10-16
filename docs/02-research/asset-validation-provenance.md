@@ -32,9 +32,9 @@
 - 선택 이미지: `Tilemap/tilemap_packed.png`, 5,294 bytes, SHA-256 `d24e60a41e4ac7a745c0304dfde121143688557f40215f23221c29cfe683825f`.
 - License.txt: 570 bytes, SHA-256 `9f574a2f1f636a3db8a0665ba90212f34e2b5e61ecb533d77c05237766374111`.
 
-이미지 IHDR는 192×176, 8-bit indexed palette다. 실제 chunk는 IHDR/gAMA/PLTE/tRNS/IDAT/IEND이며 gAMA 값은45455, sRGB chunk는 없다. 첫 실제 CLI cook은 이 색정보를 Unsupported로 종료했다. 원본을 재저장하지 않고 [명시 color policy](../03-architecture/asset-import-foundation.md)로 해석하는 보완을 진행한다. 16×16 region의 atlas JSON은 엔진 검증용으로 별도 작성하고 이미지 원본과 혼동하지 않는다. 이미지 확장·region 경계·nearest/no-mip을 검증하며 sprite renderer나 tile game이 완성됐다는 뜻은 아니다.
+이미지 IHDR는 192×176, 8-bit indexed palette다. 실제 chunk는 IHDR/gAMA/PLTE/tRNS/IDAT/IEND이며 gAMA 값은45455, sRGB chunk는 없다. 첫 실제 CLI cook은 이 색정보를 Unsupported로 종료했다. 후속 보완에서 원본을 재저장하지 않고 [명시 color policy](../03-architecture/asset-import-foundation.md)로 해석했다. 16×16 region의 atlas JSON은 엔진 검증용으로 별도 작성하고 이미지 원본과 혼동하지 않는다. 이미지 확장·region 경계·nearest/no-mip을 검증하며 이 작은 subset이 전체2D 엔진이나 tile game의 완성은 아니다.
 
-보완 후 원본 SHA를 유지한 실제 CPU cook에서192×176 image와1 region atlas를 확인했다. warm 실행의 PNG decode0·atlas cook0도 확인했다. 실제 sprite 표시·타일 시뮬레이션은 별도다.
+보완 후 원본 SHA를 유지한 실제 CPU cook에서192×176 image와1 region atlas를 확인했다. warm 실행의 PNG decode0·atlas cook0도 확인했다. P03.2b에서는 같은 원본의16×16 region4개·두 atlas ID로 실제 PNG960×640을 렌더하고 네 캐릭터의 방향·투명 배경·nearest 픽셀을 직접 확인했다. unit quad1회/88 bytes와 texture1회/135,168 bytes upload를 공유했고8초 native939 present에서도 추가 geometry/texture/instance/material upload가 없었다. source/binary/PNG identity와 실제 명령·한계는 [스프라이트 기록](../06-worklog/2026-10-16-sprite-runtime.md)을 따른다. 타일 시뮬레이션·애니메이션·144fps는 별도다.
 
 ## 오디오: Kenney Interface Sounds와 명시적인 변환
 

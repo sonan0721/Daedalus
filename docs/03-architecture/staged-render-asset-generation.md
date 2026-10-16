@@ -54,6 +54,8 @@ native owner가 한 슬롯의 move-only `ProjectSourceLease`를 host로 전달�
 
 source pin은 actual source-backed MeshHandle/ModelTextureUpload와 packet sidecar까지 이어져야 한다. wrapper만 pin하고 validation/resource plan이 독립 Arc를 들고 있게 두면 charge를 먼저 반환할 수 있다. 모든 엔진 내부 pending/ready packet·validation·staging plan·presentation outcome을 owner graph에 포함한다. token이 자신을 보유한 renderer backing을 다시 소유하는 순환 참조는 금지한다.
 
+GPU key 재사용과 CPU handle 공유는 구분한다. 여러 세대에서 같은 CPU handle을 재사용하면서 그 내부 token이 첫 source 전체를 계속 붙잡으면, 이전 세대 packet을 모두 해제해도 현재 handle이 old source를 유지해 retired 슬롯을 영구 점유할 수 있다. 이는 구현에서 확인한 결함이 아니라 owner graph의 검토 조건이다. 초기 경로는 세대별 CPU owner/pin을 명시하고 GPU 자원만 content key로 재사용하는 방향부터 검토한다. CPU backing까지 세대 간 공유하려면 actual Arc·별도 charge·마지막 큰 drop과 다음 연속 교체의 진행을 함께 증명한다. wrapper의 token만 바꾸고 내부 leaf Arc를 장부 밖에 남기는 방식도 허용하지 않는다.
+
 renderer가 따로 만든 legacy mesh Vec·prepared template/map·sidecar metadata는 source pin만으로 final drop thread나 별도 예산이 해결되지 않는다. source cooked 장부와 prepared CPU 장부를 구분하고, prepared generation의 cleanup backstop도 off-actor owner에 둔다. packet/plan이 계속 보유 중이면 wrapper 교체만으로 회수를 보고하지 않는다. 기존 estimator가 무엇을 논리적으로 세는지·실제 공유인지·별도 복사본인지 리뷰해 aggregate 수치를 확정한다. CPU 예산을 GPU byte 수나 전체 RSS로 바꾸어 부르지 않는다.
 
 종료 때 window outcome의 last-presented packet Arc를 유지한 채 cleanup을 기다리는 coordinator에 blocking join하면 순환 대기가 가능하다. 최종 작은 identity/view/report를 먼저 복사하고 큰 packet/outcome/device owner를 해제한 뒤 finished를 관찰하거나, 참조가 남으면 정직하게 Stopping을 유지한다. 아직 끝나지 않은 thread를 UI에서 join하지 않는다. native caller가 의도적으로 유지한 resource lease도 종료 계약에 명시한다.

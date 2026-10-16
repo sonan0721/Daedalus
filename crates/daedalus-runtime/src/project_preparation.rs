@@ -2470,6 +2470,23 @@ mod tests {
 
     type TempProject = PreparationTestProject;
 
+    fn retry_busy<T>(
+        mut operation: impl FnMut() -> Result<T, ProjectPreparationPortError>,
+    ) -> Result<T, ProjectPreparationPortError> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match operation() {
+                Err(ProjectPreparationPortError::Busy) if Instant::now() < deadline => {
+                    thread::yield_now();
+                }
+                Err(ProjectPreparationPortError::Busy) => {
+                    panic!("project preparation test port remained busy past its deadline");
+                }
+                result => return result,
+            }
+        }
+    }
+
     fn wait_for_state(
         service: &NativeProjectPreparationService,
         session: SessionId,
@@ -2616,7 +2633,7 @@ mod tests {
         let gate = Arc::new(PreparationTestGate::panicking(1));
         service.shared.install_test_gate(Arc::clone(&gate));
         let _release_gate = PreparationTestGateRelease(Arc::clone(&gate));
-        port.try_prepare(1).unwrap();
+        retry_busy(|| port.try_prepare(1)).unwrap();
         gate.wait_until_entered();
         gate.release();
 
@@ -2638,7 +2655,7 @@ mod tests {
                 other => panic!("unexpected worker shutdown result: {other:?}"),
             }
         }
-        let stopped = port.try_status(session).unwrap();
+        let stopped = retry_busy(|| port.try_status(session)).unwrap();
         assert_eq!(stopped.state(), PreparationState::Stopped);
         assert_eq!(
             stopped.latest_failure().map(PreparationFailure::code),
@@ -2698,10 +2715,10 @@ mod tests {
         let session = SessionId::fresh();
         port.bind_session(session).unwrap();
         assert_eq!(
-            port.try_prepare(1),
+            retry_busy(|| port.try_prepare(1)),
             Err(ProjectPreparationPortError::Capacity)
         );
-        let status = port.try_status(session).unwrap();
+        let status = retry_busy(|| port.try_status(session)).unwrap();
         assert!(status.desired().is_none());
         assert!(status.running().is_none());
         assert!(status.pending().is_none());
@@ -2729,7 +2746,7 @@ mod tests {
         let mut port = service.take_control_port().unwrap();
         assert!(port.matches_initial_project(&active));
         port.bind_session(session).unwrap();
-        let initial = port.try_status(session).unwrap();
+        let initial = retry_busy(|| port.try_status(session)).unwrap();
         assert_eq!(initial.state(), PreparationState::Idle);
         assert_eq!(initial.active_generation(), 1);
         assert_eq!(initial.active_source_digest(), active_digest);
@@ -2744,7 +2761,7 @@ mod tests {
             .is_err()
         );
 
-        port.try_prepare(1).unwrap();
+        retry_busy(|| port.try_prepare(1)).unwrap();
         let first = wait_for_state(&service, session, |status| {
             status
                 .ready_candidate()
@@ -2759,11 +2776,11 @@ mod tests {
         let gate = Arc::new(PreparationTestGate::new(2));
         service.shared.install_test_gate(Arc::clone(&gate));
         let _release_gate = PreparationTestGateRelease(Arc::clone(&gate));
-        port.try_prepare(2).unwrap();
+        retry_busy(|| port.try_prepare(2)).unwrap();
         gate.wait_until_entered();
-        port.try_prepare(3).unwrap();
-        port.try_prepare(4).unwrap();
-        let coalesced = port.try_status(session).unwrap();
+        retry_busy(|| port.try_prepare(3)).unwrap();
+        retry_busy(|| port.try_prepare(4)).unwrap();
+        let coalesced = retry_busy(|| port.try_status(session)).unwrap();
         assert_eq!(coalesced.running().map(PreparationId::epoch), Some(2));
         assert_eq!(coalesced.pending().map(PreparationId::epoch), Some(4));
         gate.release();
@@ -2779,7 +2796,7 @@ mod tests {
         assert_eq!(latest.running(), None);
         assert_eq!(latest.pending(), None);
 
-        port.try_cancel(4).unwrap();
+        retry_busy(|| port.try_cancel(4)).unwrap();
         let cancelled = wait_for_state(&service, session, |status| {
             status.state() == PreparationState::Cancelled && status.ready_candidate().is_none()
         });
@@ -2819,21 +2836,21 @@ mod tests {
         service.shared.install_test_gate(Arc::clone(&gate));
         let _release_gate = PreparationTestGateRelease(Arc::clone(&gate));
 
-        port.try_prepare(1).unwrap();
+        retry_busy(|| port.try_prepare(1)).unwrap();
         gate.wait_until_entered();
-        let imported_but_unpublished = port.try_status(session).unwrap();
+        let imported_but_unpublished = retry_busy(|| port.try_status(session)).unwrap();
         assert_eq!(
             imported_but_unpublished.running().map(PreparationId::epoch),
             Some(1)
         );
         assert!(imported_but_unpublished.ready_candidate().is_none());
 
-        port.try_cancel(1).unwrap();
+        retry_busy(|| port.try_cancel(1)).unwrap();
         assert_eq!(
-            port.try_status(session).unwrap().state(),
+            retry_busy(|| port.try_status(session)).unwrap().state(),
             PreparationState::CancelRequested
         );
-        port.try_prepare(2).unwrap();
+        retry_busy(|| port.try_prepare(2)).unwrap();
         gate.release();
 
         let latest = wait_for_state(&service, session, |status| {
@@ -2867,9 +2884,9 @@ mod tests {
         let gate = Arc::new(PreparationTestGate::after_import(1));
         service.shared.install_test_gate(Arc::clone(&gate));
         let _release_gate = PreparationTestGateRelease(Arc::clone(&gate));
-        port.try_prepare(1).unwrap();
+        retry_busy(|| port.try_prepare(1)).unwrap();
         gate.wait_until_entered();
-        let imported_failure_unpublished = port.try_status(session).unwrap();
+        let imported_failure_unpublished = retry_busy(|| port.try_status(session)).unwrap();
         assert_eq!(
             imported_failure_unpublished
                 .running()
@@ -2879,8 +2896,8 @@ mod tests {
         assert!(imported_failure_unpublished.latest_failure().is_none());
 
         std::fs::write(project.path().join("scene.json"), PREPARATION_TEST_SCENE).unwrap();
-        port.try_cancel(1).unwrap();
-        port.try_prepare(2).unwrap();
+        retry_busy(|| port.try_cancel(1)).unwrap();
+        retry_busy(|| port.try_prepare(2)).unwrap();
         gate.release();
 
         let latest = wait_for_state(&service, session, |status| {
@@ -2910,14 +2927,14 @@ mod tests {
         let session = SessionId::fresh();
         port.bind_session(session).unwrap();
         assert_eq!(
-            port.try_prepare(0),
+            retry_busy(|| port.try_prepare(0)),
             Err(ProjectPreparationPortError::InvalidEpoch)
         );
         assert_eq!(
-            port.try_status(SessionId::fresh()),
+            retry_busy(|| port.try_status(SessionId::fresh())),
             Err(ProjectPreparationPortError::SessionMismatch)
         );
-        let initial = port.try_status(session).unwrap();
+        let initial = retry_busy(|| port.try_status(session)).unwrap();
         assert_eq!(initial.state(), PreparationState::Idle);
         assert!(initial.desired().is_none());
         drop(port);

@@ -3459,6 +3459,12 @@ def _run_asset_activation_smoke(
     cwd: Path,
     timeout: float,
 ) -> dict[str, Any]:
+    option_rejections = _asset_activation_option_rejections(
+        binary,
+        root=root,
+        cwd=cwd,
+        timeout=timeout,
+    )
     project = root / "offline-asset-activation-project"
     _write_asset_preparation_view_project(project)
     command = (
@@ -3478,7 +3484,7 @@ def _run_asset_activation_smoke(
         protocol_version=VIEW_PROTOCOL_VERSION,
         process_label="headless project serve --asset-activation",
     )
-    checks: list[str] = []
+    checks = [item["check"] for item in option_rejections]
     with server:
         initial_info = _asset_preparation_project_info(
             server,
@@ -3910,6 +3916,7 @@ def _run_asset_activation_smoke(
     )
     return {
         "scope": "headless_cpu_asset_source_activation",
+        "option_rejections": option_rejections,
         "session": session,
         "authored_source_files": source_files,
         "initial_source_digest": initial_source_digest,
@@ -3939,6 +3946,68 @@ def _run_asset_activation_smoke(
         "pre_topology_info_after_cancel": after_cancel,
         "checks": checks,
     }
+
+
+def _asset_activation_option_rejections(
+    binary: Path,
+    *,
+    root: Path,
+    cwd: Path,
+    timeout: float,
+) -> list[dict[str, Any]]:
+    cases = (
+        (
+            "asset_activation_protocol_one_rejected_before_project_load",
+            root / "missing-activation-protocol-one-project",
+            ["--protocol", "1", "--asset-activation"],
+            "--clock, --audio, --asset-preparation, and --asset-activation require `project serve --protocol 2`",
+        ),
+        (
+            "asset_activation_offline_audio_rejected_before_project_load",
+            root / "missing-activation-audio-project",
+            ["--protocol", "2", "--audio", "offline", "--asset-activation"],
+            "--asset-activation cannot be combined with --audio",
+        ),
+    )
+    results: list[dict[str, Any]] = []
+    for check, project, options, expected_error in cases:
+        _expect(not project.exists(), "activation option rejection fixture unexpectedly exists", project)
+        command = ["project", "serve", os.fspath(project), *options]
+        result = _run_cli(
+            binary,
+            command,
+            cwd=cwd,
+            timeout=timeout,
+            expect_success=False,
+        )
+        expected_stderr = f'Error: "{expected_error}"'
+        _expect(
+            result.stderr.strip() == expected_stderr,
+            "activation option was rejected with an unexpected diagnostic",
+            {"expected": expected_stderr, "actual": result.stderr},
+        )
+        _expect(
+            not result.stdout.strip(),
+            "activation option rejection wrote stdout before starting the service",
+            result.stdout,
+        )
+        cache = project / ".daedalus"
+        _expect(
+            not project.exists() and not cache.exists(),
+            "activation option rejection created a project or project cache before validation",
+            {"project": project, "cache": cache},
+        )
+        results.append(
+            {
+                "check": check,
+                "exit_code": result.returncode,
+                "diagnostic": expected_error,
+                "stderr": result.stderr.strip(),
+                "project_created": project.exists(),
+                "cache_created": cache.exists(),
+            }
+        )
+    return results
 
 
 def _run_asset_preparation_view_smoke(

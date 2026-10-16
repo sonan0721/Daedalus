@@ -1,6 +1,6 @@
 # P03.3b.2 동일 authority의 CPU 세대 commit
 
-상태: native headless 선행 계약 동결·구현/검증 전 · 2026-10-16
+상태: native headless 선행 계약 동결·로컬 경계 검증 통과·최종 통합/배포 인수 전 · 2026-10-16
 
 ## 목적과 제한
 
@@ -134,3 +134,11 @@ Luna xhigh 한 명이 runtime의 `project_preparation.rs`, `session_control.rs`,
 lower budget·held private old reader·retirement 포화→거부→실제 worker release 뒤 회복, Stage 중 stop/owner Drop/start 실패/worker·actor panic의 실제 종료·drop thread·cache reopen을 검증한다. status cap과 feature-off/unavailable, 기존 preparation-only/default/audio 회귀도 검사한다. 기존 actor source swap만 검사하는 fake worker나 고정 Staged 응답을 쓰지 않는다.
 
 focused default/audio feature→runtime 전체·strict Clippy→source freeze/조정자 review 순서다. Cargo owner 하나·shared target·고유 `dist/project-evidence/p03-generation-*-attemptNN.log`를 사용한다. CLI/protocol2·process smoke·통합/managed/실제GPU·clean package/PR 인수는 후속 adapter와 consumer 통합 시 실행한다. 이 내부 선행 단계만으로 전체 b/c를 체크하지 않는다.
+
+## 통합·배포 검증의 재사용
+
+로컬 runtime/CLI 경계와 실제 process smoke를 통과한 뒤에만 기존 release workflow의 staged-binary smoke에 `--asset-activation`을 추가한다. `--assets --audio --asset-preparation --asset-activation` 한 invocation은 지원되는 sub-smoke를 순차 실행하는 도구다. preparation+offline audio 세션과 headless activation 세션은 별개이며, activation+audio/view 동시 지원을 의미하지 않는다. 각각의 session/binary/source identity와 실제 checks를 결과에 유지한다.
+
+새 workflow/job·별도 package backend·장치 의존 CI를 만들지 않는다. 기존 archive 무결성/version/inspect 검증·Linux linkage·보호3개/제품5개 체크·tag-only Publish 조건을 그대로 유지한다. packaged step의 이름과 flag만 최소 확장하며 local source/clean archive와 두 CI staged binary의 실제 결과를 각각 확인한다. 이번 변경으로 tag/공개 Release를 발행하지 않는다.
+
+CPU activation helper 안에서 protocol1과 activation+audio의 잘못된 옵션을 실제 binary/없는 directory로 검사한다. 기대하는 옵션 오류·nonzero 종료·미생성 directory/cache를 대조한다. view 거부는 window feature를 요구하므로 all-feature native binary의 별도 실제 검사로 확인한다. CPU-only activation helper에 window를 강제하거나 CLI의 generic unknown-command 오류를 view 사전 검사 성공으로 계산하지 않는다.

@@ -182,8 +182,12 @@ PR15의 다섯 체크 성공·Publish skipped를 확인했다. head `9c7e2710330
 
 ## P03.3b에서 공통화할 반복
 
-[호환성 계약](../03-architecture/asset-replacement-compatibility.md)은 content의 단일 비교기를 두고 consumer마다 authored field 판단·정렬/진단을 중복 구현하지 않도록 한다. 이 b.1 비교기는 content 로컬 검증을 통과했다. [headless 세대 계약](../03-architecture/headless-asset-generation.md)은 새 session 생성 대신 기존 worker·actor/replay·현재 Engine을 이어 쓰며 source 변경→Stage/Commit→같은 상태 조회를 한 실행에서 검증한다. authored topology 비교의 reference index만 한도 내에 만들고 payload 재복사/해시/parse는 하지 않는다. b.2 실제 세대 전환은 검증 전이며 개발 시간 개선율을 주장하지 않는다.
+[호환성 계약](../03-architecture/asset-replacement-compatibility.md)은 content의 단일 비교기를 두고 consumer마다 authored field 판단·정렬/진단을 중복 구현하지 않도록 한다. 이 b.1 비교기는 content 로컬 검증을 통과했다. [headless 세대 계약](../03-architecture/headless-asset-generation.md)은 새 session 생성 대신 기존 worker·actor/replay·현재 Engine을 이어 쓰며 source 변경→Stage/Commit→같은 상태 조회를 한 실행에서 검증한다. authored topology 비교의 reference index만 한도 내에 만들고 payload 재복사/해시/parse는 하지 않는다. b.2 CPU 전환의 실제 첫 process 검증은 통과했으나 최종 통합/package 인수와 renderer/audio 전환은 남아 있다. 개발 시간 개선율을 주장하지 않는다.
 
 CLI adapter는 실제 네 capability 배열의 base7 반복을 base/extension composer로 제거한다. 기존 feature-off 오류·네 조합의 operation 순서·새 headless-only 지원 경계를 함께 검사한 뒤에만 구현 결과로 기록한다. 범용 schema generator를 이번 선행 작업에 끼워 넣지 않고 source에서 확인한 작은 중복만 제거한다. runtime public type/getter·wire decimal ID를 먼저 고정해 별도 작업자가 private source를 추측하며 재작성하는 반복도 줄인다. compile/test 소유권과 focused→통합 순서는 유지한다.
 
 첫 b.2 process-helper review는 feature별 수동 command-ID 번호대가 공통 high-water와 충돌하는 반복을 발견했다. 새 helper는 한 세션의 단일 증가 issuer와 명시적 replay ID 재사용으로 바꿨다. 실제 엔진 오류가 나기 전 source review에서 찾은 문제이며 최종 actual CLI 검증은 대기다. provider body를 기다리는 adapter source 대기도 줄여 동결한 공개 API로 먼저 작성하게 하고, 한정한 Python stub lease는 runtime source 작업 중 실행한 뒤 Cargo에 돌려줬다. Python28 통과는 transport 회귀 근거일 뿐 실제 세대 전환·개발 시간 개선율이 아니다. 구체 source/raw/수정 전후 범위는 [activation 작업 기록](../06-worklog/2026-10-16-project-asset-activation.md)을 따른다.
+
+이후 실제 CLI opt-in은28개(CPU18+activation10)를 통과했다. PNG/model/atlas/WAV를 같은 session에서 순서대로 commit하고 현재 handle/pose/tick을 유지했다. helper의 잘못된 ProjectInfo 필드 assertion만 고친 재시도는 기존 binary를 그대로 사용해 불필요한 Cargo rebuild를 피했다. runtime source 변경 뒤에는 해당 runtime 검사만 먼저 수행하고, source freeze 후 CLI/전체 통합/장치/package를 순서대로 수행한다. 단순 raw/count/hash는 위 작업 기록을 기준으로 하고 설계·TESTING·체크리스트에 중복 복사하지 않는다. 서로 다른 범위의 실행 시간을 속도 향상으로 비교하지 않는다.
+
+마지막 경계 검증에서는 한 작업자가 기존 runtime attempt 번호를 재사용해 앞선 raw 일부를 덮어썼다. 현재 raw를 다른 고유 prefix로 보존하고 손실 범위를 작업 기록에 명시했다. 이후 로그 생성은 고유 이름뿐 아니라 exclusive/noclobber로 기존 파일을 거부한다. 통과한 과거 검사를 다시 실행해 과거 원본처럼 보관하지 않는다. CLI 모든 기능 test/Clippy는 다음 workspace 모든 기능 검사에 이미 포함되므로 별도로 중복 실행하지 않고, default feature 경계는 별도 유지한다.

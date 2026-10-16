@@ -54,6 +54,8 @@ PR14에서 두 새 combined50 step·Linux linkage·다섯 CI와 main 동일 tree
 
 그 뒤 자동 main push run38909669190도 두 cache restore·두 package/staged50·Linux linkage 성공과 Publish skipped를 확인했다. manual→PR→main 경로의 좁은 cache 개선만 인수했고 전체 DEV06/07·P03·D1의 완료로 계산하지 않는다.
 
+P03.3b.2의 다음 CI 변경은 [headless 계약](../03-architecture/headless-asset-generation.md)의 local runtime/CLI 검증 뒤 기존 staged-binary step에 activation flag를 더하는 범위다. 한 helper가 지원 조합의 별도 sub-smoke를 순차 실행하며 activation+audio 동시 지원으로 보고하지 않는다. 새 job/backend/장치 의존성을 추가하지 않고 두 실제 CI step·Publish skipped·다섯 체크와 head/CI/main 동일 tree를 확인한다. 현재 그 변경과 새 package/CI 인수는 대기다.
+
 기여 문서의 구조는 Bevy·Godot의 공식 기여 입구를 참고하되 대규모 팀 규칙을 그대로 복제하지 않았다. [Bevy](https://github.com/bevyengine/bevy/blob/main/CONTRIBUTING.md), [Godot](https://raw.githubusercontent.com/godotengine/godot/master/CONTRIBUTING.md)
 
 ## 개발·CI 파이프라인 최적화

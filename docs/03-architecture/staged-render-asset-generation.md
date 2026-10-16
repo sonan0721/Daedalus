@@ -38,6 +38,12 @@ flowchart LR
 
 기존 project-view coordinator는 input relay와 protocol pump도 맡는다. CPU prepare를 그 loop에서 통째로 실행하면 창이 계속 그려져도 입력/제어가 지연될 수 있다. 무거운 prepare는 별도의 bounded 작업으로 넘기고 coordinator는 작은 handoff/ACK를 처리한다. 기존 job pool 재사용 또는 장수하는 한 CPU 준비 owner의 정확한 선택·process worker 예산·취소/종료는 API 동결에 포함한다. 요청마다 detached thread를 생성하지 않는다.
 
+추가 source 감사에서 현재 pool을 host가 그대로 재사용할 수 없는 이유를 확인했다. `EngineBuilder::build`의 per-engine `TaskPool`은 기본 worker1/capacity64지만 `SessionControlService`는 Engine/tasks handle을 외부에 공개하지 않는다. `TaskPool::try_recv`는 하나의 shared completion receiver이며 fixture `LiveSession`은 자신의 job map에 없는 결과를 오류로 처리한다. 결과 owner/broker 없이 다른 poller를 연결하는 것은 안전한 재사용이 아니다. 현재 `ProjectRenderResources::prepare`에도 cooperative cancellation 입력이 없다. 전체 prepare를 pool로 옮기는 것만으로 빠른 취소를 보장하지 않는다.
+
+우선 검토안은 장수하는 render CPU owner 하나를 host 예산/진단에 별도로 포함하고 취소 checkpoint·한 개 candidate lease·유한 handoff를 두는 것이다. 최신 desired metadata를 보관하더라도 두 번째 큰 candidate payload를 장부 밖에 대기시키지 않는다. 현재 preparation owner도 Engine task-worker 진단과 별도인 점을 유지해 process 전체를 이미 제한한다고 주장하지 않는다. public `EngineConfig` literal에 임의 field를 추가하지 않고 host 옵션/진단 경계를 동결한다.
+
+또한 runtime-neutral port와 renderer 자원 owner만으로는 현재 CLI에 있는 input/protocol/presentation 조합이 SDK 기능으로 재사용되지 않는다. runtime→renderer 의존 없이 두 계층을 조합하는 작은 project-host library와 CLI adapter로 나눌지 검토한다. 기존 host 코드와 책임을 먼저 대조하며 일반 scheduler/actor framework를 추가하지 않는다. 이 library 채택·crate 이름·public API·source 이동은 아직 결정/구현하지 않았다.
+
 Stage 수락·authored compatibility·CPU resource 준비·device staged·actor committed·submitted·present 관찰은 서로 다른 상태다. render consumer가 필요하면 device 준비가 확인되기 전 Commit을 허용하지 않는다. worker/device 결과와 ACK는 session/candidate/activation/generation/source identity를 검증하며 오래된 결과는 최신 작업에 적용하지 않는다. 같은 command replay/ACK/권한·효과 전 거부 규칙은 b.2를 유지한다.
 
 ## source lease와 두 종류의 CPU 메모리

@@ -21,6 +21,7 @@ from smoke_project import (
     _JsonlProjectServer,
     _asset_activation_command,
     _asset_activation_expect_terminal_error,
+    _asset_activation_option_rejections,
     _asset_activation_status,
     _asset_preparation_command,
     _asset_preparation_status,
@@ -65,6 +66,71 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         binary.write_text(f"#!{sys.executable}\n{body}\n", encoding="utf-8")
         binary.chmod(0o755)
         return binary
+
+    def test_asset_activation_option_rejections_require_exact_preload_failure(self) -> None:
+        valid_stub = self.create_server_stub(
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "protocol = args[args.index('--protocol') + 1]\n"
+            "message = ('--clock, --audio, --asset-preparation, and --asset-activation require `project serve --protocol 2`'\n"
+            "           if protocol == '1' else '--asset-activation cannot be combined with --audio')\n"
+            "print('Error: ' + json.dumps(message), file=sys.stderr)\n"
+            "raise SystemExit(2)\n"
+        )
+        accepted = _asset_activation_option_rejections(
+            valid_stub,
+            root=self.root / "valid-option-rejections",
+            cwd=self.root,
+            timeout=STUB_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            [item["check"] for item in accepted],
+            [
+                "asset_activation_protocol_one_rejected_before_project_load",
+                "asset_activation_offline_audio_rejected_before_project_load",
+            ],
+        )
+        self.assertTrue(all(item["exit_code"] != 0 for item in accepted))
+        self.assertTrue(
+            all(not item["project_created"] and not item["cache_created"] for item in accepted)
+        )
+
+        failure_modes = (
+            ("wrong-diagnostic", "unexpected diagnostic"),
+            ("path-created", "created a project"),
+            ("zero-exit", "unexpectedly succeeded"),
+            ("service-stdout", "wrote stdout"),
+        )
+        for mode, expected_failure in failure_modes:
+            with self.subTest(mode=mode):
+                mode_root = self.root / f"invalid-option-{mode}"
+                mode_root.mkdir()
+                body = (
+                    "import json, sys\n"
+                    "from pathlib import Path\n"
+                    "args = sys.argv[1:]\n"
+                    "protocol = args[args.index('--protocol') + 1]\n"
+                    "message = ('--clock, --audio, --asset-preparation, and --asset-activation require `project serve --protocol 2`'\n"
+                    "           if protocol == '1' else '--asset-activation cannot be combined with --audio')\n"
+                )
+                if mode == "path-created":
+                    body += "Path(args[2]).mkdir(parents=True)\n"
+                elif mode == "wrong-diagnostic":
+                    body += "message = 'activation options were accepted'\n"
+                elif mode == "service-stdout":
+                    body += "print('{\"service\":\"started\"}')\n"
+                body += "print('Error: ' + json.dumps(message), file=sys.stderr)\n"
+                body += "raise SystemExit(0 if " + repr(mode == "zero-exit") + " else 2)\n"
+                binary = self.root / f"server-stub-{mode}"
+                binary.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+                binary.chmod(0o755)
+                with self.assertRaisesRegex(SmokeError, expected_failure):
+                    _asset_activation_option_rejections(
+                        binary,
+                        root=mode_root,
+                        cwd=self.root,
+                        timeout=STUB_TIMEOUT_SECONDS,
+                    )
 
     def test_offline_asset_fixture_contains_external_and_embedded_sources(self) -> None:
         project = self.root / "asset-fixture"

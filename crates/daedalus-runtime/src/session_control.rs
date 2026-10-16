@@ -3857,12 +3857,23 @@ mod tests {
     use crate::EngineConfig;
     use crate::project_preparation::PreparationTestProject;
     use crate::{
-        AssetActivationCommandOutcome, AssetActivationOperation, AssetActivationRequestResult,
-        AssetActivationState, AssetPreparationCommandOutcome, AssetPreparationOperation,
-        AssetPreparationResult, NativeProjectActivationService, NativeProjectActivationShutdown,
-        NativeProjectPreparationOptions, NativeProjectPreparationService, PreparationId,
-        PreparationState, PreparationWorkerShutdown,
+        ActivationId, AssetActivationCommandOutcome, AssetActivationOperation,
+        AssetActivationRequestResult, AssetActivationState, AssetPreparationCommandOutcome,
+        AssetPreparationOperation, AssetPreparationResult, NativeProjectActivationService,
+        NativeProjectActivationShutdown, NativeProjectPreparationOptions,
+        NativeProjectPreparationService, PreparationId, PreparationState,
+        PreparationWorkerShutdown,
     };
+
+    struct ActorCleanupPauseRelease(Arc<super::ControlShared>);
+
+    impl Drop for ActorCleanupPauseRelease {
+        fn drop(&mut self) {
+            self.0
+                .release_paused_request_cleanup
+                .store(true, Ordering::Release);
+        }
+    }
 
     const ONE_ENTITY_SCENE: &str = r#"{
         "schema_version": 1,
@@ -5553,12 +5564,19 @@ mod tests {
     fn default_service_keeps_preparation_disabled_without_worker() {
         let service = start(default_config());
         assert!(!service.asset_preparation_enabled());
+        assert!(!service.asset_activation_enabled());
         let client = service.attach().unwrap();
         assert!(matches!(
             client.try_submit(SessionOperation::AssetPreparation(
                 AssetPreparationOperation::Status
             )),
             Err(SessionSubmitError::AssetPreparationUnavailable)
+        ));
+        assert!(matches!(
+            client.try_submit(SessionOperation::AssetActivation(
+                AssetActivationOperation::Status
+            )),
+            Err(SessionSubmitError::AssetActivationUnavailable)
         ));
         let _ = service.shutdown();
     }
@@ -5577,8 +5595,15 @@ mod tests {
         let service = SessionControlService::start_shared_with_preparation(project, config, port)
             .expect("start one actor with preparation");
         assert!(service.asset_preparation_enabled());
+        assert!(!service.asset_activation_enabled());
 
         let client = service.attach().unwrap();
+        assert!(matches!(
+            client.try_submit(SessionOperation::AssetActivation(
+                AssetActivationOperation::Status
+            )),
+            Err(SessionSubmitError::AssetActivationUnavailable)
+        ));
         let initial = terminal_result_after_preparation_busy(
             &client,
             SessionOperation::AssetPreparation(AssetPreparationOperation::Status),
@@ -6014,6 +6039,284 @@ mod tests {
             service.shutdown_report().unwrap().termination,
             SessionTermination::StopRequested
         );
+    }
+
+    #[test]
+    fn actor_activation_rejects_invalid_ids_without_consuming_caller_ids() {
+        let session = SessionId::from_raw(89_201);
+        let foreign_session = SessionId::from_raw(89_202);
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut config = default_config();
+        config.engine.session = session;
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start headless asset activation service");
+        let client = service.session().attach().unwrap();
+
+        let first = prepare_activation_candidate(&client, 89_210);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, first.epoch());
+
+        let invalid_candidates = [
+            (
+                89_211,
+                PreparationId::from_parts(foreign_session, first.epoch()),
+                SessionRequestError::InvalidCandidate,
+            ),
+            (
+                89_212,
+                PreparationId::from_parts(session, 0),
+                SessionRequestError::InvalidCandidate,
+            ),
+            (
+                89_213,
+                PreparationId::from_parts(session, first.epoch() + 1),
+                SessionRequestError::InvalidCandidate,
+            ),
+        ];
+        for (command_id, candidate, expected_error) in invalid_candidates {
+            assert_eq!(
+                terminal_result_after_activation_busy(
+                    &client,
+                    SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                        command_id: Some(CommandId::from_raw(command_id)),
+                        candidate,
+                        expected_active_generation: 1,
+                    }),
+                ),
+                Err(expected_error),
+                "invalid candidate request {command_id} should fail before consuming its ID"
+            );
+        }
+
+        // Reusing each rejected caller ID for a valid preparation proves those actor-level
+        // validation failures did not advance the shared caller-command high-water mark.
+        let second = prepare_activation_candidate(&client, 89_211);
+        let third = prepare_activation_candidate(&client, 89_212);
+        let fourth = prepare_activation_candidate(&client, 89_213);
+        assert_eq!((second.epoch(), third.epoch(), fourth.epoch()), (2, 3, 4));
+        assert_eq!(
+            terminal_result_after_activation_busy(
+                &client,
+                SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                    command_id: Some(CommandId::from_raw(89_214)),
+                    candidate: first,
+                    expected_active_generation: 1,
+                }),
+            ),
+            Err(SessionRequestError::CandidateExpired)
+        );
+        let fifth = prepare_activation_candidate(&client, 89_214);
+        assert_eq!(fifth.epoch(), 5);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, fifth.epoch());
+
+        let activation_one = stage_activation_candidate(&client, fifth, 89_215, 1);
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+        let invalid_activations = [
+            (
+                89_216,
+                ActivationId::from_parts(foreign_session, activation_one.sequence()),
+                SessionRequestError::InvalidActivation,
+            ),
+            (
+                89_217,
+                ActivationId::from_parts(session, 0),
+                SessionRequestError::InvalidActivation,
+            ),
+            (
+                89_218,
+                ActivationId::from_parts(session, activation_one.sequence() + 1),
+                SessionRequestError::InvalidActivation,
+            ),
+        ];
+        for (command_id, activation, expected_error) in invalid_activations {
+            assert_eq!(
+                terminal_result_after_activation_busy(
+                    &client,
+                    SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                        command_id: Some(CommandId::from_raw(command_id)),
+                        activation,
+                        expected_active_generation: 1,
+                    }),
+                ),
+                Err(expected_error),
+                "invalid activation request {command_id} should fail before consuming its ID"
+            );
+        }
+
+        let sixth = prepare_activation_candidate(&client, 89_216);
+        let seventh = prepare_activation_candidate(&client, 89_217);
+        let eighth = prepare_activation_candidate(&client, 89_218);
+        assert_eq!((sixth.epoch(), seventh.epoch(), eighth.epoch()), (6, 7, 8));
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, eighth.epoch());
+        let activation_two = stage_activation_candidate(&client, eighth, 89_219, 1);
+        assert_eq!(activation_two.sequence(), activation_one.sequence() + 1);
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+
+        assert_eq!(
+            terminal_result_after_activation_busy(
+                &client,
+                SessionOperation::AssetActivation(AssetActivationOperation::Cancel {
+                    command_id: Some(CommandId::from_raw(89_220)),
+                    activation: activation_one,
+                }),
+            ),
+            Err(SessionRequestError::ActivationExpired)
+        );
+        let ninth = prepare_activation_candidate(&client, 89_220);
+        assert_eq!(ninth.epoch(), 9);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, ninth.epoch());
+
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn incompatible_activation_status_has_bounded_diagnostics_and_logical_charge() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let client = service.session().attach().unwrap();
+
+        std::fs::write(fixture.path().join("scene.json"), scene_with_entities(2)).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_231);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_232, 1);
+        let status = wait_for_activation_state(&client, AssetActivationState::Failed);
+        let failure = status
+            .latest_failure()
+            .expect("incompatible topology must publish a bounded failure");
+        assert_eq!(failure.id(), activation);
+        assert_eq!(failure.code(), "incompatible_topology");
+        assert!(failure.code().len() <= 64);
+        assert!(failure.message().len() <= 2_048);
+        let compatibility = failure
+            .compatibility()
+            .expect("topology failure should retain the typed mismatch");
+        assert_eq!(
+            compatibility.kind(),
+            daedalus_content::AssetReplacementMismatch::EntitySet
+        );
+
+        let mut actual_logical_bytes = std::mem::size_of_val(&status)
+            .saturating_add(status.active_source_digest().len())
+            .saturating_add(failure.code().len())
+            .saturating_add(failure.message().len())
+            .saturating_add(std::mem::size_of_val(compatibility));
+        if let Some(summary) = status.current_activation() {
+            actual_logical_bytes = actual_logical_bytes
+                .saturating_add(std::mem::size_of_val(summary))
+                .saturating_add(summary.source_digest().len());
+        }
+        for id in [
+            compatibility.entity_id(),
+            compatibility.component_id(),
+            compatibility.asset_id(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(id.as_str().len() <= 128);
+            actual_logical_bytes = actual_logical_bytes.saturating_add(id.as_str().len());
+        }
+        assert!(actual_logical_bytes <= super::MAX_PREPARATION_STATUS_RESULT_BYTES);
+
+        let result = SessionRequestResult::AssetActivation(AssetActivationRequestResult::Status(
+            Box::new(status.clone()),
+        ));
+        let logical_charge = super::estimate_result_bytes(&result);
+        assert_eq!(logical_charge, super::MAX_PREPARATION_STATUS_RESULT_BYTES);
+        assert!(logical_charge < super::MAX_RESULT_BYTES_PER_TICKET);
+
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn activation_stop_waits_for_worker_staging_and_actor_owned_staged_project() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut staging_service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start service for held staging test");
+        let stage_gate = staging_service.block_stage_result_for_test(1);
+        let staging_client = staging_service.session().attach().unwrap();
+        let candidate = prepare_activation_candidate(&staging_client, 89_241);
+        wait_for_preparation_state(
+            &staging_client,
+            PreparationState::CpuPrepared,
+            candidate.epoch(),
+        );
+        stage_activation_candidate(&staging_client, candidate, 89_242, 1);
+        stage_gate.wait_until_entered();
+        wait_for_activation_state(&staging_client, AssetActivationState::Staging);
+
+        staging_service.request_stop();
+        assert_eq!(
+            staging_service.try_shutdown().unwrap(),
+            NativeProjectActivationShutdown::Stopping,
+            "shutdown remains Stopping while the worker owns an in-flight stage result"
+        );
+        stage_gate.release();
+        drop(staging_client);
+        stop_activation_service(&mut staging_service);
+
+        let mut staged_service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start service for actor-owned staged-project test");
+        let staged_client = staged_service.session().attach().unwrap();
+        let candidate = prepare_activation_candidate(&staged_client, 89_243);
+        wait_for_preparation_state(
+            &staged_client,
+            PreparationState::CpuPrepared,
+            candidate.epoch(),
+        );
+        stage_activation_candidate(&staged_client, candidate, 89_244, 1);
+        wait_for_activation_state(&staged_client, AssetActivationState::Staged);
+
+        let release_guard = ActorCleanupPauseRelease(Arc::clone(&staged_service.session().shared));
+        staged_service
+            .session()
+            .shared
+            .pause_after_next_request_before_cleanup
+            .store(true, Ordering::Release);
+        let mut status_ticket = submit_after_busy(&staged_client, SessionOperation::Status);
+        let status = wait_terminal(&status_ticket);
+        assert!(status.terminal().unwrap().is_ok());
+        status_ticket.acknowledge().unwrap();
+        drop(status);
+        let cleanup_deadline = Instant::now() + Duration::from_secs(1);
+        while !staged_service
+            .session()
+            .shared
+            .request_cleanup_paused
+            .load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < cleanup_deadline,
+                "actor did not pause while holding the staged candidate"
+            );
+            thread::yield_now();
+        }
+        staged_service.request_stop();
+        assert_eq!(
+            staged_service.try_shutdown().unwrap(),
+            NativeProjectActivationShutdown::Stopping,
+            "shutdown cannot report Stopped while the actor still owns the staged candidate"
+        );
+        drop(release_guard);
+        drop(staged_client);
+        stop_activation_service(&mut staged_service);
     }
 
     #[test]

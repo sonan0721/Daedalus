@@ -2556,6 +2556,30 @@ mod tests {
     }
 
     #[test]
+    fn invalid_activation_session_start_releases_the_cache_owner_before_returning() {
+        let project = TempProject::with_audio();
+        let mut config = SessionControlConfig::default();
+        config.engine.snapshot_capacity = 1;
+
+        let error = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(project.path()),
+            config,
+        )
+        .expect_err("invalid session configuration should fail startup");
+        assert!(matches!(
+            error,
+            NativeProjectActivationStartError::Session(SessionControlStartError::InvalidConfig(_))
+        ));
+
+        let cache = FileCookCache::open(
+            project.path().join(".daedalus/cache"),
+            CacheLimits::default(),
+        )
+        .expect("failed activation startup must join the worker and release its cache lock");
+        drop(cache);
+    }
+
+    #[test]
     fn stop_request_is_nonblocking_while_worker_metadata_is_locked() {
         let project = TempProject::with_audio();
         let service = NativeProjectPreparationService::start(NativeProjectPreparationOptions::new(

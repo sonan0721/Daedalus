@@ -65,3 +65,5 @@ Luna renderer의 위 리뷰 보완 focused 결과는45 CPU pass/5GPU ignored, al
 별도 read-only alpha 감사가 clear alpha0..1 허용·sprite straight-source blend·sRGB target·raw PNG write를 추적했다. alpha1 배경 GPU reference만으로는 투명 PNG를 검증하지 못한다. 투명 배경 위 빨강 alpha.5의 premultiplied target 약 `[188,0,0,128]`을 straight PNG로 쓰면 외부 합성 시 색이 다시 줄어드는 실제 오류다. nonblack alpha0 clear의 RGB도 잘못 기여한다. 공식 PNG §6.2/§12.3와 pinned wgpu source를 다시 확인했다.
 
 code 전 [상세 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)에 capture의 premultiplied-linear clear/target, 공통 readback의 in-place straight PNG 변환, alpha255 fast path/alpha0 정규화와 일반 native window의 불투명 정책을 추가했다. 새 target/RGBA buffer/PNG writer를 중복 만들지 않는 제작 파이프라인 선택이다. alpha0/.25/1 nonblack 배경과 overlap의 실제 GPU 검사·양자화 tolerance 및 기존 opaque 색/자원 회귀가 필요하다. 이 추가는 구현/실행 결과가 아니다.
+
+조정자가 frozen scripts의 전체 `python3 -m unittest discover -s scripts -p 'test_*.py'`를 Cargo 실행과 겹치지 않게 독립 수행해55건/7.007초/0 fail을 확인했다. 이는 Python/프로세스 회귀 근거이며 후속 renderer source의 GPU·native 동작 근거는 아니다. 앞선 timeout 실패는 로그에서 보존하며 원인을 확정하지 않는다.

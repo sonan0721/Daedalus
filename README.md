@@ -66,6 +66,14 @@ cargo run -p daedalus-cli --features native-audio -- project serve /path/to/proj
 
 The [audio contract](docs/03-architecture/imported-audio-runtime.md) defines Play, Stop, volume/pan, full-clip looping, bounded voice queries, and caller-ID replay. Offline mode mixes actual imported PCM into bounded summaries without an output device. Native mode opens the actual backend and fails explicitly if unavailable. Clips are shared by cooked identity and do not auto-play. Gameplay audio components, spatial audio, compressed streaming, live bank replacement, and managed bindings remain pending.
 
+An opt-in native worker can prepare CPU asset candidates while the same project session remains alive:
+
+```sh
+cargo run -p daedalus-cli -- project serve /path/to/project --protocol 2 --asset-preparation
+```
+
+Protocol 2 exposes `asset_preparation_prepare`, `asset_preparation_status`, and `asset_preparation_cancel` through the existing submit/poll/ack tickets. One worker owns the cache and coalesces requests to the latest candidate; status includes bounded source, memory, and cook metrics. The [preparation contract](docs/03-architecture/project-asset-preparation.md) defines cancellation, replay, and shutdown. This prepares candidates only: it does not replace the active scene, GPU resources, or audio bank. Native viewing uses the same option together with `--stdio-control`; automatic file watching and activation remain unfinished.
+
 ## Build a local CLI package
 
 With the pinned Rust toolchain and Python 3.11 or newer, run:

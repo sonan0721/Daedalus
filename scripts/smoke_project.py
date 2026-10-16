@@ -46,6 +46,43 @@ SPRITE_CAMERA_TRANSFORM_AFTER_COMMAND = {
     "rotation": [0.0, 0.0, 0.0, 1.0],
     "scale": [1.0, 1.0, 1.0],
 }
+ASSET_PREPARATION_MEMORY_FIELDS = (
+    "schemaVersion",
+    "cookedAccountedBytes",
+    "decodedBaseImageBytes",
+    "parserScratchPeakBytes",
+    "uniqueSourceCount",
+    "capturedSourceBytes",
+)
+ASSET_PREPARATION_METRIC_FIELDS = (
+    "sourceReads",
+    "sourceBytes",
+    "containerParses",
+    "rangeHashBytes",
+    "pngBaseDecodes",
+    "modelGeometryCooks",
+    "imageCooks",
+    "atlasCooks",
+    "audioCooks",
+    "cacheHits",
+    "cacheMisses",
+    "cacheCorrupt",
+    "cacheWrites",
+    "cacheBytesCurrent",
+    "cacheEntriesCurrent",
+    "catalogMetadataBytes",
+)
+ASSET_PREPARATION_SOURCE_PATHS = (
+    "daedalus.project.json",
+    "scene.json",
+    "models/external.gltf",
+    "models/triangle.bin",
+    "models/embedded.glb",
+    "images/base.png",
+    "images/atlas.png",
+    "atlases/sprites.json",
+    "audio/tone.wav",
+)
 
 
 class SmokeError(Exception):
@@ -477,6 +514,45 @@ def _write_model_view_project(directory: Path) -> None:
                 },
                 {
                     "id": "component:smoke-model-renderer",
+                    "type_id": "daedalus.model_renderer",
+                    "asset_refs": ["asset:model-external"],
+                    "data": {"model": "asset:model-external"},
+                },
+            ],
+        }
+    ]
+    scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def _write_asset_preparation_view_project(directory: Path) -> None:
+    """Build the complete four-format fixture with one live model-rendered entity."""
+
+    _write_asset_project(directory)
+    manifest_path = directory / "daedalus.project.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["name"] = "offline-asset-preparation-view-smoke"
+    manifest_path.write_text(
+        json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+    scene_path = directory / "scene.json"
+    scene = json.loads(scene_path.read_text(encoding="utf-8"))
+    scene["entities"] = [
+        {
+            "id": ENTITY_ID,
+            "name": "Asset Preparation View Model",
+            "components": [
+                {
+                    "id": "component:preparation-view-transform",
+                    "type_id": "daedalus.transform",
+                    "data": {
+                        "translation": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                },
+                {
+                    "id": "component:preparation-view-model-renderer",
                     "type_id": "daedalus.model_renderer",
                     "asset_refs": ["asset:model-external"],
                     "data": {"model": "asset:model-external"},
@@ -1537,6 +1613,1241 @@ def _v2_ack(
     raise SmokeError(f"ticket {ticket!r} exceeded its bounded acknowledgement retry count")
 
 
+def _asset_preparation_terminal_poll(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    operation: dict[str, Any],
+    *,
+    timeout: float,
+) -> tuple[str, dict[str, Any], str, float]:
+    """Retry only pre-effect actor-lock Busy terminals, acknowledging each ticket first."""
+
+    duration = min(timeout, server.timeout)
+    deadline = time.monotonic() + duration
+    max_attempts = int(duration * 100) + 1
+    for attempt in range(max_attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out submitting asset-preparation operation {request_prefix!r}")
+        attempt_prefix = request_prefix if attempt == 0 else f"{request_prefix}-retry-{attempt}"
+        ticket, reused = _v2_submit(
+            server,
+            f"{attempt_prefix}-submit",
+            operation,
+            timeout=remaining,
+        )
+        _expect(not reused, "asset-preparation submit unexpectedly reused a request ID", attempt_prefix)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out polling asset-preparation operation {attempt_prefix!r}")
+        poll = _v2_poll_until(
+            server,
+            ticket,
+            request_prefix=f"{attempt_prefix}-poll",
+            phase="terminal",
+            timeout=remaining,
+        )
+        terminal = poll.get("terminal")
+        error = terminal.get("error") if isinstance(terminal, dict) else None
+        if not (
+            isinstance(terminal, dict)
+            and terminal.get("ok") is False
+            and isinstance(error, dict)
+            and error.get("code") == "busy"
+        ):
+            return ticket, poll, attempt_prefix, deadline
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out acknowledging busy asset-preparation operation {attempt_prefix!r}")
+        _v2_ack(server, f"{attempt_prefix}-ack", ticket, timeout=remaining)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out retrying busy asset-preparation operation {request_prefix!r}")
+        time.sleep(min(0.01, remaining))
+    raise SmokeError(f"asset-preparation operation {request_prefix!r} exceeded its bounded Busy retry count")
+
+
+def _asset_preparation_request(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    operation: dict[str, Any],
+    *,
+    expected_kind: str,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    ticket, poll, attempt_prefix, deadline = _asset_preparation_terminal_poll(
+        server, request_prefix, operation, timeout=timeout
+    )
+    result = _v2_terminal_result(poll, context=request_prefix)
+    _expect(
+        result.get("kind") == "asset_preparation",
+        "asset-preparation operation returned another result kind",
+        result,
+    )
+    tagged = result.get("data")
+    _expect(
+        isinstance(tagged, dict) and tagged.get("kind") == expected_kind,
+        f"asset-preparation result did not contain {expected_kind!r}",
+        result,
+    )
+    payload = tagged.get("data")
+    _expect(isinstance(payload, dict), "asset-preparation result omitted its bounded data object", result)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SmokeError(f"timed out acknowledging asset-preparation request {request_prefix!r}")
+    _v2_ack(server, f"{attempt_prefix}-ack", ticket, timeout=remaining)
+    return payload, result
+
+
+def _asset_preparation_status(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    status, result = _asset_preparation_request(
+        server,
+        request_prefix,
+        {"op": "asset_preparation_status"},
+        expected_kind="status",
+        timeout=timeout,
+    )
+    return status, result
+
+
+def _asset_preparation_command(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    operation: dict[str, Any],
+    *,
+    command_id: str,
+    outcome_kind: str,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    command, result = _asset_preparation_request(
+        server,
+        request_prefix,
+        operation,
+        expected_kind="command",
+        timeout=timeout,
+    )
+    _expect(
+        command.get("command_id") == command_id
+        and isinstance(command.get("observed_tick"), str)
+        and command["observed_tick"].isdecimal(),
+        "asset-preparation command omitted its decimal ID or observed tick",
+        command,
+    )
+    outcome = command.get("outcome")
+    _expect(
+        isinstance(outcome, dict) and outcome.get("kind") == outcome_kind,
+        f"asset-preparation command did not return {outcome_kind!r}",
+        command,
+    )
+    return command, result
+
+
+def _asset_preparation_expect_terminal_error(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    operation: dict[str, Any],
+    *,
+    code: str,
+    timeout: float,
+) -> dict[str, Any]:
+    ticket, poll, attempt_prefix, deadline = _asset_preparation_terminal_poll(
+        server, request_prefix, operation, timeout=timeout
+    )
+    terminal = poll.get("terminal")
+    _expect(
+        isinstance(terminal, dict)
+        and terminal.get("ok") is False
+        and terminal.get("error", {}).get("code") == code
+        and "result" not in terminal,
+        f"invalid candidate did not reach the expected terminal error {code!r}",
+        poll,
+    )
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SmokeError(f"timed out acknowledging invalid candidate {request_prefix!r}")
+    _v2_ack(server, f"{attempt_prefix}-ack", ticket, timeout=remaining)
+    return poll
+
+
+def _asset_preparation_project_info(
+    server: _JsonlProjectServer,
+    *,
+    timeout: float,
+    request_prefix: str = "asset-preparation-project-info",
+) -> dict[str, Any]:
+    ticket, poll, attempt_prefix, deadline = _asset_preparation_terminal_poll(
+        server,
+        request_prefix,
+        {"op": "project_info", "offset": 0, "limit": 16},
+        timeout=timeout,
+    )
+    result = _v2_terminal_result(poll, context="asset-preparation project_info")
+    _expect(result.get("kind") == "project_info", "project_info returned another result kind", result)
+    info = result.get("data")
+    _expect(isinstance(info, dict), "project_info omitted its data object", result)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SmokeError(f"timed out acknowledging asset-preparation project_info {request_prefix!r}")
+    _v2_ack(server, f"{attempt_prefix}-ack", ticket, timeout=remaining)
+    return info
+
+
+def _asset_preparation_assert_no_payload(value: Any) -> None:
+    payload_keys = {
+        "payload",
+        "payloadbytes",
+        "pcm",
+        "pcmsamples",
+        "positions",
+        "normals",
+        "uv0",
+        "indices",
+        "vertices",
+        "texturedata",
+        "imagedata",
+        "imagebytes",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _expect(
+                key.lower() not in payload_keys,
+                "asset-preparation report exposed an asset payload field",
+                key,
+            )
+            _asset_preparation_assert_no_payload(item)
+    elif isinstance(value, list):
+        for item in value:
+            _asset_preparation_assert_no_payload(item)
+
+
+def _asset_preparation_validate_identity(
+    status: dict[str, Any],
+    *,
+    session: str,
+    active_source_digest: str,
+    active_cooked_accounted_bytes: int | None,
+) -> int:
+    required_fields = {
+        "session",
+        "active_generation",
+        "active_source_digest",
+        "active_cooked_accounted_bytes",
+        "desired",
+        "running",
+        "pending",
+        "state",
+        "ready_candidate",
+        "latest_failure",
+    }
+    _expect(
+        set(status) == required_fields,
+        "asset-preparation status has an unexpected or missing wire field",
+        status,
+    )
+    _expect(
+        status.get("session") == session
+        and status.get("active_generation") == "1"
+        and status.get("active_source_digest") == active_source_digest,
+        "preparation status changed the active session/generation/source identity",
+        status,
+    )
+    active_bytes = status.get("active_cooked_accounted_bytes")
+    _expect(
+        type(active_bytes) is int and active_bytes >= 0,
+        "preparation status returned an invalid active cooked-byte count",
+        status,
+    )
+    if active_cooked_accounted_bytes is not None:
+        _expect(
+            active_bytes == active_cooked_accounted_bytes,
+            "preparation changed the active cooked-byte ledger",
+            status,
+        )
+    for name in ("desired", "running", "pending"):
+        candidate_id = status.get(name)
+        if candidate_id is not None:
+            _expect(
+                isinstance(candidate_id, dict)
+                and candidate_id.get("session") == session
+                and isinstance(candidate_id.get("epoch"), str)
+                and candidate_id["epoch"].isdecimal(),
+                f"preparation status returned an invalid {name} ID",
+                status,
+            )
+    _expect(
+        status.get("state")
+        in {
+            "idle",
+            "pending",
+            "preparing",
+            "cpu_prepared",
+            "cancel_requested",
+            "cancelled",
+            "superseded",
+            "failed",
+            "stopping",
+            "stopped",
+        },
+        "preparation status returned an unknown lifecycle state",
+        status,
+    )
+    _asset_preparation_assert_no_payload(status)
+    return active_bytes
+
+
+def _asset_preparation_validate_candidate(
+    candidate: dict[str, Any],
+    *,
+    project: Path,
+    session: str,
+    entity_count: int,
+) -> None:
+    expected_fields = {
+        "id",
+        "is_current",
+        "source_digest",
+        "catalog_digest",
+        "source_scene_revision",
+        "asset_count",
+        "entity_count",
+        "memory",
+        "metrics",
+    }
+    _expect(
+        set(candidate) == expected_fields,
+        "ready-candidate summary has an unexpected or missing field",
+        candidate,
+    )
+    candidate_id = candidate.get("id")
+    _expect(
+        isinstance(candidate_id, dict)
+        and candidate_id.get("session") == session
+        and isinstance(candidate_id.get("epoch"), str)
+        and candidate_id["epoch"].isdecimal(),
+        "ready candidate omitted its decimal session/epoch identity",
+        candidate,
+    )
+    _expect(
+        candidate.get("is_current") is True
+        and isinstance(candidate.get("source_digest"), str)
+        and candidate["source_digest"]
+        and isinstance(candidate.get("catalog_digest"), str)
+        and candidate["catalog_digest"]
+        and isinstance(candidate.get("source_scene_revision"), str)
+        and candidate["source_scene_revision"].isdecimal()
+        and candidate.get("asset_count") == 6
+        and candidate.get("entity_count") == entity_count,
+        "ready candidate omitted valid project/catalog metadata",
+        candidate,
+    )
+    memory = candidate.get("memory")
+    _expect(isinstance(memory, dict), "ready candidate omitted its shared content memory summary", candidate)
+    for field in ASSET_PREPARATION_MEMORY_FIELDS:
+        value = memory.get(field)
+        _expect(
+            type(value) is int and value >= 0,
+            f"ready candidate memory summary has invalid {field}",
+            memory,
+        )
+    expected_sources = len(ASSET_PREPARATION_SOURCE_PATHS)
+    expected_bytes = sum((project / source_path).stat().st_size for source_path in ASSET_PREPARATION_SOURCE_PATHS)
+    _expect(
+        memory.get("schemaVersion") == 1
+        and memory.get("cookedAccountedBytes", 0) > 0
+        and memory.get("parserScratchPeakBytes", 0) > 0
+        and memory.get("uniqueSourceCount") == expected_sources
+        and memory.get("capturedSourceBytes") == expected_bytes,
+        "ready candidate memory summary does not match its captured project source identities",
+        {"memory": memory, "expected_sources": expected_sources, "expected_bytes": expected_bytes},
+    )
+    metrics = candidate.get("metrics")
+    _expect(isinstance(metrics, dict), "ready candidate omitted shared content import metrics", candidate)
+    for field in ASSET_PREPARATION_METRIC_FIELDS:
+        value = metrics.get(field)
+        _expect(
+            type(value) is int and value >= 0,
+            f"ready candidate metrics have invalid {field}",
+            metrics,
+        )
+    _asset_preparation_assert_no_payload(candidate)
+
+
+def _asset_preparation_wait_for_candidate(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    accepted_candidate: dict[str, Any],
+    project: Path,
+    session: str,
+    active_source_digest: str,
+    active_cooked_accounted_bytes: int,
+    entity_count: int,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    deadline = time.monotonic() + timeout
+    for attempt in range(int(timeout * 100) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out waiting for asset-preparation candidate {accepted_candidate!r}")
+        status, result = _asset_preparation_status(
+            server,
+            f"{request_prefix}-status-{attempt}",
+            timeout=remaining,
+        )
+        _asset_preparation_validate_identity(
+            status,
+            session=session,
+            active_source_digest=active_source_digest,
+            active_cooked_accounted_bytes=active_cooked_accounted_bytes,
+        )
+        candidate = status.get("ready_candidate")
+        if (
+            status.get("state") == "cpu_prepared"
+            and isinstance(candidate, dict)
+            and candidate.get("id") == accepted_candidate
+        ):
+            _asset_preparation_validate_candidate(
+                candidate,
+                project=project,
+                session=session,
+                entity_count=entity_count,
+            )
+            return status, result
+        if status.get("state") == "failed":
+            raise SmokeError(
+                "asset-preparation worker reported a failure instead of CpuPrepared; "
+                f"status: {json.dumps(status, sort_keys=True)}"
+            )
+        time.sleep(min(0.01, max(0.0, remaining)))
+    raise SmokeError(f"asset-preparation candidate exceeded the bounded status-poll count: {accepted_candidate!r}")
+
+
+def _asset_preparation_wait_for_cancelled(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    candidate_id: dict[str, Any],
+    session: str,
+    active_source_digest: str,
+    active_cooked_accounted_bytes: int,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    deadline = time.monotonic() + timeout
+    for attempt in range(int(timeout * 100) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out waiting for actual cancellation of {candidate_id!r}")
+        status, result = _asset_preparation_status(
+            server,
+            f"{request_prefix}-status-{attempt}",
+            timeout=remaining,
+        )
+        _asset_preparation_validate_identity(
+            status,
+            session=session,
+            active_source_digest=active_source_digest,
+            active_cooked_accounted_bytes=active_cooked_accounted_bytes,
+        )
+        if status.get("state") == "cancelled":
+            _expect(
+                status.get("ready_candidate") is None,
+                "cancelled candidate remained exposed as ready",
+                status,
+            )
+            return status, result
+        if status.get("state") in {"failed", "superseded", "stopped"}:
+            raise SmokeError(
+                f"candidate reached {status.get('state')!r} instead of actual cancellation; "
+                f"status: {json.dumps(status, sort_keys=True)}"
+            )
+        time.sleep(min(0.01, max(0.0, remaining)))
+    raise SmokeError(f"asset-preparation candidate exceeded the bounded cancellation-poll count: {candidate_id!r}")
+
+
+def _asset_preparation_audio_composition(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    session: str,
+    active_source_digest: str,
+    active_cooked_accounted_bytes: int,
+    timeout: float,
+) -> dict[str, Any]:
+    capabilities = _v2_audio_capabilities(
+        server, request_id=f"{request_prefix}-capabilities"
+    )
+    audio_status, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-status-before",
+        {"op": "audio_status"},
+        expected_kind="status",
+        timeout=timeout,
+    )
+    _expect(
+        audio_status.get("session") == session
+        and isinstance(audio_status.get("backend"), dict)
+        and audio_status["backend"].get("kind") == "offline"
+        and audio_status["backend"].get("data", {}).get("sample_rate") == 48_000
+        and audio_status.get("alias_count") == 1
+        and audio_status.get("unique_clip_count") == 1
+        and audio_status.get("converted_clip_count") == 1
+        and audio_status.get("active_voice_count") == 0
+        and audio_status.get("offline_progressed_frames") == "0",
+        "preparation service did not initialize the imported one-clip offline audio bank",
+        audio_status,
+    )
+    project_before = _asset_preparation_project_info(
+        server,
+        timeout=timeout,
+        request_prefix=f"{request_prefix}-project-before-audio",
+    )
+    tick_before = project_before.get("tick")
+    _expect(
+        project_before.get("session") == session
+        and project_before.get("source_digest") == active_source_digest
+        and isinstance(tick_before, str)
+        and tick_before.isdecimal(),
+        "preparation/audio service project_info omitted its active identity or decimal tick",
+        project_before,
+    )
+
+    played, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-play-looping-imported-tone",
+        {
+            "op": "audio_command",
+            "mutation": {
+                "kind": "play",
+                "clip": "asset:audio-tone",
+                "volume": 1.0,
+                "pan": 0.0,
+                "looping": True,
+            },
+        },
+        expected_kind="command",
+        timeout=timeout,
+    )
+    play_outcome = played.get("outcome")
+    voice = play_outcome.get("data", {}).get("voice") if isinstance(play_outcome, dict) else None
+    _expect(
+        played.get("command_id")
+        and isinstance(played.get("command_id"), str)
+        and played["command_id"].isdecimal()
+        and int(played["command_id"]) >= (1 << 127)
+        and isinstance(play_outcome, dict)
+        and play_outcome.get("kind") == "played"
+        and isinstance(voice, dict)
+        and voice.get("session") == session
+        and isinstance(voice.get("sequence"), str)
+        and voice["sequence"].isdecimal()
+        and played.get("observed_tick") == tick_before,
+        "same-session automatic audio Play did not start the imported looping WAV",
+        played,
+    )
+
+    rendered, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-render-offline",
+        {
+            "op": "audio_command",
+            "mutation": {"kind": "render_offline", "frames": 256},
+        },
+        expected_kind="command",
+        timeout=timeout,
+    )
+    render_summary = rendered.get("outcome", {}).get("data")
+    peaks = (
+        render_summary.get("left_peak"),
+        render_summary.get("right_peak"),
+    ) if isinstance(render_summary, dict) else (None, None)
+    _expect(
+        isinstance(render_summary, dict)
+        and rendered.get("outcome", {}).get("kind") == "offline"
+        and rendered.get("observed_tick") == tick_before
+        and render_summary.get("frames") == 256
+        and render_summary.get("sample_rate") == 48_000
+        and render_summary.get("channels") == 2
+        and render_summary.get("cumulative_frames") == "256"
+        and render_summary.get("nonzero_samples", 0) > 0
+        and all(type(peak) in (int, float) and math.isfinite(peak) for peak in peaks)
+        and max(peaks) > 0.0
+        and max(peaks) < 1.0,
+        "same-session offline render did not produce bounded finite PCM from the imported looping WAV",
+        rendered,
+    )
+    audio_status_after_render, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-status-after-render",
+        {"op": "audio_status"},
+        expected_kind="status",
+        timeout=timeout,
+    )
+    project_after = _asset_preparation_project_info(
+        server,
+        timeout=timeout,
+        request_prefix=f"{request_prefix}-project-after-audio",
+    )
+    _expect(
+        audio_status_after_render.get("session") == session
+        and audio_status_after_render.get("offline_progressed_frames") == "256"
+        and audio_status_after_render.get("active_voice_count") == 1
+        and project_after.get("session") == session
+        and project_after.get("source_digest") == active_source_digest
+        and project_after.get("tick") == tick_before,
+        "offline audio frames were not independent from the current authority tick/project identity",
+        {
+            "audio_status": audio_status_after_render,
+            "project_before": project_before,
+            "project_after": project_after,
+        },
+    )
+
+    stopped, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-stop-looping-tone",
+        {"op": "audio_command", "mutation": {"kind": "stop", "voice": voice}},
+        expected_kind="command",
+        timeout=timeout,
+    )
+    _expect(
+        stopped.get("outcome", {}).get("kind") == "stop_requested",
+        "same-session Stop did not report its typed request outcome",
+        stopped,
+    )
+    stop_rendered, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-render-after-stop",
+        {
+            "op": "audio_command",
+            "mutation": {"kind": "render_offline", "frames": 64},
+        },
+        expected_kind="command",
+        timeout=timeout,
+    )
+    ended_voice, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-ended-voice",
+        {"op": "audio_voice", "voice": voice},
+        expected_kind="voice",
+        timeout=timeout,
+    )
+    final_audio_status, _ = _v2_audio_result(
+        server,
+        f"{request_prefix}-status-after-stop",
+        {"op": "audio_status"},
+        expected_kind="status",
+        timeout=timeout,
+    )
+    final_prep_status, _ = _asset_preparation_status(
+        server,
+        f"{request_prefix}-preparation-status-after-audio",
+        timeout=timeout,
+    )
+    final_active_cooked_bytes = _asset_preparation_validate_identity(
+        final_prep_status,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=active_cooked_accounted_bytes,
+    )
+    project_after_stop = _asset_preparation_project_info(
+        server,
+        timeout=timeout,
+        request_prefix=f"{request_prefix}-project-after-stop",
+    )
+    _expect(
+        stop_rendered.get("outcome", {}).get("data", {}).get("cumulative_frames") == "320"
+        and stop_rendered.get("outcome", {}).get("kind") == "offline"
+        and stop_rendered.get("outcome", {}).get("data", {}).get("frames") == 64
+        and ended_voice.get("state") == "ended"
+        and ended_voice.get("voice") == voice
+        and final_audio_status.get("offline_progressed_frames") == "320"
+        and final_audio_status.get("active_voice_count") == 0
+        and final_active_cooked_bytes == active_cooked_accounted_bytes
+        and final_prep_status.get("state") == "idle"
+        and final_prep_status.get("desired") is None
+        and final_prep_status.get("running") is None
+        and final_prep_status.get("pending") is None
+        and final_prep_status.get("ready_candidate") is None
+        and final_prep_status.get("latest_failure") is None
+        and project_after_stop.get("session") == session
+        and project_after_stop.get("source_digest") == active_source_digest
+        and project_after_stop.get("tick") == tick_before,
+        "same-session audio Stop did not reap its voice while preserving the active preparation project",
+        {
+            "stop_render": stop_rendered,
+            "ended_voice": ended_voice,
+            "audio_status": final_audio_status,
+            "preparation_status": final_prep_status,
+            "project_after_stop": project_after_stop,
+        },
+    )
+    return {
+        "capabilities": capabilities,
+        "audio_status": audio_status,
+        "played": played,
+        "voice": voice,
+        "offline_render": rendered,
+        "status_after_render": audio_status_after_render,
+        "project_info_before_audio": project_before,
+        "project_info_after_audio": project_after,
+        "project_info_after_stop": project_after_stop,
+        "stopped": stopped,
+        "stop_render": stop_rendered,
+        "ended_voice": ended_voice,
+        "status_after_stop": final_audio_status,
+        "authority_tick": tick_before,
+    }
+
+
+def _run_asset_preparation_session(
+    server: _JsonlProjectServer,
+    project: Path,
+    *,
+    session: str,
+    active_source_digest: str,
+    audio: bool,
+    entity_count: int,
+    timeout: float,
+    request_prefix: str,
+) -> dict[str, Any]:
+    checks: list[str] = []
+    initial_status, initial_result = _asset_preparation_status(
+        server,
+        f"{request_prefix}-status-initial",
+        timeout=timeout,
+    )
+    active_cooked_bytes = _asset_preparation_validate_identity(
+        initial_status,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=None,
+    )
+    _expect(
+        initial_status.get("state") == "idle"
+        and initial_status.get("desired") is None
+        and initial_status.get("running") is None
+        and initial_status.get("pending") is None
+        and initial_status.get("ready_candidate") is None
+        and initial_status.get("latest_failure") is None,
+        "new asset-preparation session did not start idle",
+        initial_status,
+    )
+    checks.append("asset_preparation_initial_status_preserves_active_identity")
+
+    audio_composition = None
+    if audio:
+        audio_composition = _asset_preparation_audio_composition(
+            server,
+            f"{request_prefix}-audio",
+            session=session,
+            active_source_digest=active_source_digest,
+            active_cooked_accounted_bytes=active_cooked_bytes,
+            timeout=timeout,
+        )
+        checks.append("asset_preparation_same_actor_offline_audio_is_independent_and_stops")
+
+    def prepare(label: str, command_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        command, _ = _asset_preparation_command(
+            server,
+            f"{request_prefix}-{label}-prepare",
+            {"op": "asset_preparation_prepare", "command_id": command_id},
+            command_id=command_id,
+            outcome_kind="prepare_accepted",
+            timeout=timeout,
+        )
+        outcome = command["outcome"].get("data")
+        accepted_id = outcome.get("candidate") if isinstance(outcome, dict) else None
+        _expect(
+            isinstance(accepted_id, dict)
+            and accepted_id.get("session") == session
+            and isinstance(accepted_id.get("epoch"), str)
+            and accepted_id["epoch"].isdecimal(),
+            "Prepare receipt omitted its accepted session/epoch candidate",
+            command,
+        )
+        status, _ = _asset_preparation_wait_for_candidate(
+            server,
+            f"{request_prefix}-{label}",
+            accepted_candidate=accepted_id,
+            project=project,
+            session=session,
+            active_source_digest=active_source_digest,
+            active_cooked_accounted_bytes=active_cooked_bytes,
+            entity_count=entity_count,
+            timeout=timeout,
+        )
+        candidate = status["ready_candidate"]
+        return command, status, candidate
+
+    # The native preparation owner first loads this source into its persistent cook cache.
+    # Editing one real input after startup proves that a candidate can invalidate only the
+    # affected image leaf while geometry and unrelated formats remain reusable.
+    (project / "images" / "base.png").write_bytes(_png_rgba(2, 2, (44, 88, 220, 255)))
+    png_command, png_status, png_candidate = prepare("png-edit", "900001")
+    png_metrics = png_candidate["metrics"]
+    _expect(
+        png_candidate["source_digest"] != active_source_digest
+        and png_metrics["pngBaseDecodes"] >= 1
+        and png_metrics["imageCooks"] >= 1
+        and png_metrics["modelGeometryCooks"] == 0
+        and png_metrics["atlasCooks"] == 0
+        and png_metrics["audioCooks"] == 0,
+        "PNG edit did not invalidate image cooking while retaining model geometry and other formats",
+        png_candidate,
+    )
+    checks.append("asset_preparation_png_edit_invalidates_image_only")
+
+    warm_command, warm_status, warm_candidate = prepare("warm", "900002")
+    warm_metrics = warm_candidate["metrics"]
+    _expect(
+        warm_candidate["source_digest"] == png_candidate["source_digest"]
+        and warm_candidate["catalog_digest"] == png_candidate["catalog_digest"]
+        and warm_metrics["sourceReads"] > 0
+        and warm_metrics["sourceBytes"] > 0
+        and warm_metrics["containerParses"] > 0,
+        "unchanged warm preparation did not preserve identity or report honest source reads/parses",
+        warm_candidate,
+    )
+    for metric in ("pngBaseDecodes", "modelGeometryCooks", "imageCooks", "atlasCooks", "audioCooks"):
+        _expect(warm_metrics.get(metric) == 0, f"unchanged warm preparation unexpectedly repeated {metric}", warm_metrics)
+    _expect(
+        int(warm_candidate["id"]["epoch"]) > int(png_candidate["id"]["epoch"]),
+        "a new warm Prepare did not receive a newer candidate epoch",
+        {"png": png_candidate["id"], "warm": warm_candidate["id"]},
+    )
+    checks.append("asset_preparation_unchanged_warm_reports_reads_without_recooking")
+
+    replay_command, _ = _asset_preparation_command(
+        server,
+        f"{request_prefix}-warm-replay",
+        {"op": "asset_preparation_prepare", "command_id": "900002"},
+        command_id="900002",
+        outcome_kind="prepare_accepted",
+        timeout=timeout,
+    )
+    replay_status, replay_result = _asset_preparation_status(
+        server,
+        f"{request_prefix}-status-after-replay",
+        timeout=timeout,
+    )
+    _asset_preparation_validate_identity(
+        replay_status,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=active_cooked_bytes,
+    )
+    _expect(
+        replay_command == warm_command
+        and isinstance(replay_status.get("ready_candidate"), dict)
+        and replay_status["state"] == "cpu_prepared"
+        and replay_status["ready_candidate"].get("id") == warm_candidate["id"]
+        and replay_status["ready_candidate"].get("is_current") is True
+        and replay_status.get("desired") == warm_candidate["id"]
+        and replay_status.get("running") is None
+        and replay_status.get("pending") is None,
+        "retained Prepare command-ID replay created a new candidate epoch or import",
+        {"original": warm_command, "replay": replay_command, "status": replay_status},
+    )
+    checks.append("asset_preparation_command_id_replay_does_not_create_epoch")
+
+    external_gltf = project / "models" / "external.gltf"
+    document = json.loads(external_gltf.read_text(encoding="utf-8"))
+    document["nodes"][0]["translation"] = [0.5, 0.0, 0.0]
+    _write_json(external_gltf, document)
+    node_command, node_status, node_candidate = prepare("node-edit", "900003")
+    node_metrics = node_candidate["metrics"]
+    _expect(
+        node_candidate["source_digest"] != warm_candidate["source_digest"]
+        and node_candidate["catalog_digest"] != warm_candidate["catalog_digest"]
+        and node_metrics["containerParses"] > 0
+        and node_metrics["modelGeometryCooks"] == 0
+        and node_metrics["imageCooks"] == 0
+        and node_metrics["atlasCooks"] == 0
+        and node_metrics["audioCooks"] == 0,
+        "glTF node edit failed to reparse/rekey the model wrapper while reusing geometry",
+        node_candidate,
+    )
+    checks.append("asset_preparation_gltf_node_edit_reuses_geometry")
+
+    atlas_path = project / "atlases" / "sprites.json"
+    atlas_document = json.loads(atlas_path.read_text(encoding="utf-8"))
+    atlas_document["regions"][0]["pivot"] = [0.25, 0.75]
+    _write_json(atlas_path, atlas_document)
+    atlas_command, atlas_status, atlas_candidate = prepare("atlas-edit", "900004")
+    atlas_metrics = atlas_candidate["metrics"]
+    _expect(
+        atlas_candidate["source_digest"] != node_candidate["source_digest"]
+        and atlas_candidate["catalog_digest"] != node_candidate["catalog_digest"]
+        and atlas_metrics["atlasCooks"] >= 1
+        and atlas_metrics["pngBaseDecodes"] == 0
+        and atlas_metrics["modelGeometryCooks"] == 0
+        and atlas_metrics["imageCooks"] == 0
+        and atlas_metrics["audioCooks"] == 0,
+        "atlas pivot edit did not invalidate only atlas metadata cooking",
+        atlas_candidate,
+    )
+    checks.append("asset_preparation_atlas_edit_invalidates_atlas_only")
+
+    _write_pcm16_mono(project / "audio" / "tone.wav", 8_000, (0, 1_001, -1_001, 0))
+    audio_command, audio_status, audio_candidate = prepare("wav-edit", "900005")
+    audio_metrics = audio_candidate["metrics"]
+    _expect(
+        audio_candidate["source_digest"] != atlas_candidate["source_digest"]
+        and audio_candidate["catalog_digest"] != atlas_candidate["catalog_digest"]
+        and audio_metrics["audioCooks"] >= 1
+        and audio_metrics["pngBaseDecodes"] == 0
+        and audio_metrics["modelGeometryCooks"] == 0
+        and audio_metrics["imageCooks"] == 0
+        and audio_metrics["atlasCooks"] == 0,
+        "WAV edit did not invalidate only audio cooking",
+        audio_candidate,
+    )
+    checks.append("asset_preparation_wav_edit_invalidates_audio_only")
+
+    ready_id = audio_candidate["id"]
+    future_id = {"session": session, "epoch": str(int(ready_id["epoch"]) + 1)}
+    future_error = _asset_preparation_expect_terminal_error(
+        server,
+        f"{request_prefix}-future-candidate",
+        {
+            "op": "asset_preparation_cancel",
+            "command_id": "900006",
+            "candidate": future_id,
+        },
+        code="invalid_candidate",
+        timeout=timeout,
+    )
+    foreign_id = {"session": str(int(session) + 1), "epoch": ready_id["epoch"]}
+    foreign_error = _asset_preparation_expect_terminal_error(
+        server,
+        f"{request_prefix}-foreign-candidate",
+        {
+            "op": "asset_preparation_cancel",
+            "command_id": "900007",
+            "candidate": foreign_id,
+        },
+        code="invalid_candidate",
+        timeout=timeout,
+    )
+    still_ready_status, still_ready_result = _asset_preparation_status(
+        server,
+        f"{request_prefix}-status-after-invalid-candidates",
+        timeout=timeout,
+    )
+    _asset_preparation_validate_identity(
+        still_ready_status,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=active_cooked_bytes,
+    )
+    _expect(
+        isinstance(still_ready_status.get("ready_candidate"), dict)
+        and still_ready_status["ready_candidate"].get("id") == ready_id
+        and still_ready_status.get("state") == "cpu_prepared",
+        "invalid future/foreign candidates changed the ready candidate",
+        still_ready_status,
+    )
+    cancel_command, _ = _asset_preparation_command(
+        server,
+        f"{request_prefix}-cancel",
+        {
+            "op": "asset_preparation_cancel",
+            "command_id": "900006",
+            "candidate": ready_id,
+        },
+        command_id="900006",
+        outcome_kind="cancel_accepted",
+        timeout=timeout,
+    )
+    accepted_cancel_id = cancel_command["outcome"].get("data", {}).get("candidate")
+    _expect(
+        accepted_cancel_id == ready_id,
+        "Cancel receipt did not identify the requested ready candidate after invalid-ID retries",
+        cancel_command,
+    )
+    cancelled_status, cancelled_result = _asset_preparation_wait_for_cancelled(
+        server,
+        f"{request_prefix}-cancelled",
+        candidate_id=ready_id,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=active_cooked_bytes,
+        timeout=timeout,
+    )
+    checks.extend(
+        [
+            "asset_preparation_cancel_receipt_is_distinct_from_actual_cancel",
+            "asset_preparation_future_candidate_rejection_does_not_consume_command_id",
+        ]
+    )
+    final_status, final_result = _asset_preparation_status(
+        server,
+        f"{request_prefix}-status-final",
+        timeout=timeout,
+    )
+    _asset_preparation_validate_identity(
+        final_status,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=active_cooked_bytes,
+    )
+    _expect(
+        final_status.get("state") == "cancelled"
+        and final_status.get("ready_candidate") is None,
+        "invalid future/foreign candidates changed the cancelled preparation state",
+        final_status,
+    )
+    checks.extend(
+        [
+            "asset_preparation_future_candidate_rejected_before_effect",
+            "asset_preparation_foreign_candidate_rejected_before_effect",
+            "asset_preparation_active_project_unchanged_after_candidate_edits",
+        ]
+    )
+
+    return {
+        "session": session,
+        "active_generation": initial_status["active_generation"],
+        "active_source_digest": active_source_digest,
+        "active_cooked_accounted_bytes": active_cooked_bytes,
+        "same_actor_audio": audio_composition,
+        "checks": checks,
+        "initial_status": initial_result,
+        "prepare_receipts": {
+            "png_edit": png_command,
+            "warm": warm_command,
+            "node_edit": node_command,
+            "atlas_edit": atlas_command,
+            "wav_edit": audio_command,
+            "cancel": cancel_command,
+        },
+        "candidate_statuses": {
+            "png_edit": png_status,
+            "warm": warm_status,
+            "after_replay": replay_status,
+            "node_edit": node_status,
+            "atlas_edit": atlas_status,
+            "wav_edit": audio_status,
+            "still_ready_after_invalid_candidates": still_ready_status,
+            "cancelled": cancelled_status,
+            "final": final_status,
+        },
+        "acknowledgements": {
+            "replay_status": replay_result,
+            "still_ready_status": still_ready_result,
+            "cancelled_status": cancelled_result,
+            "final_status": final_result,
+        },
+        "invalid_candidate_rejections": {
+            "future": future_error,
+            "foreign": foreign_error,
+        },
+    }
+
+
+def _run_asset_preparation_smoke(
+    binary: Path,
+    *,
+    root: Path,
+    cwd: Path,
+    timeout: float,
+    audio: bool = False,
+) -> dict[str, Any]:
+    project = root / "offline-asset-preparation-project"
+    _write_asset_project(project)
+    command = [
+        "project",
+        "serve",
+        os.fspath(project),
+        "--protocol",
+        "2",
+        "--asset-preparation",
+    ]
+    if audio:
+        command.extend(["--audio", "offline"])
+    server = _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label=(
+            "project serve --asset-preparation --audio offline"
+            if audio
+            else "project serve --asset-preparation"
+        ),
+    )
+    with server:
+        info = _asset_preparation_project_info(server, timeout=timeout)
+        session = info.get("session")
+        source_digest = info.get("source_digest")
+        _expect(
+            isinstance(session, str)
+            and session.isdecimal()
+            and isinstance(source_digest, str)
+            and source_digest,
+            "asset-preparation serve returned invalid session/source identities",
+            info,
+        )
+        source_files = info.get("source_files")
+        _expect(isinstance(source_files, list), "asset-preparation project_info omitted source identities", info)
+        source_ids = {item.get("source_id") for item in source_files if isinstance(item, dict)}
+        _expect(
+            source_ids == set(ASSET_PREPARATION_SOURCE_PATHS),
+            "asset-preparation fixture did not expose exactly its authored source set",
+            source_ids,
+        )
+        _expect(info.get("next_offset") is None, "asset-preparation source list exceeded its bounded page", info)
+        session_result = _run_asset_preparation_session(
+            server,
+            project,
+            session=session,
+            active_source_digest=source_digest,
+            audio=audio,
+            entity_count=0,
+            timeout=timeout,
+            request_prefix="asset-preparation-serve",
+        )
+        exit_response = server.request("asset-preparation-exit", {"op": "close"}, allow_error=True)
+        _expect(
+            exit_response.get("ok") is True,
+            "asset-preparation serve did not accept bounded session close",
+            exit_response,
+        )
+        server.wait_for_exit(timeout=timeout)
+    return {
+        "project_source_digest": source_digest,
+        "authored_source_files": source_files,
+        "session": session_result,
+        "exit": exit_response,
+    }
+
+
+def _run_asset_preparation_view_smoke(
+    binary: Path,
+    *,
+    root: Path,
+    cwd: Path,
+    timeout: float,
+    audio: bool = False,
+) -> dict[str, Any]:
+    project = root / "offline-asset-preparation-view-project"
+    _write_asset_preparation_view_project(project)
+    validation_args = ["project", "validate", os.fspath(project)]
+    validated = _json_output(_run_cli(binary, validation_args, cwd=cwd, timeout=timeout), validation_args)
+    _expect(
+        validated.get("valid") is True
+        and validated.get("entity_count") == 1
+        and validated.get("asset_count") == 6,
+        "asset-preparation native-view fixture did not validate with all four asset formats",
+        validated,
+    )
+    source_digest = validated.get("source_digest")
+    _expect(isinstance(source_digest, str) and source_digest, "asset-preparation view fixture omitted source identity", validated)
+    session_capture: dict[str, Any] = {}
+
+    def prepare_in_live_view(server: _JsonlProjectServer, session: str) -> None:
+        initial, initial_result = _asset_preparation_status(
+            server,
+            "asset-preparation-view-status-initial",
+            timeout=timeout,
+        )
+        active_cooked_bytes = _asset_preparation_validate_identity(
+            initial,
+            session=session,
+            active_source_digest=source_digest,
+            active_cooked_accounted_bytes=None,
+        )
+        _expect(initial.get("state") == "idle", "native view preparation service did not start idle", initial)
+        audio_composition = None
+        if audio:
+            audio_composition = _asset_preparation_audio_composition(
+                server,
+                "asset-preparation-view-audio",
+                session=session,
+                active_source_digest=source_digest,
+                active_cooked_accounted_bytes=active_cooked_bytes,
+                timeout=timeout,
+            )
+        accepted, _ = _asset_preparation_command(
+            server,
+            "asset-preparation-view-prepare",
+            {"op": "asset_preparation_prepare", "command_id": "920001"},
+            command_id="920001",
+            outcome_kind="prepare_accepted",
+            timeout=timeout,
+        )
+        accepted_id = accepted["outcome"].get("data", {}).get("candidate")
+        _expect(isinstance(accepted_id, dict), "native view Prepare receipt omitted candidate identity", accepted)
+        ready_status, ready_result = _asset_preparation_wait_for_candidate(
+            server,
+            "asset-preparation-view",
+            accepted_candidate=accepted_id,
+            project=project,
+            session=session,
+            active_source_digest=source_digest,
+            active_cooked_accounted_bytes=active_cooked_bytes,
+            entity_count=1,
+            timeout=timeout,
+        )
+        candidate = ready_status["ready_candidate"]
+        _expect(
+            candidate.get("source_digest") == source_digest
+            and candidate.get("id", {}).get("session") == session,
+            "native view candidate did not describe the same initial source/session",
+            candidate,
+        )
+        session_capture.update(
+            {
+                "initial_status": initial_result,
+                "same_actor_audio": audio_composition,
+                "prepare_receipt": accepted,
+                "ready_status": ready_result,
+                "candidate": candidate,
+                "active_generation": ready_status["active_generation"],
+                "active_source_digest": ready_status["active_source_digest"],
+            }
+        )
+
+    report = _run_native_project_view(
+        binary,
+        project,
+        cwd=cwd,
+        root=root,
+        timeout=timeout,
+        expected_source_digest=source_digest,
+        on_ready=prepare_in_live_view,
+        asset_preparation=True,
+        audio=audio,
+    )
+    candidate = session_capture.get("candidate")
+    presented = report.get("last_presented")
+    _expect(
+        isinstance(candidate, dict)
+        and isinstance(presented, dict)
+        and report.get("session") == candidate.get("id", {}).get("session")
+        and report.get("source_digest") == candidate.get("source_digest")
+        and presented.get("session") == candidate.get("id", {}).get("session")
+        and presented.get("source_digest") == candidate.get("source_digest"),
+        "CPU-prepared candidate and actual presented view did not share source/session identity",
+        {"candidate": candidate, "report": report},
+    )
+    return {
+        "invocation_kind": "same_session_asset_preparation_and_native_presentation",
+        "source_digest": source_digest,
+        "candidate": candidate,
+        "preparation": session_capture,
+        "native_view_report": report,
+    }
+
+
 def _v2_audio_result(
     server: _JsonlProjectServer,
     request_id: str,
@@ -2262,8 +3573,15 @@ def _validate_native_view_report(
     return report
 
 
-def _project_view_command(project: Path, report: Path, *, seconds: int) -> list[str]:
-    return [
+def _project_view_command(
+    project: Path,
+    report: Path,
+    *,
+    seconds: int,
+    asset_preparation: bool = False,
+    audio: bool = False,
+) -> list[str]:
+    command = [
         "project",
         "view",
         os.fspath(project),
@@ -2279,6 +3597,11 @@ def _project_view_command(project: Path, report: Path, *, seconds: int) -> list[
         "--height",
         str(NATIVE_VIEW_HEIGHT),
     ]
+    if audio:
+        command.extend(["--audio", "offline"])
+    if asset_preparation:
+        command.append("--asset-preparation")
+    return command
 
 
 def _run_native_project_view(
@@ -2292,9 +3615,17 @@ def _run_native_project_view(
     on_ready: Callable[[_JsonlProjectServer, str], None] | None = None,
     expected_entity_count: int = 1,
     authority_transform: dict[str, Any] = TRANSFORM_AFTER_COMMAND,
+    asset_preparation: bool = False,
+    audio: bool = False,
 ) -> dict[str, Any]:
     report_path = root / "native-view-report.json"
-    command = _project_view_command(project, report_path, seconds=NATIVE_VIEW_SECONDS)
+    command = _project_view_command(
+        project,
+        report_path,
+        seconds=NATIVE_VIEW_SECONDS,
+        asset_preparation=asset_preparation,
+        audio=audio,
+    )
     server = _JsonlProjectServer(
         binary,
         project,
@@ -3143,6 +4474,7 @@ def run_project_smoke(
     sprites: bool = False,
     audio: bool = False,
     audio_native: bool = False,
+    asset_preparation: bool = False,
 ) -> dict[str, Any]:
     """Exercise CPU lifecycle checks plus any explicitly requested native/model checks."""
 
@@ -3283,6 +4615,17 @@ def run_project_smoke(
             )
             checks.extend(asset_results.pop("checks"))
 
+        asset_preparation_results: dict[str, Any] | None = None
+        if asset_preparation:
+            asset_preparation_results = _run_asset_preparation_smoke(
+                binary,
+                root=root,
+                cwd=working_directory,
+                timeout=timeout,
+                audio=audio,
+            )
+            checks.extend(asset_preparation_results["session"]["checks"])
+
         audio_results: dict[str, Any] | None = None
         if audio:
             audio_results = _run_audio_project_smoke(
@@ -3348,6 +4691,20 @@ def run_project_smoke(
                 "blocked_stdout": blocked_stdout_view,
             }
 
+            if asset_preparation:
+                asset_preparation_view_results = _run_asset_preparation_view_smoke(
+                    binary,
+                    root=root,
+                    cwd=working_directory,
+                    timeout=timeout,
+                    audio=audio,
+                )
+                checks.append("asset_preparation_active_view_and_cpu_candidate_share_session_and_source")
+            else:
+                asset_preparation_view_results = None
+        else:
+            asset_preparation_view_results = None
+
         model_results: dict[str, Any] | None = None
         if models:
             model_results = _run_model_project_smoke(
@@ -3395,6 +4752,10 @@ def run_project_smoke(
         result["native_view"] = view_results
     if asset_results is not None:
         result["asset_cook"] = asset_results
+    if asset_preparation_results is not None:
+        result["asset_preparation"] = asset_preparation_results
+    if asset_preparation_view_results is not None:
+        result["asset_preparation_view"] = asset_preparation_view_results
     if model_results is not None:
         result["models"] = model_results
     if sprite_results is not None:
@@ -3408,7 +4769,7 @@ def run_project_smoke(
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view/--models/--sprites add native GPU checks and --audio-native adds a native audio-device check."
+        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view/--models/--sprites add native GPU checks, --audio-native adds a native audio-device check, and --asset-preparation exercises live CPU candidate preparation."
     )
     parser.add_argument("--cli", type=Path, required=True, help="already-built daedalus executable")
     parser.add_argument(
@@ -3447,6 +4808,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also open the imported finite WAV on the native audio backend and wait for backend-reported completion",
     )
+    parser.add_argument(
+        "--asset-preparation",
+        action="store_true",
+        help="also exercise protocol-2 live CPU asset-candidate preparation, reuse, edits, and cancellation",
+    )
     return parser.parse_args(argv)
 
 
@@ -3462,6 +4828,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sprites=arguments.sprites,
             audio=arguments.audio,
             audio_native=arguments.audio_native,
+            asset_preparation=arguments.asset_preparation,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

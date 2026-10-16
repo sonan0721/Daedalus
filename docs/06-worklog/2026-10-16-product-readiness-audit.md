@@ -124,3 +124,9 @@ core는 snapshot wrapper와 entity backing의 weak record를 함께 유지한다
 ignored directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e07dd8ebfd77-clean-20261016T011157Z-428b00c662974964af1ed0fa88ff29c7/`다. 같은 staging binary의 실제 Metal `view --seconds 2 --work-iterations 10000`은 loading frame 224·tick 124, terrain job 1개 완료·active 0·time_limit/stop_requested 종료를 기록했다(`dist/project-evidence/p02-packaged-window.json`). debug 종료 때의 취소와 달리 이 release 실행에서는 job이 완료됐다. physical 입력이나 새 service frontend 지원을 의미하지 않는다. tag/public Release는 발행하지 않았다.
 
 package 뒤에는 test-only 정상 제출/frame polling을 bounded Busy retry로 통일했다. producer와 client의 합법적인 짧은 mutex 경합을 엔진 오류처럼 실패시키지 않기 위해서다. 의도한 오류 검사는 직접 응답을 대조하며 유지한다. 제출 helper 반영 후 root의 전체 157건·fmt·strict Clippy가 통과했고, 마지막 frame helper 편집 후 focused session-control 23건·fmt를 root가 다시 확인했다. production 동작은 바뀌지 않아 GPU/.NET/package를 다시 만들지 않았다. 위 manifest의 source는 계속 정확히 e07dd8e다. PR native jobs는 최종 head를 별도로 빌드한다.
+
+## PR #7 첫 Linux 검사에서 확인한 회수 순서
+
+[PR #7](https://github.com/sonan0721/Daedalus/pull/7)의 최초 head `1bd724109f7555140de3e5421270dd99f91b2073`에서 docs와 managed native integration은 통과했지만 [Rust run 38834232275](https://github.com/sonan0721/Daedalus/actions/runs/38834232275)은 `frame_capacity_one_counts_backing_only_retention_and_recovers`의 다음 Step admission이 ResultCapacity로 실패했다. 로컬 157건 통과가 다른 scheduling 순서의 안전성을 증명하지 못한 사례다.
+
+terminal을 통지한 뒤 actor의 in-flight bookkeeping/완료 함수가 별도 credit 참조를 잠시 보유하는 순서를 조사·수정한다. terminal payload reader의 정당한 lease는 유지하되 bookkeeping만으로 회수를 늦추지 않는다. actor를 terminal publication 직후 멈춘 controlled regression에서 ack/reader 해제 후 Step reserve 재사용을 확인한다. ResultCapacity를 무조건 retry하거나 실패한 CI를 단순 재실행해 통과로 대신하지 않는다. 수정 후 실제 검사 결과와 source는 이어서 기록하며 이 PR은 아직 병합하지 않았다.

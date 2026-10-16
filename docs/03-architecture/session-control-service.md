@@ -75,6 +75,8 @@ wait의 목표 단계보다 terminal이 먼저 관찰되면 즉시 terminal을 �
 
 ticket drop은 결과를 포기하는 의미이며 이미 authority가 수락한 명령을 취소하지 않는다. pending credit은 actor의 terminal 처리까지 유지한다. ack/drop된 ticket의 결과 Arc를 consumer가 보유하면 실제 engine-owned payload lease가 살아 있는 동안 byte credit을 성급히 반환하지 않는다. client detach 후에도 살아 있는 ticket의 읽기 권한은 유지할 수 있으나 새 제출은 거부한다. 초기 reconnect/resume API는 만들지 않는다.
 
+terminal publication 이후에는 실제 progress/payload reader와 무관한 actor bookkeeping이 별도 credit 참조를 붙잡지 않는다. 처리 중 panic을 위한 correlation은 cell/command identity로 유지하고, terminal을 관찰한 caller가 ack 및 마지막 reader를 해제하면 그 ticket의 credit을 다시 사용할 수 있어야 한다. terminal 통지 직후 actor가 잠시 스케줄되지 않은 상황도 이 계약에 포함한다. 새로운 mutation을 먼저 적용하거나 ResultCapacity 오류를 무조건 retry하는 방식으로 회수 결함을 숨기지 않는다.
+
 completed replay ledger는 기본 1024/hard 16,384 entries로 제한하고 pending ticket map과 별도로 계수한다. 새 service의 caller-provided lower-half CommandId는 session 전역에서 **새 ID가 단조 증가**해야 한다. pending/보존 ledger에 있는 ID는 실제 결과를 replay한다. ledger에 없고 caller high-water 이하인 ID는 ReplayWindowExpired/OutOfOrderCallerId로 거부하며 fresh 명령으로 재적용하지 않는다. 새 ID가 authority에 접수됐을 때 high-water를 갱신한다. 복수 attachment가 caller ID 공간을 공유하므로 일반 SDK/AI는 auto ID를 사용하고, 별도 retry가 필요하면 이 명시적 범위 안의 receipt를 보존한다. upper-half auto ID는 session 전역 단조 allocator만 발급하고 외부 지정은 계속 거부한다.
 
 이는 새 service의 명시적인 replay 정책이다. 기존 bare JSONL/bridge/world의 bounded dedup API를 이 단계에서 몰래 변경하지 않는다. 후속 adapter migration 때 이 강화된 caller ID 정책과 expired 오류를 공개하고 wire 회귀를 검증한다. 프로세스 재시작을 넘는 exactly-once를 약속하지 않으며 durable/network replay는 P10/P11에서 별도 다룬다.

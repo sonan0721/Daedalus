@@ -45,3 +45,7 @@ Luna xhigh content가 private sprite/camera binding과 typed 공통 projection h
 담당자의 frozen source focused 결과: `cargo test -p daedalus-content --locked`72/72, all-target/all-feature strict Clippy, `cargo check -p daedalus-content --lib --target wasm32-unknown-unknown --locked`, scoped rustfmt/diff check 통과. Wasm은 library compile이며 실제 브라우저 실행 인수가 아니다. 조정자의 workspace/Metal/native sprite 통합은 아직 미실행이다.
 
 Cargo/shared target은 content에서 renderer로 인계했다. content 담당자는 새 `sprite_packet_tests.rs` 한 파일만 source 작성해 independent alpha/UV/order/reuse 검사를 병렬 준비하고, renderer 담당자는 핵심 GPU/window와 no-input/Busy/budget 검사를 맡는다. 이 source-only 분담으로 같은 테스트 파일/컴파일 락의 중복을 피한다. 실제 소요 시간 개선율은 측정하지 않았다.
+
+구현 중 조정자 source 리뷰에서 UV write counter 이중 합산과 configured instance cap 대신 최대치 고정 UV buffer를 지적했다. renderer 담당자는 각각 한 합산 지점·checked `max_instances*16` charge/allocation으로 수정했다고 보고했고 실제 통합 검사는 후속이다. 추가로 정적 sprite binding String clone/sort를 매 extract마다 하는 경로를 찾아 prepared generation의 Arc binding/order 공유를 계약에 반영했다. 이는 필요한 admission/authority scan까지 제거한다는 뜻이 아니다.
+
+CLI 작성자의 전체 Python 실행에서 기존 process timeout 세 실패가 보고됐다. 원인은 아직 확정하지 않았고 log 보존·build 경합이 없는 재실행과 실제 timeout/pipe 단계 조사를 요청했다. focused sprite/report 검사는 통과했지만 전체 suite 성공으로 바꾸어 적지 않는다.

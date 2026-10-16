@@ -114,6 +114,24 @@ P02.1a/b의 native library 로컬 검증은 수정 후 workspace CPU 158건·che
 
 P02.1c의 [결과 수명 계약](../03-architecture/legacy-session-result-lifetimes.md)은 공통 CreditPool/lease와 기존 FIFO API를 연결한다. fixture gameplay를 project actor에 합치지 않으며 panic 중 lost ID는 OutcomeUnknown으로 마감한다. 로컬 구현·회귀는 통과했으며 PR 필수 검사를 별도로 확인한다.
 
-**P02 foundation exit**는 실제 외부 project 경로에서 P02.1a~c·P02.2a/b를 통과하고 asset 반복 제작에 필요한 control/capture consumer 계약을 고정한 상태다. 이 선행 gate를 통과해야 P03/W4 asset 통합에 착수한다. 이는 P02.3·P02 제품 인수·D1 통과가 아니다. 현재 foundation의 로컬 기능 검증은 통과했고 PR 필수 검사·병합을 기다린다. 그 전에는 P03 구현에 착수하지 않는다.
+**P02 foundation exit**는 실제 외부 project 경로에서 P02.1a~c·P02.2a/b를 통과하고 asset 반복 제작에 필요한 control/capture consumer 계약을 고정한 상태다. 이 선행 gate를 통과해야 P03/W4 asset 통합에 착수한다. 이는 P02.3·P02 제품 인수·D1 통과가 아니다. foundation은 PR9 최종 head의 다섯 CI job과 main `66121d7` 병합까지 확인했다. P03.1은 아래 별도 계약으로 착수하며 P02 제품 인수는 계속 미통과다.
 
 **P02 product acceptance**는 MCP/SDK attach·조건/입력·UI 조회·실제 capture·assert/trace/replay와 필요한 2D/UI/server 연결까지 모두 검증한 뒤에만 통과한다. 이 최종 증거는 P03/P04/P05/P08/P10의 기능도 필요하므로 해당 W4~W7 선행 구현 뒤 통합한다. P02.1c도 필수 조건이다. P01~P16은 제품 인수 영역 ID이고 숫자 순서의 별도 phase가 아니며, 실제 워터폴 단계는 W0~W8과 상위 D1→D2→D3다. 순환 의존성을 없애되 어떤 품질 gate도 삭제하거나 조기 통과시키지 않는다.
+
+
+## P03 외부 에셋 import/cook와 실제 소비
+
+[전체 설계](../03-architecture/asset-import-cook-and-residency.md)와 [P03.1 구현 계약](../03-architecture/asset-import-foundation.md)을 따른다. CPU import와 실제 화면/사운드 사용은 별도 증거다.
+
+- [ ] P03.1a: 불변 CPU IR·native/byte resolver·source/decoded/cooked 예산·versioned 유한 cache/pin/corruption/atomic publish.
+- [ ] P03.1b: glTF/GLB static model·PNG/mip·atlas·WAV 실제 data와 selective invalidation/cancel/진단.
+- [ ] P03.1c: 같은 backend의 project cook CLI·기존 smoke --assets·실제 공개 에셋 provenance/CPU 확인·locked BOM/필요 Wasm compile.
+- [ ] P03.1: 위 CPU 제작 경로 전체. 일부 포맷/메타데이터만으로 체크하지 않음.
+
+P03.1 로컬 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있다. source 고정 후 CPU240·Python53·assets31·실제 native22, 공개 원본/negative 진단과 clean local release archive/extracted assets31/native22를 확인했다. 최종 PR CI/병합 gate 전이므로 위 체크박스를 아직 완료 처리하지 않는다. 실제 consumer는 아래 별도 항목이다.
+
+- [ ] P03.2: 같은 project/catalog의 실제 model primitive·UV/texture/sampler·sprite/2D·audio consumer 연결과 렌더/출력 검증. [소비 계약 초안](../03-architecture/asset-runtime-consumers.md)의 a/b/c 경로를 각각 확정·검증하며 모두 통과해야 체크한다.
+- [ ] P03.3: background import/cook·candidate/active resource generation·실행 중 변경/취소/stale·실패 last-good·CPU/GPU/audio 회수.
+- [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.
+
+전체 P03/D1은 최종 제작 경로를 인수할 때만 통과한다. P05/P07/P09와 함께 필요한 2D/audio/animation 소비를 검증하며 P번호를 별도 숫자 순서 phase로 해석하지 않는다.

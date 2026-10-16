@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 from contextlib import redirect_stderr
 from io import StringIO
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import wave
 from pathlib import Path
 
 from smoke_project import (
@@ -20,10 +22,20 @@ from smoke_project import (
     _parse_args,
     _v2_poll_until,
     _v2_submit,
+    _decode_glb,
+    _write_asset_project,
     _validate_native_view_report,
     _validate_native_liveness_report,
     _validate_timeout,
 )
+
+
+# These cases exercise protocol behavior with a fresh Python child process.
+# A one-second wall-clock bound can expire before the stub is scheduled on a
+# busy shared runner, even though the child has no meaningful work to do.
+# Keep ordinary request/close cases bounded while leaving the explicit
+# timeout-failure tests below at their deliberately short limits.
+STUB_TIMEOUT_SECONDS = 5.0
 
 
 class ProjectSmokeProcessTests(unittest.TestCase):
@@ -42,6 +54,35 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         binary.chmod(0o755)
         return binary
 
+    def test_offline_asset_fixture_contains_external_and_embedded_sources(self) -> None:
+        project = self.root / "asset-fixture"
+        _write_asset_project(project)
+        scene = json.loads((project / "scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            {asset["kind"] for asset in scene["assets"]},
+            {
+                "daedalus.model",
+                "daedalus.image",
+                "daedalus.sprite_atlas",
+                "daedalus.audio",
+            },
+        )
+        external = json.loads(
+            (project / "models" / "external.gltf").read_text(encoding="utf-8")
+        )
+        self.assertEqual(external["images"][0]["uri"], "../images/base.png")
+        external_geometry = (project / "models" / "triangle.bin").read_bytes()
+        self.assertEqual(len(external_geometry), 102)
+        embedded, binary = _decode_glb((project / "models" / "embedded.glb").read_bytes())
+        self.assertEqual(binary[: len(external_geometry)], external_geometry)
+        self.assertEqual(embedded["images"][0]["mimeType"], "image/png")
+        image_view = embedded["bufferViews"][4]
+        start = image_view["byteOffset"]
+        self.assertTrue(binary[start : start + 8].startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue((project / "atlases" / "sprites.json").is_file())
+        with wave.open(os.fspath(project / "audio" / "tone.wav"), "rb") as audio:
+            self.assertEqual((audio.getnchannels(), audio.getframerate(), audio.getnframes()), (1, 8_000, 4))
+
     def test_timeout_parser_rejects_zero_non_finite_and_non_numeric_values(self) -> None:
         self.assertEqual(_validate_timeout("1"), 1.0)
         for value in ("0", "nan", "bad"):
@@ -52,8 +93,14 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         arguments = _parse_args(["--cli", "/bin/true", "--timeout", "1"])
         self.assertEqual(arguments.timeout, 1.0)
         self.assertFalse(arguments.view)
+        self.assertFalse(arguments.assets)
         view_arguments = _parse_args(["--cli", "/bin/true", "--view"])
         self.assertTrue(view_arguments.view)
+        asset_arguments = _parse_args(["--cli", "/bin/true", "--assets"])
+        self.assertTrue(asset_arguments.assets)
+        combined_arguments = _parse_args(["--cli", "/bin/true", "--assets", "--view"])
+        self.assertTrue(combined_arguments.assets)
+        self.assertTrue(combined_arguments.view)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])
@@ -117,7 +164,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             binary,
             self.project,
             cwd=self.root,
-            timeout=1.0,
+            timeout=STUB_TIMEOUT_SECONDS,
             command=["project", "view", str(self.project)],
             protocol_version=2,
             process_label="project view",
@@ -125,7 +172,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         with server:
             response = server.request("p2-poll", {"op": "poll", "ticket": "t1"})
             self.assertEqual(response["result"]["data"]["phase"], "terminal")
-            self.assertEqual(server.wait_for_exit(timeout=1.0), 0)
+            self.assertEqual(server.wait_for_exit(timeout=STUB_TIMEOUT_SECONDS), 0)
             self.assertFalse(server._stdin.closed)
         self.assertTrue(server._stdin.closed)
         self.assertEqual(server.process.returncode, 0)
@@ -139,7 +186,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             "print(json.dumps({'protocol': 1, 'request_id': request['request_id'], 'ok': True, "
             "'result': {'project_name': 'legacy'}}), flush=True)"
         )
-        server = _JsonlProjectServer(binary, self.project, cwd=self.root, timeout=1.0)
+        server = _JsonlProjectServer(binary, self.project, cwd=self.root, timeout=STUB_TIMEOUT_SECONDS)
         with server:
             response = server.request(
                 "legacy-info",
@@ -160,7 +207,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             binary,
             self.project,
             cwd=self.root,
-            timeout=1.0,
+            timeout=STUB_TIMEOUT_SECONDS,
             protocol_version=2,
             process_label="project view",
         )
@@ -191,7 +238,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             binary,
             self.project,
             cwd=self.root,
-            timeout=1.0,
+            timeout=STUB_TIMEOUT_SECONDS,
             protocol_version=2,
             process_label="project view",
         )
@@ -219,7 +266,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             binary,
             self.project,
             cwd=self.root,
-            timeout=1.0,
+            timeout=STUB_TIMEOUT_SECONDS,
             protocol_version=2,
             process_label="project view",
         )
@@ -229,7 +276,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
                 "ticket-1",
                 request_prefix="poll",
                 phase="terminal",
-                timeout=1.0,
+                timeout=STUB_TIMEOUT_SECONDS,
             )
             self.assertEqual(result["phase"], "terminal")
             self.assertTrue(result["terminal"]["ok"])
@@ -245,20 +292,20 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             binary,
             self.project,
             cwd=self.root,
-            timeout=1.0,
+            timeout=STUB_TIMEOUT_SECONDS,
             command=["project", "view", str(self.project)],
             protocol_version=2,
             process_label="project view close case",
         )
         with server:
             server.send_only("explicit-close", {"op": "close"})
-            self.assertEqual(server.wait_for_exit(timeout=1.0), 0)
+            self.assertEqual(server.wait_for_exit(timeout=STUB_TIMEOUT_SECONDS), 0)
             self.assertFalse(server._stdin.closed)
         self.assertEqual(server.process.returncode, 0)
 
     def test_exit_wait_timeout_still_terminates_and_reaps_child(self) -> None:
         binary = self.create_server_stub("import time\ntime.sleep(30)")
-        server = _JsonlProjectServer(binary, self.project, cwd=self.root, timeout=1.0)
+        server = _JsonlProjectServer(binary, self.project, cwd=self.root, timeout=STUB_TIMEOUT_SECONDS)
         started = time.monotonic()
         with self.assertRaisesRegex(SmokeError, "did not exit"):
             with server:
@@ -276,7 +323,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
                 binary,
                 self.project,
                 cwd=self.root,
-                timeout=1.0,
+                timeout=STUB_TIMEOUT_SECONDS,
                 stdin_target=subprocess.DEVNULL,
                 stdout_target=write_fd,
             )
@@ -286,7 +333,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
                 self.assertIsNone(server._stdin)
                 self.assertIsNone(server._stdout)
                 self.assertIsNone(server._selector)
-                self.assertEqual(server.wait_for_exit(timeout=1.0), 0)
+                self.assertEqual(server.wait_for_exit(timeout=STUB_TIMEOUT_SECONDS), 0)
         finally:
             if server is not None and not server._closed:
                 try:

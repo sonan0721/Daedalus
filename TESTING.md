@@ -38,7 +38,7 @@ cargo test -p daedalus-runtime session_primitives::tests --locked
 cargo test -p daedalus-world --lib --locked
 ```
 
-The latest local all-feature coordinator run passes 200 CPU tests with three hardware tests ignored by default. Service tests cover real authority admission versus application, multiple clients, wrong-session/stale revisions, bounded pages, reserved Step capacity under saturation, reader-held result/frame lifetimes, duplicate replay and eviction, nonwaiting contention, timeouts, shutdown, and injected actor failures. Core retention also counts an independently retained entity-array Arc or cloned snapshot value. Frame-cap-one progress and pin/release recovery use a separate producer budget; native service producer capacity must be 2–64. A controlled actor pause verifies that ACK and last-reader release free Step credit before actor bookkeeping cleanup. The first Linux PR run exposed that race; subsequent CI is recorded separately in the worklog. Unknown post-failure command outcomes are reported explicitly. The native project viewer and protocol-2 adapter now use this service; MCP and managed attach are still pending. The legacy window now also reuses the count-and-byte CreditPool with RAII leases through its FIFO result channel. Its by-value results release engine credit at dequeue; they do not adopt the service ticket/reader lifetime. Failure-only OutcomeUnknown, injected post-apply/final-stop panics, bounded diagnostics, Stop saturation, and concurrent submit/stop are covered. See the [service contract](docs/03-architecture/session-control-service.md) for exact limits and remaining adapters.
+The latest local all-feature coordinator run passes 240 CPU tests with three hardware tests ignored by default. Service tests cover real authority admission versus application, multiple clients, wrong-session/stale revisions, bounded pages, reserved Step capacity under saturation, reader-held result/frame lifetimes, duplicate replay and eviction, nonwaiting contention, timeouts, shutdown, and injected actor failures. Core retention also counts an independently retained entity-array Arc or cloned snapshot value. Frame-cap-one progress and pin/release recovery use a separate producer budget; native service producer capacity must be 2–64. A controlled actor pause verifies that ACK and last-reader release free Step credit before actor bookkeeping cleanup. The first Linux PR run exposed that race; subsequent CI is recorded separately in the worklog. Unknown post-failure command outcomes are reported explicitly. The native project viewer and protocol-2 adapter now use this service; MCP and managed attach are still pending. The legacy window now also reuses the count-and-byte CreditPool with RAII leases through its FIFO result channel. Its by-value results release engine credit at dequeue; they do not adopt the service ticket/reader lifetime. Failure-only OutcomeUnknown, injected post-apply/final-stop panics, bounded diagnostics, Stop saturation, and concurrent submit/stop are covered. See the [service contract](docs/03-architecture/session-control-service.md) for exact limits and remaining adapters.
 
 ## Current CLI smoke
 
@@ -67,7 +67,7 @@ cargo run -p daedalus-cli -- project serve /tmp/daedalus-empty
 
 `init` requires a new child directory under an existing parent and never overwrites a project. It writes an empty manifest and scene; it does not insert a cube or game. Filesystem and byte-based preparation share semantic validation, budgets, source hashes, and one immutable prepared-project model. See the [project format and support contract](docs/03-architecture/project-lifecycle.md).
 
-For authored content, the current project loader accepts root entities, `daedalus.transform`, `daedalus.mesh_renderer`, and `daedalus.mesh` indexed JSON geometry with normals and opaque scalar materials. General model/texture/sprite import, hierarchy/prefabs, attached C# modules, live reload/save, MCP, and web export are not implemented. Unsupported data is an explicit error rather than a substituted fixture.
+For runnable authored content, the current legacy project loader accepts root entities, `daedalus.transform`, `daedalus.mesh_renderer`, and `daedalus.mesh` indexed JSON geometry with normals and opaque scalar materials. Imported model/texture/sprite execution, hierarchy/prefabs, attached C# modules, live reload/save, MCP, and web export are not implemented. The separate asset-aware CPU loader is described below. Unsupported data is an explicit error rather than a substituted fixture.
 
 `project serve` uses the existing bounded JSONL control path with the same authority engine. A metadata request is:
 
@@ -93,6 +93,21 @@ python3 scripts/smoke_project.py --cli target/debug/daedalus
 ```
 
 The helper does not build or initialize a GPU. It creates and removes external temporary projects, derives handles from the active session, and checks empty initialization/no-overwrite, shared load identity, accepted versus applied commands, actual transforms/revisions/snapshots, stale-command rejection, and unsupported-component diagnostics. Processes and JSONL responses have finite timeouts; malformed, oversized, and stalled responses are failure cases with child cleanup tests. The success JSON includes the executable hash, 18 checks, and observed wall time. It does not certify gameplay, live-window behavior, or product acceptance. Native archive verification reuses this same helper on the extracted executable.
+
+## CPU asset import and cook
+
+```sh
+cargo test -p daedalus-content --locked
+cargo check -p daedalus-content --lib --target wasm32-unknown-unknown --locked
+cargo run -p daedalus-cli -- project cook /path/to/project
+python3 scripts/smoke_project.py --cli target/debug/daedalus --assets
+```
+
+The Wasm command requires the pinned toolchain's `wasm32-unknown-unknown` standard library; compilation does not establish a working browser renderer or web export. The asset-aware filesystem and byte-map APIs share the CPU importer/catalog and explicit unsupported-feature diagnostics. See the [format/settings/budget contract](docs/03-architecture/asset-import-foundation.md).
+
+The opt-in `--assets` mode reuses the existing subprocess, temporary-project, timeout, binary-hash, and cleanup helpers. It adds offline glTF/GLB, PNG, atlas, and WAV preparation; same-geometry sharing; warm zero-decode/zero-cook behavior; external/embedded PNG, node, material, geometry, atlas, and WAV edits; payload/header cache corruption recovery; a cache-root override; and typed unsupported-extension diagnostics. It needs no GPU, audio device, network download, or extra Cargo build. Default CPU18 and native `--view` meanings remain unchanged. CPU catalog success does not establish textured rendering, sprite playback, audio output, reload, or P03/D1 acceptance.
+
+The existing macOS/Linux package jobs additionally run `--assets` against their staged binary after the shared package backend succeeds. Archive verification itself retains its CPU18 default. Locally, run the same helper against an extracted binary to verify the new CPU asset path in that archive. Original public assets are tested separately with [revision/license/hash provenance](docs/02-research/asset-validation-provenance.md); they are not downloaded in CI or bundled with the engine.
 
 An optional GPU CLI build is explicit:
 

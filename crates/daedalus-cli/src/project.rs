@@ -25,6 +25,10 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             let prepared = load_project(&directory)?;
             print_json(&validation_output(&prepared))?;
         }
+        ProjectCommands::Cook {
+            directory,
+            cache_dir,
+        } => super::project_assets::run(directory, cache_dir)?,
         ProjectCommands::Inspect { directory } => {
             let session = ProjectSession::new(load_project(&directory)?, EngineConfig::default())?;
             let report = session.report()?;
@@ -384,6 +388,7 @@ mod tests {
             ["daedalus", "project", "validate", "/tmp/new"],
             ["daedalus", "project", "inspect", "/tmp/new"],
             ["daedalus", "project", "serve", "/tmp/new"],
+            ["daedalus", "project", "cook", "/tmp/new"],
         ];
         for command in commands {
             assert!(Args::try_parse_from(command).is_ok());
@@ -394,6 +399,21 @@ mod tests {
                 .command,
             super::super::Commands::Project {
                 command: ProjectCommands::Init { .. }
+            }
+        ));
+        assert!(matches!(
+            Args::try_parse_from([
+                "daedalus",
+                "project",
+                "cook",
+                "/tmp/new",
+                "--cache-dir",
+                "/tmp/asset-cache"
+            ])
+            .unwrap()
+            .command,
+            super::super::Commands::Project {
+                command: ProjectCommands::Cook { .. }
             }
         ));
     }

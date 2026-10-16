@@ -31,6 +31,7 @@
 | [질문지](01-discovery/questionnaire.md) | 선택마다 어떤 아키텍처가 달라지는지 함께 질문 |
 | [답변 기록](01-discovery/answer-log.md) | 실제 답변과 작성자의 제안을 구분해 저장 |
 | [출처 등록부](02-research/source-register.md) | 공식 문서·원저자 자료의 검증 범위와 한계를 기록 |
+| [실제 에셋 검증 출처](02-research/asset-validation-provenance.md) | 공개 원본의 revision·license·hash·외부 변환과 미지원 입력을 고정 |
 | [원안 주장 검증](02-research/claim-audit.md) | 144Hz 보장·전체 ECS 복사·핫리로드 수치 등의 오해를 정리 |
 | [스택 선택지](02-research/stack-options.md) | 독립 엔진 관점에서 부품별 이점·결합 비용·실험 기준 비교 |
 | [구현 의존성 기준선](02-research/implementation-dependency-baseline.md) | 실제 선택 버전·native 빌드·라이선스·타깃 검증 경계 |
@@ -50,6 +51,8 @@
 | [2D 타일 시뮬레이션](03-architecture/tile-simulation.md) | 유체·조명·파괴 지형의 병렬 계산과 보존 규칙 |
 | [에셋·UI·애니메이션](03-architecture/assets-ui-animation.md) | DCC부터 쿠킹·입력·글꼴·액션·오디오까지 지원 경계 |
 | [에셋 import·cook·resource](03-architecture/asset-import-cook-and-residency.md) | 공식 포맷 조사와 모델/PNG/sprite/WAV·증분 cache·generation·장치 자원 수명의 상세 계약 |
+| [공통 에셋 import 구현](03-architecture/asset-import-foundation.md) | 네 CPU 포맷·불변 IR·native/byte resolver·유한 cache·CLI의 실제 구현/검증 계약 |
+| [에셋 실제 실행 소비](03-architecture/asset-runtime-consumers.md) | 다음 model/texture·sprite·audio 연결의 공통 packet·authority·자원 공유·검증 초안 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |
 | [네트워크·영속화](03-architecture/networking-and-persistence.md) | 서버 권한·관심 영역·월드 변경·복구 설계 |
@@ -88,6 +91,7 @@
 | [E08 CLI 패키징 검증](06-worklog/2026-10-16-cli-packaging.md) | 로컬 native 실행 파일·의존성 notice·archive 검증과 후속 tag 배포의 구분 |
 | [Native live session 검증](06-worklog/2026-10-16-native-live-session.md) | 실제 창·ECS·background terrain 통합과 입력·종료·파이프라인 검증 근거 |
 | [엔진 제품 준비도 감사](06-worklog/2026-10-16-product-readiness-audit.md) | 기반 부품과 실제 제작 기능의 차이·미완료·첫 의존성 기록 |
+| [공통 에셋 import 작업 기록](06-worklog/2026-10-16-asset-import.md) | P03.1의 API 분담·실제 공개 자료 확인·검증 상태를 추적 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

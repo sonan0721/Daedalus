@@ -126,6 +126,24 @@ Luna의 새 curation10개는 기존 record를 변경하지 않고 exact name/ver
 
 같은 native-audio+window feature의 real Cargo metadata로 strict collection을 실행했다. 조정자도 생성 inventory와 scope/text/hash를 리뷰했다. Apple221dependency/missing0/reference-only4, Linux236/missing0/reference-only1이다. ignored `dist/project-evidence/p03-audio-apple-notices-strict/`와 `p03-audio-linux-notices-strict/`에 각 target notices/inventory를 보존했다. 새 objc2 scope는 upstream 원문으로, canonical terms는 reference로 표시한다. strict package 재시도와 실제 Linux native build/linkage는 이후 별도 게이트다.
 
+## Clean archive 최종 로컬 검증 — CI/main 대기
+
+notice 자료·회귀의 full Python56/56(`p03-audio-python-notices-final.log`)과 docs/diff check 후 `95de9b034bcd8ed7dfe45aaf93c2abd04170e009`를 commit/push했다. clean tree의 기존 package backend가 archive 생성·무결성·실행 권한·version/inspect·추출 CPU+offline audio24 검사를 모두 통과했다. release build cache는 실제0.38초였으나 최초 compile17.43초와 비교한 일반적 성능 개선 배율은 주장하지 않는다.
+
+| 산출물 | 실제 identity |
+| --- | --- |
+| build ID | `20261016T115057Z-7e77c58726864ee28fe16032b404305f` |
+| source/profile/features | 위 `95de9b0`, dirty=false, release/aarch64-apple-darwin, `native-audio,window` |
+| binary SHA-256 | `925ab8a2ecbcf9996636d01fa3a3dd9621fa6c1ae5661b46b75b1471c306e51b` |
+| archive SHA-256 | `2c9b3d075e08bc2d684763f84e832a8286bd0882bbb0ea424aa13984a7fd4a17` |
+| notices/inventory SHA-256 | `e68748af37dd976144bb81a0982887922ed9b9876e5f1829b895972abf67bf7f` / `cfe1f5f8a92f386edae105d92bab4fbb9f8be2668e247f6f00188d8ce9657b1d` |
+
+archive는 ignored `dist/local/daedalus-0.1.0-aarch64-apple-darwin-95de9b034bcd-clean-20261016T115057Z-7e77c58726864ee28fe16032b404305f/`에 있다. package raw 로그는 `dist/project-evidence/p03-audio-local-package-final.log`이며 첫 실패 로그는 그대로 보존했다. 별도 fresh `dist/project-evidence/p03-audio-package-extracted/`에 추출하고 실행 파일 hash를 manifest와 독립 대조했다.
+
+추출 binary의 같은 `--assets --view --models --sprites --audio --audio-native`는 **46/46,15.094582초**로 통과했다(`p03-audio-package-combined-smoke.*`). 공개 WAV offline도0.144476초/exit0으로 통과했고(`p03-public-audio-offline-package.*`), native-view는3.141553초/actual present340회·same session/source·Play→Ended·EOF detach→TimeLimit·exit0을 확인했다(`p03-public-audio-native-view-package.*`). 이는 로컬 Mac backend/Metal과 bounded fixture 동작이며144fps나 실제 게임 품질 시험이 아니다.
+
+이후 변경은 이 증거를 기록하는 MD뿐이다. PR 다섯 CI, 양쪽 packaged asset+offline-audio step 및 Linux ALSA linkage, 검증한 head와 main 동일 tree를 확인하기 전 P03.2c를 체크하지 않는다. P03.3/03.4·전체 P03/D1/D2/D3도 계속 열려 있다. tag/공개 Release를 만들지 않았다.
+
 ## 조사 한계
 
 버전 고정 docs.rs API 세 페이지 조회는 실패했다. local registry의 Kira0.12.5 source를 읽어 Frame Arc sharing/loop/state/final clamp를 확인했다. 이후 local VCS metadata의 commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`로 upstream StaticSoundData raw 원문을 확보·대조했으며 다른 raw 페이지 일부는 실패했다. browser audio·loopback/audibility·다른 장치/플랫폼은 현재 미검증이다.

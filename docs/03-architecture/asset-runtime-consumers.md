@@ -1,6 +1,6 @@
 # P03.2 실제 model·texture·sprite·audio 소비
 
-상태: a/b 하위 gate 인수, c 상세 설계 진행·전체 P03.2 미통과 · 2026-10-16 · P03/DEV03/DEV05/DEV08
+상태: a/b 하위 gate 인수, c 로컬 CPU/native/archive 검증·PR/CI/main 인수 대기·전체 P03.2 미통과 · 2026-10-16 · P03/DEV03/DEV05/DEV08
 
 ## 목적과 선행 조건
 
@@ -30,7 +30,7 @@ schema 1의 generic component envelope 안에 additive component를 정의한다
 
 - `daedalus.model_renderer`: 단일 model asset 참조. `asset_refs`와 `data.model`의 일치·중복·catalog kind를 검증한다. glTF scene 선택은 model import settings를 따른다. 첫 경로는 imported primitive material을 그대로 쓰고 entity-level material override를 받지 않는다.
 - `daedalus.sprite_renderer`: atlas asset와 stable region ID를 참조한다. image asset를 다시 이름으로 추측하거나 atlas source를 재파싱하지 않는다. tint/transform/layer의 정확한 JSON·기준 좌표·정사영/actual view는 [P03.2b 상세 계약](sprite-runtime-and-orthographic-view.md)에 확정했다.
-- audio: 명시적 asset 참조와 play/stop 제어를 사용한다. load만으로 소리를 자동 재생하지 않는다. command·volume·loop·voice 조회·실패 의미는 P03.2c 착수 전 확정한다.
+- audio: 명시적 asset 참조와 같은 actor의 play/stop 제어를 사용한다. load만으로 소리를 자동 재생하지 않는다. command·volume/pan·loop·voice 조회·유한 replay·오류와 native 종료의 실제 경계는 [P03.2c 상세 계약](imported-audio-runtime.md)에 확정했으며 CPU/native/clean archive 검증 뒤 CI/main 인수를 기다린다.
 
 새 binding은 private PreparedProject의 별도 validated collection/accessor로 제공하는 방향이다. PreparedEntity를 공개 필드 추가로 깨거나 model 참조를 legacy mesh ID에 숨기지 않는다. 같은 entity에 서로 충돌하는 renderer component를 달았을 때의 오류와 source/JSON path를 명시한다. 현재 root entity 제약과 glTF 내부 node hierarchy는 다른 계층이며, model node 지원을 일반 scene hierarchy 지원으로 홍보하지 않는다.
 
@@ -80,4 +80,4 @@ CPU 검사는 selected roots·공유 mesh의 여러 node·여러 primitive·matr
 
 추가 read-only 감사에서 protocol2 request ID의 중복 방지는 ticket 보유 중에만 유효하고 ack/forget 뒤 mapping이 지워짐을 확인했다. 현재 authority replay는 SetTransform의 CommandId에만 있다. 따라서 재시도하는 Play를 request correlation만으로 idempotent라 부르면 안 된다. 상세 계약에서 audio mutation의 replay identity/유한 보유/expiry와 permission을 정한 뒤 구현한다. actor의 offline PCM 진행도 명시적 audio 연산으로 설계해야 하며 현재 Engine Manual Step이 audio까지 진행한다고 간주하지 않는다. 결과 ticket/JSON에 긴 PCM 배열을 싣지 않고 bounded state/요약과 실제 내부 PCM 검사를 구분한다.
 
-native Kira/CPAL은 stream 생성과 finite voice의 실제 mixer 종료 관찰로 callback 진행을 확인할 수 있다. 현재 API에는 callback counter/loopback capture가 없어 사람이 들은 소리나 출력 장치의 실제 음압을 자동 검증했다고 보고하지 않는다. 기본 startup은 계속 장치가 필요 없어야 하며 선택한 native backend의 실패를 offline 성공으로 바꾸지 않는다. 현재 CLI package는 window feature만 빌드하므로 audio를 추가할 때 feature/manifest/notices와 Linux ALSA build/runtime 의존성을 명시적으로 점검한다. 이 항목들은 P03.2c 선행 조사이며 b 인수 전에 audio 구현을 착수하지 않는다.
+native Kira/CPAL은 stream 생성과 finite voice의 실제 mixer 종료 관찰로 callback 진행을 확인할 수 있다. 현재 API에는 callback counter/loopback capture가 없어 사람이 들은 소리나 출력 장치의 실제 음압을 자동 검증했다고 보고하지 않는다. 기본 startup은 계속 장치가 필요 없어야 하며 선택한 native backend의 실패를 offline 성공으로 바꾸지 않는다. 조사 당시 CLI package는 window feature만 빌드했다. 후속 audio 구현은 native-audio+window feature/manifest/notices와 Linux ALSA build/runtime 의존성을 추가했고 실제 로컬/CI 인수 상태는 상세 worklog로 추적한다. 이 항목들은 P03.2c 선행 조사이며 b 인수 전에 audio 구현을 착수하지 않는다.

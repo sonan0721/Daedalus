@@ -127,6 +127,9 @@ P02.1c의 [결과 수명 계약](../03-architecture/legacy-session-result-lifeti
 - [ ] P03.1b: glTF/GLB static model·PNG/mip·atlas·WAV 실제 data와 selective invalidation/cancel/진단.
 - [ ] P03.1c: 같은 backend의 project cook CLI·기존 smoke --assets·실제 공개 에셋 provenance/CPU 확인·locked BOM/필요 Wasm compile.
 - [ ] P03.1: 위 CPU 제작 경로 전체. 일부 포맷/메타데이터만으로 체크하지 않음.
+
+P03.1 로컬 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있다. source 고정 후 CPU240·Python53·assets31·실제 native22, 공개 원본/negative 진단과 clean local release archive/extracted assets31/native22를 확인했다. 최종 PR CI/병합 gate 전이므로 위 체크박스를 아직 완료 처리하지 않는다. 실제 consumer는 아래 별도 항목이다.
+
 - [ ] P03.2: 같은 project/catalog의 실제 model primitive·UV/texture/sampler·sprite/2D·audio consumer 연결과 렌더/출력 검증. [소비 계약 초안](../03-architecture/asset-runtime-consumers.md)의 a/b/c 경로를 각각 확정·검증하며 모두 통과해야 체크한다.
 - [ ] P03.3: background import/cook·candidate/active resource generation·실행 중 변경/취소/stale·실패 last-good·CPU/GPU/audio 회수.
 - [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.

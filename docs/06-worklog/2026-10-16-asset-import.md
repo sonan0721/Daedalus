@@ -1,6 +1,6 @@
 # P03.1 공통 에셋 import·cook 작업 기록
 
-상태: 로컬 CPU·원본 에셋·native 회귀 통과, clean package·PR CI 대기 · 2026-10-16
+상태: 로컬 CPU·원본 에셋·native 회귀·clean package 통과, PR CI 대기 · 2026-10-16
 
 ## 이번 목표와 선행 상태
 
@@ -83,6 +83,17 @@ window-enabled debug binary SHA-256은 `e429412da466ceb0140bcae0ecf888d25a8359ae
 
 원본 Nature Kit GLB는 exit1·`unsupported`·source `rock_smallA.glb`·path `extensionsUsed`·`KHR_materials_unlit` 진단을 확인했다. 미지원 extension을 삭제하지 않았다. notice collector는 native CLI의201개 resolved dependency를 생성했고 missing license text0, reference-only4개를 별도 표기했다. 신규 여섯 package에 불필요한 override를 추가하지 않았다.
 
+## clean local release package
+
+content 구현은 `1623bc6`, CLI/smoke/문서 연결은 clean source `15c68c92850e9350c2af4401242d1b2792b08183`에 커밋했다. `python3 scripts/package_cli.py`가 release/window build·notice/inventory·archive/hash·추출 CPU18 검증까지 exit0으로 완료했다. build 중 tracked source/HEAD를 바꾸지 않았으며 manifest의 dirty는false다.
+
+- 위치: `dist/local/daedalus-0.1.0-aarch64-apple-darwin-15c68c92850e-clean-20261016T041558Z-147d02063445440393b29bb8501879f7/`
+- archive SHA-256: `b7634216bd069ba140b608f7e4b58603f018490618a210c9e48e0cdd5cc0ca60`
+- executable SHA-256: `cedc7637e119047811023a07292e3b86f736c647d2b8220ebbab11e2b2b43e69`
+- extracted executable의 `--assets`:31건/0.603129초/exit0. 별도 `--view`:22건/8.036393초/exit0, 실제 Mac/Metal.
+
+압축 해제한 binary hash를 manifest와 대조했다. notice inventory는201개/missing0/reference-only4이며 archive에 포함했다. debug와 release의 시간은 서로 다른 build profile이므로 cache 개선 배율 비교가 아니다. tag/GitHub Release는 만들지 않았다. 정확한 archive/build-manifest는 ignored 로컬 산출물이며 engine repository에 게임이나 공개 원본 에셋을 추가하지 않았다.
+
 ## 남은 인수 절차
 
-위 로컬 결과의 clean-source package를 만들고 extracted binary의 archive/CPU18/assets31을 확인한다. PR의 필수 다섯 job과 두 native packaged asset smoke까지 확인한 뒤 P03.1 최종 gate를 판단한다. 이후 실제 model/texture·sprite/audio 소비 P03.2를 구현한다. P03 전체·DEV03 전체·D1/D2/D3는 계속 미완료다.
+PR의 필수 다섯 job과 두 native packaged asset smoke까지 확인한 뒤 P03.1 최종 gate를 판단한다. 이후 실제 model/texture·sprite/audio 소비 P03.2를 구현한다. P03 전체·DEV03 전체·D1/D2/D3는 계속 미완료다.

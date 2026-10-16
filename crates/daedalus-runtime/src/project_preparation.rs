@@ -355,6 +355,38 @@ impl NativeProjectActivationService {
     }
 
     #[cfg(test)]
+    pub(crate) fn panic_preparation_for_test(&self, epoch: u64) -> PreparationTestGateRelease {
+        let gate = Arc::new(PreparationTestGate::panicking(epoch));
+        self.worker_shared.install_test_gate(Arc::clone(&gate));
+        PreparationTestGateRelease(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_stage_result_for_test(&self, epoch: u64) -> PreparationTestGateRelease {
+        let gate = Arc::new(PreparationTestGate::before_stage_send(epoch));
+        self.worker_shared.install_test_gate(Arc::clone(&gate));
+        PreparationTestGateRelease(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_promotion_for_test(&self, epoch: u64) -> PreparationTestGateRelease {
+        let gate = Arc::new(PreparationTestGate::before_promotion(epoch));
+        self.worker_shared.install_test_gate(Arc::clone(&gate));
+        PreparationTestGateRelease(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_next_retired_project_for_test(&self) -> RetiredProjectHoldGuard {
+        let mut hold = self.worker_shared.retired_project_test_hold.lock().unwrap();
+        assert!(!hold.request_next && hold.held.is_none());
+        hold.request_next = true;
+        RetiredProjectHoldGuard {
+            shared: Arc::clone(&self.worker_shared),
+            active: true,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn hold_worker_state_for_test(&self) -> impl Drop + '_ {
         self.worker_shared.state.lock().unwrap()
     }
@@ -1391,6 +1423,8 @@ fn preparation_test_wav() -> Vec<u8> {
 enum PreparationTestGatePhase {
     BeforeImport,
     AfterImport,
+    BeforeStageSend,
+    BeforePromotion,
 }
 
 #[cfg(test)]
@@ -1429,6 +1463,26 @@ impl PreparationTestGate {
             epoch,
             phase: PreparationTestGatePhase::BeforeImport,
             panic_after_release: true,
+            state: Mutex::new((false, false)),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn before_stage_send(epoch: u64) -> Self {
+        Self {
+            epoch,
+            phase: PreparationTestGatePhase::BeforeStageSend,
+            panic_after_release: false,
+            state: Mutex::new((false, false)),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn before_promotion(epoch: u64) -> Self {
+        Self {
+            epoch,
+            phase: PreparationTestGatePhase::BeforePromotion,
+            panic_after_release: false,
             state: Mutex::new((false, false)),
             changed: Condvar::new(),
         }
@@ -1512,6 +1566,48 @@ impl Drop for PreparationTestGateRelease {
     }
 }
 
+#[cfg(test)]
+struct RetiredProjectTestHold {
+    request_next: bool,
+    held: Option<Arc<PreparedProject>>,
+}
+
+#[cfg(test)]
+pub(crate) struct RetiredProjectHoldGuard {
+    shared: Arc<Shared>,
+    active: bool,
+}
+
+#[cfg(test)]
+impl RetiredProjectHoldGuard {
+    pub(crate) fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        let held = match self.shared.retired_project_test_hold.lock() {
+            Ok(mut hold) => {
+                hold.request_next = false;
+                hold.held.take()
+            }
+            Err(poisoned) => {
+                let mut hold = poisoned.into_inner();
+                hold.request_next = false;
+                hold.held.take()
+            }
+        };
+        drop(held);
+        self.active = false;
+        self.shared.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for RetiredProjectHoldGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 struct Shared {
     state: Mutex<WorkerState>,
     changed: Condvar,
@@ -1524,6 +1620,8 @@ struct Shared {
     stage_result_receiver: Mutex<Option<std::sync::mpsc::Receiver<StageResult>>>,
     #[cfg(test)]
     test_gate: Mutex<Option<Arc<PreparationTestGate>>>,
+    #[cfg(test)]
+    retired_project_test_hold: Mutex<RetiredProjectTestHold>,
 }
 
 impl Shared {
@@ -1541,6 +1639,11 @@ impl Shared {
             stage_result_receiver: Mutex::new(Some(stage_result_receiver)),
             #[cfg(test)]
             test_gate: Mutex::new(None),
+            #[cfg(test)]
+            retired_project_test_hold: Mutex::new(RetiredProjectTestHold {
+                request_next: false,
+                held: None,
+            }),
         }
     }
 
@@ -2190,6 +2293,10 @@ fn worker_loop(
                         && !shared.stop_requested.load(Ordering::Acquire)
                 });
                 if still_current {
+                    shared.wait_at_test_gate(
+                        request.epoch,
+                        PreparationTestGatePhase::BeforeStageSend,
+                    );
                     let _ = shared.stage_result_sender.send(result);
                 }
             }
@@ -2226,11 +2333,20 @@ fn worker_loop(
                 }
             }
             WorkerAction::Promote(sequence, epoch) => {
+                shared.wait_at_test_gate(epoch, PreparationTestGatePhase::BeforePromotion);
                 if let Some((candidate_epoch, project)) = registry.candidate.take() {
                     if candidate_epoch == epoch {
                         drop(ready.take());
                         let previous = registry.active.replace(project);
                         registry.retired = previous;
+                        #[cfg(test)]
+                        if let Some(retired) = registry.retired.as_ref()
+                            && let Ok(mut hold) = shared.retired_project_test_hold.lock()
+                            && hold.request_next
+                        {
+                            hold.request_next = false;
+                            hold.held = Some(Arc::clone(retired));
+                        }
                     } else {
                         registry.candidate = Some((candidate_epoch, project));
                     }

@@ -125,3 +125,13 @@ activation consuming owner 자체의 worker-panic test는 attempt05에서 종료
 owner Drop을 import gate 동안 실행한 attempt08도1/1로 통과했다. Drop은 join하지 않고 반환했고 실제 worker가 gate/정리를 마치기 전 cache lock은 Busy, 이후 reopen은 성공했다. raw SHA-256은 `ae5fd7880cf68bb51336641936e1f11fb870c3c13f2c848b293868e24af2b0b8`다. 이어 runtime default84+integration2·all-feature96+integration2·strict all-target Clippy가 통과했지만 held frame/held source의 종료 검사를 추가 중이므로 최종 source 인수가 아니다. raw는 `p03-generation-runtime-{default,allfeatures,clippy}-luna-attemptNN.log`다.
 
 audio read-only 리뷰도 마쳤다. pinned Kira0.12.5의 render-owned sound가 실제 Frame Arc를 잡고 있고 handle reap은 이를 증명하지 않는다. weak observer만으로 callback의 마지막 큰 free를 막을 수 없어 실제 leaf 공유 store·generation alias/voice·cleanup strong sentinel과 정확한 owner baseline이 필요하다. project-audio/service source map은 명세에 반영했으며 audio 새 API·multibank/실제 회수는 아직 구현하지 않았다. 리뷰 담당은 source 수정과 tests를 실행하지 않았다.
+
+## b.2 retained reader 검증 checkpoint
+
+held-frame test는 retained-frame 한도를1로 둔 실제 service에서 CommitApplied 뒤에도 기존 generation1 frame이 남는 것을 확인했다. 그 reader를 해제하면 추가 Step 없이 같은 tick·authority snapshot sequence로 generation2/frame을 게시한다. lifecycle attempt10은1/1 통과했고 raw SHA-256은 `2dde9efb1af7eb7f5fc55c6101f5ee5745248b5cdbf39cf62ae7b15d2d352c03`이다. 이는 headless publication이며 화면 표시 성공이 아니다.
+
+실제 retired PreparedProject Arc를 private test reader가 유지한 attempt11도1/1 통과했다. actor shutdown report가 생겨도 worker owner는 Stopping을 유지했고 source reader를 해제한 뒤에만 Stopped에 도달했다. raw SHA-256은 `7d033ae6e42fbfd93d18ccfb6b128f0e0f59938f706e3e60668fd64c13fc1579`다. test assertion이 panic해도 held Arc가 worker를 영구 보류하지 않도록 test-only mutex-backed RAII guard를 사용했다. 기존 promotion/budget/retry test의 guard 변경 뒤 attempt12도1/1 통과했고 SHA-256은 `7b49cda730e900de292756caf82211a7b20f724e2f53099fbce3d4af232de821`이다.
+
+이 checkpoint의 default runtime은86 unit+2 integration, all-feature는98 unit+2 integration, strict all-target/all-feature Clippy가 통과했다. 각각 `p03-generation-runtime-default-luna-attempt03.log` (`d4827329c4f71b84a550d8520def6ef22718e46b857569f46731eed4b68eca97`), `...allfeatures-luna-attempt02.log` (`7734d9013317672d689056ae92987be3d1d63b3d46380337c2b8c73576de39f2`), `...clippy-luna-attempt02.log` (`054625d27774ac2534699c2977b175205d5cbfaf04e412fdae313fdad0cfe32c`)다. 조정자가 raw의 counts/hash와 production에 노출되지 않는 hooks를 대조했다. 이 source를 다음 중간 commit으로 보존한다.
+
+계약 대조는 exact activation ID 오류·legacy unavailable·실제 staged/pending 중 stop·session startup 실패의 cache cleanup·status 상한의 독립 검증이 아직 없음을 드러냈다. 이 필수 경계의 최소 검증을 기존 service/helpers로 보완한 뒤 CLI/통합/clean package/PR로 확장한다. 위98/86은 해당 checkpoint의 근거이며 후속 source의 최종 인수로 재사용하지 않는다. u64 증가와 Commit capacity의 경계는 source path 및 재현 가능성을 함께 검토한다. b.2·전체 b/c·D1/D2/D3는 계속 미완료다.

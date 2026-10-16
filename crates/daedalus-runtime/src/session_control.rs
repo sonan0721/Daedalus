@@ -1129,6 +1129,8 @@ struct ControlShared {
     panic_after_audio_command_effect: AtomicBool,
     #[cfg(test)]
     panic_after_preparation_command_effect: AtomicBool,
+    #[cfg(test)]
+    panic_after_activation_command_effect: AtomicBool,
     #[cfg(all(test, feature = "audio"))]
     audio_command_effects: AtomicUsize,
     #[cfg(test)]
@@ -1309,6 +1311,8 @@ impl SessionControlService {
             panic_after_audio_command_effect: AtomicBool::new(false),
             #[cfg(test)]
             panic_after_preparation_command_effect: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_after_activation_command_effect: AtomicBool::new(false),
             #[cfg(all(test, feature = "audio"))]
             audio_command_effects: AtomicUsize::new(0),
             #[cfg(test)]
@@ -2602,6 +2606,15 @@ impl ControlActor {
             }
             AssetActivationOperation::Status => unreachable!("status handled above"),
         };
+
+        #[cfg(test)]
+        if self
+            .shared
+            .panic_after_activation_command_effect
+            .swap(false, Ordering::AcqRel)
+        {
+            panic!("injected actor failure after asset activation command effect");
+        }
 
         if caller_id {
             self.caller_command_high_water = Some(
@@ -6003,6 +6016,678 @@ mod tests {
         );
     }
 
+    #[test]
+    fn committed_generation_republishes_after_held_frame_reader_releases_without_step() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut config = default_config();
+        config.limits.max_retained_frames = 1;
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start headless asset activation service");
+        let client = service.session().attach().unwrap();
+
+        let initial_frame = wait_for_frame(&client);
+        let session = initial_frame.session();
+        let initial_digest = initial_frame.source_digest().to_owned();
+        assert_eq!(initial_frame.project_generation(), 1);
+        assert_eq!(initial_frame.tick(), Tick(0));
+        drop(initial_frame);
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_061);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_062, 1);
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+
+        let precommit_frame = wait_for_frame(&client);
+        assert_eq!(precommit_frame.project_generation(), 1);
+        assert_eq!(precommit_frame.tick(), Tick(0));
+        let precommit_sequence = precommit_frame.sequence();
+        let precommit_snapshot_sequence = precommit_frame.authority_snapshot_sequence();
+        let precommit_tick = precommit_frame.tick();
+
+        let commit_result = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(CommandId::from_raw(89_063)),
+                activation,
+                expected_active_generation: 1,
+            }),
+        )
+        .expect("staged candidate should commit while the old frame is retained");
+        assert!(matches!(
+            commit_result,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(result))
+                if matches!(result.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 2, .. })
+        ));
+        let committed = wait_for_activation_state(&client, AssetActivationState::Committed);
+        assert_eq!(committed.active_generation(), 2);
+
+        let still_last_good = wait_for_frame(&client);
+        assert_eq!(still_last_good.project_generation(), 1);
+        assert_eq!(still_last_good.sequence(), precommit_sequence);
+        drop(still_last_good);
+
+        // The held old frame fills the one-frame consumer budget. Releasing it lets the actor
+        // publish the already-committed generation against the same authority snapshot.
+        drop(precommit_frame);
+        let committed_frame = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = wait_for_frame(&client);
+                if frame.project_generation() == 2 {
+                    break frame;
+                }
+                drop(frame);
+                assert!(
+                    Instant::now() < deadline,
+                    "committed generation was not republished after frame release"
+                );
+                thread::yield_now();
+            }
+        };
+        assert_eq!(committed_frame.session(), session);
+        assert_eq!(committed_frame.tick(), precommit_tick);
+        assert_eq!(
+            committed_frame.authority_snapshot_sequence(),
+            precommit_snapshot_sequence
+        );
+        assert!(committed_frame.sequence() > precommit_sequence);
+        assert_ne!(committed_frame.source_digest(), initial_digest);
+
+        drop(committed_frame);
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn activation_shutdown_stays_stopping_until_retired_source_reader_releases() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let promotion_gate = service.block_promotion_for_test(1);
+        let mut source_reader = service.hold_next_retired_project_for_test();
+        let client = service.session().attach().unwrap();
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_071);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_072, 1);
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+        let commit = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(CommandId::from_raw(89_073)),
+                activation,
+                expected_active_generation: 1,
+            }),
+        )
+        .expect("staged candidate should commit");
+        assert!(matches!(
+            commit,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(result))
+                if matches!(result.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 2, .. })
+        ));
+        promotion_gate.wait_until_entered();
+        promotion_gate.release();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = wait_for_activation_state(&client, AssetActivationState::Committed);
+            if status.memory().retired_generation_count() == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not retain the old project source reader"
+            );
+            thread::yield_now();
+        }
+
+        drop(client);
+        service.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.try_shutdown() {
+                Ok(NativeProjectActivationShutdown::Stopping)
+                    if service.shutdown_report().is_some() =>
+                {
+                    break;
+                }
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "actor did not stop while retired source remained leased"
+                    );
+                    thread::yield_now();
+                }
+                Ok(NativeProjectActivationShutdown::Stopped) => {
+                    panic!("worker reported Stopped while a retired source reader was held");
+                }
+                Err(error) => panic!("activation owner shutdown failed: {error}"),
+            }
+        }
+        assert_eq!(
+            service.shutdown_report().unwrap().termination,
+            SessionTermination::StopRequested
+        );
+        assert_eq!(
+            service.try_shutdown(),
+            Ok(NativeProjectActivationShutdown::Stopping),
+            "a held source Arc must keep worker shutdown in Stopping"
+        );
+
+        source_reader.release();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.try_shutdown() {
+                Ok(NativeProjectActivationShutdown::Stopped) => break,
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "worker did not finish after retired source release"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("activation owner shutdown failed after release: {error}"),
+            }
+        }
+        assert_eq!(
+            service.shutdown_report().unwrap().termination,
+            SessionTermination::StopRequested
+        );
+    }
+
+    #[test]
+    fn commit_promotion_retains_retired_charge_and_prepare_retries_after_reclamation() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut measurer = NativeProjectPreparationService::start(
+            NativeProjectPreparationOptions::new(fixture.path()),
+        )
+        .expect("measure the initial project catalog");
+        let active_bytes = measurer
+            .initial_project()
+            .asset_import_report()
+            .expect("asset report")
+            .memory()
+            .cooked_accounted_bytes();
+        stop_preparation_owner(&mut measurer);
+        drop(measurer);
+
+        let maximum = active_bytes.checked_mul(2).expect("small test budget");
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path())
+                .with_max_catalog_accounted_bytes(maximum),
+            default_config(),
+        )
+        .expect("start activation with exactly one transition reserve");
+        let promotion_gate = service.block_promotion_for_test(1);
+        let mut retired_project_hold = service.hold_next_retired_project_for_test();
+        let client = service.session().attach().unwrap();
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_031);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let preparation = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Status),
+        )
+        .expect("candidate memory should be inspectable");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(preparation)) =
+            preparation
+        else {
+            panic!("preparation status returned the wrong result");
+        };
+        assert_eq!(
+            preparation
+                .ready_candidate()
+                .unwrap()
+                .memory()
+                .cooked_accounted_bytes(),
+            active_bytes
+        );
+
+        let activation = stage_activation_candidate(&client, candidate, 89_032, 1);
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+        let commit = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(CommandId::from_raw(89_033)),
+                activation,
+                expected_active_generation: 1,
+            }),
+        )
+        .expect("candidate should commit");
+        assert!(matches!(
+            commit,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(result))
+                if matches!(result.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 2, .. })
+        ));
+        promotion_gate.wait_until_entered();
+
+        let committing = wait_for_activation_state(&client, AssetActivationState::Committed);
+        let memory = committing.memory();
+        assert_eq!(memory.active_cooked_accounted_bytes(), active_bytes);
+        assert_eq!(memory.retired_cooked_accounted_bytes(), active_bytes);
+        assert_eq!(memory.retired_generation_count(), 1);
+        assert_eq!(memory.total_cooked_accounted_bytes(), maximum);
+
+        let next_prepare = SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+            command_id: Some(CommandId::from_raw(89_034)),
+        });
+        let mut pending_promotion_retry = submit_after_busy(&client, next_prepare.clone());
+        assert!(
+            matches!(
+                wait_terminal(&pending_promotion_retry).terminal().unwrap(),
+                Err(SessionRequestError::PreparationBusy)
+            ),
+            "a new preparation cannot overtake the worker promotion"
+        );
+        pending_promotion_retry.acknowledge().unwrap();
+
+        promotion_gate.release();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = wait_for_activation_state(&client, AssetActivationState::Committed);
+            if status.memory().retired_generation_count() == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "retired project hold was not published"
+            );
+            thread::yield_now();
+        }
+
+        let mut capacity_retry = submit_after_busy(&client, next_prepare.clone());
+        assert!(
+            matches!(
+                wait_terminal(&capacity_retry).terminal().unwrap(),
+                Err(SessionRequestError::PreparationCapacity)
+            ),
+            "the held retired project remains charged against the catalog budget"
+        );
+        capacity_retry.acknowledge().unwrap();
+
+        retired_project_hold.release();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = wait_for_activation_state(&client, AssetActivationState::Committed);
+            if status.memory().retired_generation_count() == 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not reclaim released retired Arc"
+            );
+            thread::yield_now();
+        }
+        let accepted = terminal_result_after_preparation_busy(&client, next_prepare)
+            .expect("the same unconsumed Prepare command should succeed after reclamation");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(accepted)) =
+            accepted
+        else {
+            panic!("prepare retry returned the wrong result");
+        };
+        let AssetPreparationCommandOutcome::PrepareAccepted {
+            candidate: next_candidate,
+        } = *accepted.outcome()
+        else {
+            panic!("prepare retry did not accept the next epoch");
+        };
+        assert_eq!(next_candidate.epoch(), 2);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, 2);
+
+        let cancel = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
+                command_id: Some(CommandId::from_raw(89_035)),
+                candidate: next_candidate,
+            }),
+        )
+        .expect("cleanup candidate should be cancellable");
+        assert!(matches!(
+            cancel,
+            SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_))
+        ));
+        wait_for_preparation_state(&client, PreparationState::Cancelled, 2);
+
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn delayed_ready_stage_result_after_activation_cancel_cannot_restage_candidate() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let gate = service.block_stage_result_for_test(1);
+        let client = service.session().attach().unwrap();
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_001);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_002, 1);
+        gate.wait_until_entered();
+
+        let cancel = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Cancel {
+                command_id: Some(CommandId::from_raw(89_003)),
+                activation,
+            }),
+        )
+        .expect("staging activation should cancel while its result is held");
+        assert!(matches!(
+            cancel,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(result))
+                if matches!(result.outcome(), AssetActivationCommandOutcome::CancelAccepted { activation: cancelled } if *cancelled == activation)
+        ));
+
+        gate.release();
+        let cancelled = wait_for_activation_state(&client, AssetActivationState::Cancelled);
+        assert!(cancelled.latest_failure().is_none());
+        assert_eq!(
+            cancelled.current_activation().map(|summary| summary.id()),
+            Some(activation)
+        );
+        let preparation = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Status),
+        )
+        .expect("preparation status should remain available");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(preparation)) =
+            preparation
+        else {
+            panic!("preparation status returned the wrong result");
+        };
+        assert_eq!(preparation.state(), PreparationState::Cancelled);
+        assert!(preparation.ready_candidate().is_none());
+
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn delayed_incompatible_stage_result_is_ignored_after_new_prepare_supersedes_it() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let gate = service.block_stage_result_for_test(1);
+        let client = service.session().attach().unwrap();
+
+        std::fs::write(fixture.path().join("scene.json"), scene_with_entities(2)).unwrap();
+        let first_candidate = prepare_activation_candidate(&client, 89_011);
+        wait_for_preparation_state(
+            &client,
+            PreparationState::CpuPrepared,
+            first_candidate.epoch(),
+        );
+        let _old_activation = stage_activation_candidate(&client, first_candidate, 89_012, 1);
+        gate.wait_until_entered();
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 39");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let second_candidate = prepare_activation_candidate(&client, 89_013);
+        assert_eq!(second_candidate.epoch(), 2);
+        gate.release();
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, 2);
+
+        let superseded = wait_for_activation_state(&client, AssetActivationState::Superseded);
+        assert!(superseded.latest_failure().is_none());
+        let preparation = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Status),
+        )
+        .expect("preparation status should expose the new desired candidate");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(preparation)) =
+            preparation
+        else {
+            panic!("preparation status returned the wrong result");
+        };
+        assert_eq!(
+            preparation
+                .ready_candidate()
+                .map(|candidate| candidate.id()),
+            Some(second_candidate)
+        );
+        assert!(
+            preparation
+                .ready_candidate()
+                .is_some_and(|candidate| candidate.is_current())
+        );
+
+        let new_activation = stage_activation_candidate(&client, second_candidate, 89_014, 1);
+        let staged = wait_for_activation_state(&client, AssetActivationState::Staged);
+        assert_eq!(
+            staged.current_activation().map(|summary| summary.id()),
+            Some(new_activation)
+        );
+        assert!(staged.latest_failure().is_none());
+
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn actor_panic_after_activation_commit_effect_reports_unknown_and_cleans_worker() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let client = service.session().attach().unwrap();
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_021);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_022, 1);
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+        service
+            .session()
+            .shared
+            .panic_after_activation_command_effect
+            .store(true, Ordering::Release);
+
+        let command_id = CommandId::from_raw(89_023);
+        let mut commit = submit_after_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(command_id),
+                activation,
+                expected_active_generation: 1,
+            }),
+        );
+        let terminal = wait_terminal(&commit)
+            .terminal()
+            .expect("post-effect actor panic must resolve the active ticket")
+            .clone();
+        assert_eq!(
+            terminal,
+            Err(SessionRequestError::OutcomeUnknown { command_id })
+        );
+        commit.acknowledge().unwrap();
+        drop(client);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.try_shutdown() {
+                Err(crate::NativeProjectActivationShutdownError::ActorFailed) => break,
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "activation owner failed to clean up"
+                    );
+                    thread::yield_now();
+                }
+                other => panic!("unexpected shutdown result after actor panic: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            service.shutdown_report().map(|report| &report.termination),
+            Some(SessionTermination::Panicked(_))
+        ));
+        assert_eq!(
+            service.try_shutdown(),
+            Err(crate::NativeProjectActivationShutdownError::ActorFailed),
+            "repeated shutdown must preserve the actor failure"
+        );
+    }
+
+    #[test]
+    fn activation_owner_preserves_worker_panic_after_join() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let gate = service.panic_preparation_for_test(1);
+        let client = service.session().attach().unwrap();
+
+        let accepted = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(CommandId::from_raw(89_041)),
+            }),
+        )
+        .expect("candidate preparation should be accepted before worker panic");
+        assert!(matches!(
+            accepted,
+            SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_))
+        ));
+        gate.wait_until_entered();
+        gate.release();
+        drop(client);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.try_shutdown() {
+                Err(crate::NativeProjectActivationShutdownError::WorkerPanicked) => break,
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "panicked activation owner did not stop"
+                    );
+                    thread::yield_now();
+                }
+                other => panic!("unexpected shutdown result after worker panic: {other:?}"),
+            }
+        }
+        let termination = service.shutdown_report().map(|report| &report.termination);
+        assert!(
+            termination == Some(&SessionTermination::StopRequested)
+                || matches!(
+                    termination,
+                    Some(SessionTermination::EngineError(message))
+                        if message == "project preparation worker panicked"
+                ),
+            "worker panic may be observed by the actor before or after owner stop: {termination:?}"
+        );
+        assert_eq!(
+            service.try_shutdown(),
+            Err(crate::NativeProjectActivationShutdownError::WorkerPanicked),
+            "a later poll cannot report Stopped after a worker panic"
+        );
+    }
+
+    #[test]
+    fn dropping_activation_owner_does_not_wait_for_worker_and_cache_releases_after_cleanup() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let gate = service.block_preparation_for_test(1);
+        let client = service.session().attach().unwrap();
+        let accepted = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(CommandId::from_raw(89_051)),
+            }),
+        )
+        .expect("candidate preparation should be accepted");
+        assert!(matches!(
+            accepted,
+            SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_))
+        ));
+        gate.wait_until_entered();
+        drop(client);
+
+        let (dropped_sender, dropped_receiver) = std::sync::mpsc::sync_channel(1);
+        let drop_thread = thread::spawn(move || {
+            drop(service);
+            let _ = dropped_sender.send(());
+        });
+        if dropped_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .is_err()
+        {
+            gate.release();
+            let _ = drop_thread.join();
+            panic!("dropping the activation owner waited for blocked import work");
+        }
+        drop_thread
+            .join()
+            .expect("owner drop thread should return normally");
+
+        let cache_root = fixture.path().join(".daedalus/cache");
+        assert!(
+            daedalus_content::FileCookCache::open(
+                &cache_root,
+                daedalus_content::CacheLimits::default()
+            )
+            .is_err(),
+            "a detached worker retains the cache owner until it has cleaned up"
+        );
+        gate.release();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match daedalus_content::FileCookCache::open(
+                &cache_root,
+                daedalus_content::CacheLimits::default(),
+            ) {
+                Ok(cache) => {
+                    drop(cache);
+                    break;
+                }
+                Err(_) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "worker did not release cache ownership"
+                    );
+                    thread::yield_now();
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "audio")]
     #[test]
     fn held_preparation_worker_does_not_block_reserved_step_or_same_actor_audio() {
@@ -6266,6 +6951,56 @@ mod tests {
         }
     }
 
+    fn prepare_activation_candidate(
+        client: &super::SessionControlClient,
+        raw_command_id: u128,
+    ) -> PreparationId {
+        let result = terminal_result_after_preparation_busy(
+            client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(CommandId::from_raw(raw_command_id)),
+            }),
+        )
+        .expect("candidate preparation should be accepted");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(command)) =
+            result
+        else {
+            panic!("prepare returned the wrong result");
+        };
+        let AssetPreparationCommandOutcome::PrepareAccepted { candidate } = command.outcome()
+        else {
+            panic!("prepare did not return a candidate");
+        };
+        *candidate
+    }
+
+    fn stage_activation_candidate(
+        client: &super::SessionControlClient,
+        candidate: PreparationId,
+        raw_command_id: u128,
+        expected_active_generation: u64,
+    ) -> crate::ActivationId {
+        let result = terminal_result_after_activation_busy(
+            client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                command_id: Some(CommandId::from_raw(raw_command_id)),
+                candidate,
+                expected_active_generation,
+            }),
+        )
+        .expect("candidate should be accepted for staging");
+        let SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(command)) =
+            result
+        else {
+            panic!("stage returned the wrong result");
+        };
+        let AssetActivationCommandOutcome::StageAccepted { activation, .. } = command.outcome()
+        else {
+            panic!("stage did not return an activation");
+        };
+        *activation
+    }
+
     fn stop_activation_service(service: &mut NativeProjectActivationService) {
         service.request_stop();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -6280,6 +7015,24 @@ mod tests {
                     thread::yield_now();
                 }
                 Err(error) => panic!("activation service shutdown failed: {error}"),
+            }
+        }
+    }
+
+    fn stop_preparation_owner(owner: &mut NativeProjectPreparationService) {
+        owner.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match owner.try_shutdown() {
+                Ok(PreparationWorkerShutdown::Stopped) => return,
+                Ok(PreparationWorkerShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "preparation worker shutdown timed out"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("preparation worker shutdown failed: {error}"),
             }
         }
     }

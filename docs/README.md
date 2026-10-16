@@ -50,6 +50,7 @@
 | [2D 타일 시뮬레이션](03-architecture/tile-simulation.md) | 유체·조명·파괴 지형의 병렬 계산과 보존 규칙 |
 | [에셋·UI·애니메이션](03-architecture/assets-ui-animation.md) | DCC부터 쿠킹·입력·글꼴·액션·오디오까지 지원 경계 |
 | [에셋 import·cook·resource](03-architecture/asset-import-cook-and-residency.md) | 공식 포맷 조사와 모델/PNG/sprite/WAV·증분 cache·generation·장치 자원 수명의 상세 계약 |
+| [공통 에셋 import 구현](03-architecture/asset-import-foundation.md) | 네 CPU 포맷·불변 IR·native/byte resolver·유한 cache·CLI의 실제 구현/검증 계약 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |
 | [네트워크·영속화](03-architecture/networking-and-persistence.md) | 서버 권한·관심 영역·월드 변경·복구 설계 |

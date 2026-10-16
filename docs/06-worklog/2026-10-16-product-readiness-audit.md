@@ -226,3 +226,12 @@ debug CLI SHA-256은 `211f853ec5ea37d0462d83fa1cdf9df1941ba219db2b764c7796e20e31
 P02.2의 renderer/project-control source·Python·managed/bridge source는 바뀌지 않아 이전 native22·Python52·.NET 검증을 이 source의 새 실행처럼 복제해 기록하지 않았다. 필수 PR CI는 새 head에서 별도로 수행한다. P02 foundation의 로컬 기능 근거는 갖췄지만 PR 검사/병합 전에 P03 코드에 착수하지 않는다. 전체 P02·D1/D2/D3는 계속 미완료다.
 
 clean code checkpoint `06e9e02fbebac15e337230ca2c2ff34a6c923847`의 release/window package는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-06e9e02fbeba-clean-20261016T024621Z-c2e3779c72754cfbad16f26a809a6eb5/`다. dirty=false·manifest/source identity·archive/notice/inventory/hash·extracted CPU18 smoke를 통과했고 binary SHA-256은 `d680d39878506a4624994713da5ed3875d55a2b98b4781f76768020c04f6cfbc`다. Cargo cached release build는 8.31초다. 같은 executable의 실제 Metal fixture 창은 223 surface/218 loading frames·final tick 124·terrain job 1개 **완료**, 취소 0·active 0·time_limit/stop_requested·result byte limit 1 MiB·종료 credit 0을 보고했다(`p02-legacy-leases-packaged-window.json`). 앞선 debug의 job 취소와 다른 실제 결과를 보존하며, debug/release 차이를 이번 refactor의 속도 개선율로 비교하지 않는다.
+
+
+## PR9 병합과 P03.1 착수
+
+[PR9](https://github.com/sonan0721/Daedalus/pull/9)의 최종 head `b6e93e16426fc4f43e918742643252277abc9eb4`는 docs/Rust/managed integration과 macOS/Linux package 다섯 job을 모두 통과했다. run ID는 docs `38842242664`, Rust `38842242677`, managed `38842242701`, package `38842242698`이며 Publish는 skipped다. main squash commit은 `66121d7676727b496d894d1c64a7fc6616a3551d`다. 이 근거로 P02 foundation의 CI/병합 대기를 해소했으며 전체 P02/D1/D2/D3는 계속 미완료다.
+
+다음 branch `feat/asset-import-foundation`은 [새 P03.1 계약](../03-architecture/asset-import-foundation.md)을 먼저 작성했다. 모든 포맷이 resolver/keys/cache/errors를 다시 만들지 않도록 CPU core/immutable catalog, format drivers, CLI/shared smoke를 disjoint 소유로 나눈다. core 담당 Luna만 manifest/lock/shared target을 소유하고 정확한 API를 먼저 공유한다. 다른 두 Luna는 API 합의 전 source를 쓰지 않는다. root는 MD·1차 자료/공개 asset provenance·리뷰·독립 검증을 맡는다.
+
+이 작업은 모델·PNG·atlas·WAV의 실제 CPU payload/무효화/CLI까지 구축한다. renderer의 UV/texture, sprite/오디오 소비·실행 중 세대 교체는 다음 P03.2/3에 남는다. source parser/cache만으로 사용자에게 실제 textured game 제작이 가능하다고 보고하지 않는다.

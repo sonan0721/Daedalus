@@ -1,0 +1,31 @@
+# P03.2b 스프라이트·정사영 실행 작업 기록
+
+상태: 상세 계약 확정·Luna 구현 착수 전·인수 미통과 · 2026-10-16
+
+## 두 문서를 만든 이유
+
+[스프라이트·정사영 상세 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)은 기존 atlas CPU IR을 실제 GPU draw와 authority camera에 연결하기 전에 좌표·alpha·sort·공개 API·유한 자원·실제 view 관측을 정한다. 이 작업 기록은 source 감사/설계와 구현/실측을 나눠, 작은 atlas 검사나 새 MD 자체를 2D 엔진 완성으로 보고하지 않기 위해 만든다.
+
+선행 P03.2a는 [PR11](https://github.com/sonan0721/Daedalus/pull/11) 최종 head `770bc71`의 다섯 CI/두 packaged-assets step, clean release/extracted assets31/native-model24, main `6d1711faf306bf644bf21235c86c9a31d7208fff` 동일 tree까지 인수했다. 새 branch는 `feat/asset-sprite-consumer`다. 전체 D1→D2→D3와 P03.2는 계속 열려 있다.
+
+## source 감사와 선택
+
+1. Luna xhigh가 atlas IR/loader/renderer/window/authority snapshot을 read-only 감사했다. atlas는 nearest/no-mip을 이미 보장하지만 sprite binding·alpha shader·orthographic projection은 없었다.
+2. 기존256/512 geometry-entry 한도와 최대16,384 atlas region을 고려해 per-region quad 대신88-byte unit quad1개와 slot당16-byte UV row를 선택했다. 기본 최대 UV storage는256KiB이며 공통 예산/retirement에 포함한다.
+3. texture upload helper가 full mip chain만 받는 것을 확인했다. atlas base-only payload를 같은 texture key/cache/admission에 추가하고 별도 sprite cache/decoder를 만들지 않는다.
+4. public Camera/ProjectPresentation/RenderInstance/보고 struct literal은 유지한다. opaque RenderView·actual PacketViewSubmission·PresentedView·통합 presentation outcome 하나를 추가하고 기존 API는 adapter로 남긴다. Busy fallback의 실제 packet/projection을 기록한다.
+5. window가 입력 없이도 local_camera를 만들어 이후 authority camera를 가릴 수 있음을 확인했다. 실제 입력 변경 때만 local view override를 생성한다. 2D pan/zoom과 actual view JSON을 함께 검증한다.
+6. PNG의 straight alpha와 pinned wgpu blend/format 원본을 확인했다. sRGB target에서 linear unlit alpha 합성, opaque 뒤 별도 depth-free sprite pass다. non-sRGB-only target의 sprite는 write 이전 typed reject로 둔다.
+
+이 항목들은 source/설계 리뷰이며 실행 결과가 아니다. sprite 외 일반 고해상도 filtering·tile/lighting/animation/UI·source reload는 후속 계약이다.
+
+## 분담과 검사 순서
+
+| 소유자 | 범위 | 상태 |
+| --- | --- | --- |
+| Luna xhigh content | private sprite/camera2d binding·strict schema/revalidation·metadata precharge·CPU 검사 | 착수 전 |
+| Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | 착수 전 |
+| Luna xhigh CLI | 기존 공통 report·opt-in sprite smoke·timeout/cleanup 회귀 | 착수 전 |
+| 조정자 | MD·source/API 리뷰·통합/실제 Mac·원본 QA·Git/PR | 계약 확정; 구현 검사 미실행 |
+
+content→renderer→CLI→조정자 순서로 Cargo/shared target 소유권을 넘긴다. source 파일 소유권을 분리하고 새 dependency/두 번째 cold target/새 packaging backend는 계획하지 않는다. focused→통합→hardware→clean package→최종 다섯 PR CI/main 동일 tree가 모두 필요하다. 검사 명령/입력/소스·binary identity/counter는 실제 실행 후에만 추가한다.

@@ -53,6 +53,8 @@
 | [에셋 import·cook·resource](03-architecture/asset-import-cook-and-residency.md) | 공식 포맷 조사와 모델/PNG/sprite/WAV·증분 cache·generation·장치 자원 수명의 상세 계약 |
 | [공통 에셋 import 구현](03-architecture/asset-import-foundation.md) | 네 CPU 포맷·불변 IR·native/byte resolver·유한 cache·CLI의 실제 구현/검증 계약 |
 | [에셋 실제 실행 소비](03-architecture/asset-runtime-consumers.md) | 다음 model/texture·sprite·audio 연결의 공통 packet·authority·자원 공유·검증 초안 |
+| [스프라이트·정사영 계약](03-architecture/sprite-runtime-and-orthographic-view.md) | P03.2b의 실제 atlas/alpha·공통 unit quad·authority camera·실제 표시 view와 반복 검증 경계 |
+| [스프라이트 실행 작업 기록](06-worklog/2026-10-16-sprite-runtime.md) | P03.2b의 source/API 감사·반복 제거 선택·Luna 분담과 후속 실측을 구분 |
 | [모델·텍스처 실행 계약](03-architecture/model-texture-runtime.md) | P03.2a의 실제 project binding·공통 창/capture·cache pin 해제·GPU 한도/색/수명·회귀 기준 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |

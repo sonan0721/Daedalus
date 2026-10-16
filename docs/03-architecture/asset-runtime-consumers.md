@@ -1,6 +1,6 @@
 # P03.2 실제 model·texture·sprite·audio 소비
 
-상태: a 인수 통과, b 상세 설계 중·c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
+상태: a 인수 통과, b 상세 계약 확정·c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
 
 ## 목적과 선행 조건
 
@@ -29,7 +29,7 @@ AudioService는 이미 PCM·voice·offline/native backend를 가진다. importer
 schema 1의 generic component envelope 안에 additive component를 정의한다. 기존 loader의 지원 component 목록과 asset-aware loader의 목록을 구분하고, 미지원 실행 경로는 위치 있는 Unsupported를 반환한다.
 
 - `daedalus.model_renderer`: 단일 model asset 참조. `asset_refs`와 `data.model`의 일치·중복·catalog kind를 검증한다. glTF scene 선택은 model import settings를 따른다. 첫 경로는 imported primitive material을 그대로 쓰고 entity-level material override를 받지 않는다.
-- `daedalus.sprite_renderer`: atlas asset와 stable region ID를 참조한다. image asset를 다시 이름으로 추측하거나 atlas source를 재파싱하지 않는다. tint/transform/layer의 정확한 JSON·기준 좌표는 P03.2b 착수 전 확정한다.
+- `daedalus.sprite_renderer`: atlas asset와 stable region ID를 참조한다. image asset를 다시 이름으로 추측하거나 atlas source를 재파싱하지 않는다. tint/transform/layer의 정확한 JSON·기준 좌표·정사영/actual view는 [P03.2b 상세 계약](sprite-runtime-and-orthographic-view.md)에 확정했다.
 - audio: 명시적 asset 참조와 play/stop 제어를 사용한다. load만으로 소리를 자동 재생하지 않는다. command·volume·loop·voice 조회·실패 의미는 P03.2c 착수 전 확정한다.
 
 새 binding은 private PreparedProject의 별도 validated collection/accessor로 제공하는 방향이다. PreparedEntity를 공개 필드 추가로 깨거나 model 참조를 legacy mesh ID에 숨기지 않는다. 같은 entity에 서로 충돌하는 renderer component를 달았을 때의 오류와 source/JSON path를 명시한다. 현재 root entity 제약과 glTF 내부 node hierarchy는 다른 계층이며, model node 지원을 일반 scene hierarchy 지원으로 홍보하지 않는다.

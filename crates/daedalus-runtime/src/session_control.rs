@@ -18,7 +18,12 @@ use daedalus_world::{
 };
 use thiserror::Error;
 
+use crate::MAX_PREPARATION_STATUS_RESULT_BYTES;
 use crate::project::MAX_PROJECT_SESSION_ENTITIES;
+use crate::project_preparation::{
+    AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
+    AssetPreparationResult, PreparationId, ProjectPreparationPort, ProjectPreparationPortError,
+};
 use crate::session_primitives::{
     CreditError, CreditLease, CreditLimits, CreditPool, LatestValueMailbox, MailboxError,
     StopSignal,
@@ -267,6 +272,7 @@ pub enum SessionOperation {
         count: u32,
     },
     Status,
+    AssetPreparation(AssetPreparationOperation),
     #[cfg(feature = "audio")]
     Audio(SessionAudioOperation),
 }
@@ -280,25 +286,40 @@ impl SessionOperation {
                 | Self::ListTransforms { .. }
                 | Self::Status
         );
+        let preparation = matches!(
+            self,
+            Self::AssetPreparation(AssetPreparationOperation::Status)
+        );
         #[cfg(feature = "audio")]
-        return world
-            || matches!(
-                self,
-                Self::Audio(
-                    SessionAudioOperation::Status
-                        | SessionAudioOperation::Clips { .. }
-                        | SessionAudioOperation::Voice { .. }
-                        | SessionAudioOperation::Voices { .. }
+        {
+            world
+                || preparation
+                || matches!(
+                    self,
+                    Self::Audio(
+                        SessionAudioOperation::Status
+                            | SessionAudioOperation::Clips { .. }
+                            | SessionAudioOperation::Voice { .. }
+                            | SessionAudioOperation::Voices { .. }
+                    )
                 )
-            );
+        }
         #[cfg(not(feature = "audio"))]
-        world
+        {
+            world || preparation
+        }
     }
 
     fn needs_mutate(&self) -> bool {
         let world = matches!(
             self,
             Self::SpawnTransform { .. } | Self::SetTransform { .. }
+        ) || matches!(
+            self,
+            Self::AssetPreparation(
+                AssetPreparationOperation::Prepare { .. }
+                    | AssetPreparationOperation::Cancel { .. }
+            )
         );
         #[cfg(feature = "audio")]
         return world || matches!(self, Self::Audio(SessionAudioOperation::Command { .. }));
@@ -439,6 +460,7 @@ pub enum SessionRequestResult {
     Command(CommandTerminalResult),
     Step(Vec<StepReport>),
     Status(SessionStatus),
+    AssetPreparation(AssetPreparationResult),
     #[cfg(feature = "audio")]
     Audio(SessionAudioResult),
 }
@@ -478,12 +500,27 @@ pub enum SessionRequestError {
     ReplayWindowExpired { command_id: u128, high_water: u128 },
     #[error("pending command {0:?} has no service-owned request record")]
     UnknownPendingCommand(CommandId),
-    #[cfg(feature = "audio")]
     #[error("could not reserve space in the bounded command replay ledger")]
     ReplayStorageUnavailable,
     #[cfg(feature = "audio")]
     #[error("audio operations require a service started with audio enabled")]
     AudioUnavailable,
+    #[error("asset preparation operations require a service started with preparation enabled")]
+    AssetPreparationUnavailable,
+    #[error("asset preparation state is busy")]
+    PreparationBusy,
+    #[error("asset preparation capacity is exhausted")]
+    PreparationCapacity,
+    #[error("asset preparation worker is stopping or stopped")]
+    PreparationStopped,
+    #[error("candidate ID is invalid for this session")]
+    InvalidCandidate,
+    #[error("candidate has expired from the current preparation generation")]
+    CandidateExpired,
+    #[error("candidate is not active and cannot be cancelled")]
+    CandidateNotActive,
+    #[error("asset preparation epoch space is exhausted")]
+    PreparationEpochExhausted,
     #[cfg(feature = "audio")]
     #[error(transparent)]
     Audio(#[from] SessionAudioError),
@@ -516,6 +553,8 @@ pub enum SessionSubmitError {
     #[cfg(feature = "audio")]
     #[error("this session was started without audio enabled")]
     AudioUnavailable,
+    #[error("this session was started without asset preparation enabled")]
+    AssetPreparationUnavailable,
 }
 
 #[derive(Debug, Error)]
@@ -537,6 +576,10 @@ pub enum SessionControlStartError {
     #[cfg(feature = "audio")]
     #[error("project audio startup failed: {0}")]
     Audio(#[from] crate::project_audio::SessionAudioStartError),
+    #[error("project preparation port could not bind: {0}")]
+    PreparationPort(#[from] ProjectPreparationPortError),
+    #[error("preparation port does not own the supplied prepared project")]
+    PreparationProjectMismatch,
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -1014,6 +1057,7 @@ struct ControlShared {
     accepting: AtomicBool,
     #[cfg(feature = "audio")]
     audio_enabled: bool,
+    asset_preparation_enabled: bool,
     stop: StopSignal,
     queue: RequestQueue,
     frames: Arc<LatestValueMailbox<SessionFrame>>,
@@ -1028,6 +1072,8 @@ struct ControlShared {
     panic_after_next_engine_step: AtomicBool,
     #[cfg(all(test, feature = "audio"))]
     panic_after_audio_command_effect: AtomicBool,
+    #[cfg(test)]
+    panic_after_preparation_command_effect: AtomicBool,
     #[cfg(all(test, feature = "audio"))]
     audio_command_effects: AtomicUsize,
     #[cfg(test)]
@@ -1070,7 +1116,42 @@ impl SessionControlService {
         let audio_options = None;
         #[cfg(not(feature = "audio"))]
         let audio_options = ();
-        Self::start_shared_inner(prepared, config, audio_options)
+        Self::start_shared_inner(prepared, config, audio_options, None)
+    }
+
+    /// Starts the existing project actor with an optional native preparation control capability.
+    pub fn start_shared_with_preparation(
+        prepared: Arc<PreparedProject>,
+        config: SessionControlConfig,
+        preparation_port: ProjectPreparationPort,
+    ) -> Result<Self, SessionControlStartError> {
+        if !preparation_port.matches_initial_project(&prepared) {
+            return Err(SessionControlStartError::PreparationProjectMismatch);
+        }
+        #[cfg(feature = "audio")]
+        let audio_options = None;
+        #[cfg(not(feature = "audio"))]
+        let audio_options = ();
+        Self::start_shared_inner(prepared, config, audio_options, Some(preparation_port))
+    }
+
+    /// Starts one project actor with both optional native preparation and audio services.
+    #[cfg(feature = "audio")]
+    pub fn start_shared_with_preparation_and_audio(
+        prepared: Arc<PreparedProject>,
+        config: SessionControlConfig,
+        preparation_port: ProjectPreparationPort,
+        audio_options: SessionAudioOptions,
+    ) -> Result<Self, SessionControlStartError> {
+        if !preparation_port.matches_initial_project(&prepared) {
+            return Err(SessionControlStartError::PreparationProjectMismatch);
+        }
+        Self::start_shared_inner(
+            prepared,
+            config,
+            Some(audio_options),
+            Some(preparation_port),
+        )
     }
 
     #[cfg(feature = "audio")]
@@ -1079,13 +1160,14 @@ impl SessionControlService {
         config: SessionControlConfig,
         audio_options: SessionAudioOptions,
     ) -> Result<Self, SessionControlStartError> {
-        Self::start_shared_inner(prepared, config, Some(audio_options))
+        Self::start_shared_inner(prepared, config, Some(audio_options), None)
     }
 
     fn start_shared_inner(
         prepared: Arc<PreparedProject>,
         mut config: SessionControlConfig,
         audio_options: ActorAudioOptions,
+        preparation_port: Option<ProjectPreparationPort>,
     ) -> Result<Self, SessionControlStartError> {
         config.limits.validate(&config.engine)?;
         if prepared.entities().len() > MAX_PROJECT_SESSION_ENTITIES {
@@ -1114,6 +1196,7 @@ impl SessionControlService {
             accepting: AtomicBool::new(true),
             #[cfg(feature = "audio")]
             audio_enabled: audio_options.is_some(),
+            asset_preparation_enabled: preparation_port.is_some(),
             stop: StopSignal::default(),
             queue: RequestQueue::new(config.limits.command_capacity),
             frames: Arc::new(LatestValueMailbox::new(config.limits.max_retained_frames)),
@@ -1139,6 +1222,8 @@ impl SessionControlService {
             panic_after_next_engine_step: AtomicBool::new(false),
             #[cfg(all(test, feature = "audio"))]
             panic_after_audio_command_effect: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_after_preparation_command_effect: AtomicBool::new(false),
             #[cfg(all(test, feature = "audio"))]
             audio_command_effects: AtomicUsize::new(0),
             #[cfg(test)]
@@ -1157,6 +1242,7 @@ impl SessionControlService {
                     prepared,
                     config,
                     audio_options,
+                    preparation_port,
                     actor_shared,
                     startup_sender,
                 )
@@ -1181,6 +1267,12 @@ impl SessionControlService {
 
     pub fn attach(&self) -> Result<SessionControlClient, SessionAttachError> {
         self.attach_with_capabilities(SessionCapabilities::trusted_local())
+    }
+
+    /// Whether this actor owns the optional native preparation worker capability.
+    #[must_use]
+    pub fn asset_preparation_enabled(&self) -> bool {
+        self.shared.asset_preparation_enabled
     }
 
     pub fn attach_with_capabilities(
@@ -1287,6 +1379,12 @@ impl SessionControlClient {
         self.attachment.id
     }
 
+    /// Whether this attachment is connected to a service with native asset preparation enabled.
+    #[must_use]
+    pub fn asset_preparation_enabled(&self) -> bool {
+        self.shared.asset_preparation_enabled
+    }
+
     /// Whether the session has closed request admission or stopped. A retained latest frame may
     /// still be readable after this returns true; frame availability is not a liveness signal.
     #[must_use]
@@ -1308,6 +1406,11 @@ impl SessionControlClient {
         if matches!(&operation, SessionOperation::Audio(_)) && !self.shared.audio_enabled {
             return Err(SessionSubmitError::AudioUnavailable);
         }
+        if matches!(&operation, SessionOperation::AssetPreparation(_))
+            && !self.shared.asset_preparation_enabled
+        {
+            return Err(SessionSubmitError::AssetPreparationUnavailable);
+        }
         if operation.needs_inspect() && !self.attachment.capabilities.inspect
             || operation.needs_mutate() && !self.attachment.capabilities.mutate
             || operation.is_step() && !self.attachment.capabilities.manual_step
@@ -1322,6 +1425,13 @@ impl SessionControlClient {
             } => Some(*id),
             #[cfg(feature = "audio")]
             SessionOperation::Audio(SessionAudioOperation::Command {
+                command_id: Some(id),
+                ..
+            }) => Some(*id),
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(id),
+            })
+            | SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
                 command_id: Some(id),
                 ..
             }) => Some(*id),
@@ -1435,17 +1545,23 @@ fn map_credit_error(_error: CreditError) -> SessionSubmitError {
     SessionSubmitError::ResultCapacity
 }
 
+fn preparation_port_error(error: ProjectPreparationPortError) -> SessionRequestError {
+    match error {
+        ProjectPreparationPortError::Busy => SessionRequestError::PreparationBusy,
+        ProjectPreparationPortError::Stopped => SessionRequestError::PreparationStopped,
+        ProjectPreparationPortError::InvalidEpoch => SessionRequestError::InvalidCandidate,
+        ProjectPreparationPortError::NoActiveCandidate => SessionRequestError::CandidateNotActive,
+        ProjectPreparationPortError::Capacity => SessionRequestError::PreparationCapacity,
+        ProjectPreparationPortError::SessionMismatch
+        | ProjectPreparationPortError::AlreadyTaken
+        | ProjectPreparationPortError::AlreadyBound => SessionRequestError::ActorFailed(
+            "preparation port violated its session binding".to_owned(),
+        ),
+    }
+}
+
 fn replay_storage_error() -> SessionRequestError {
-    #[cfg(feature = "audio")]
-    {
-        SessionRequestError::ReplayStorageUnavailable
-    }
-    #[cfg(not(feature = "audio"))]
-    {
-        SessionRequestError::ActorFailed(
-            "could not reserve bounded command replay storage".to_owned(),
-        )
-    }
+    SessionRequestError::ReplayStorageUnavailable
 }
 
 fn validate_operation(
@@ -1474,7 +1590,11 @@ fn validate_operation(
                 return Err(SessionSubmitError::InvalidRequest);
             }
         }
-        SessionOperation::GetTransform { .. } | SessionOperation::Status => {}
+        SessionOperation::GetTransform { .. }
+        | SessionOperation::Status
+        | SessionOperation::AssetPreparation(AssetPreparationOperation::Status)
+        | SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare { .. })
+        | SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel { .. }) => {}
         #[cfg(feature = "audio")]
         SessionOperation::Audio(operation) => match operation {
             SessionAudioOperation::Status | SessionAudioOperation::Voice { .. } => {}
@@ -1530,6 +1650,7 @@ enum CachedCommandResult {
     World(CommandResult),
     #[cfg(feature = "audio")]
     Audio(SessionAudioCommandResult),
+    Preparation(AssetPreparationCommandResult),
 }
 
 #[derive(Clone)]
@@ -1550,6 +1671,8 @@ struct ControlActor {
     pending_commands: HashMap<CommandId, PendingCommand>,
     completed_replay: HashMap<CommandId, ReplayEntry>,
     replay_order: VecDeque<CommandId>,
+    preparation_port: Option<ProjectPreparationPort>,
+    last_issued_preparation_epoch: u64,
     #[cfg(feature = "audio")]
     audio: Option<ProjectAudioRuntime>,
     active_request: Option<ActiveRequest>,
@@ -1560,6 +1683,7 @@ fn run_control_actor(
     config: SessionControlConfig,
     #[cfg(feature = "audio")] audio_options: ActorAudioOptions,
     #[cfg(not(feature = "audio"))] _audio_options: ActorAudioOptions,
+    mut preparation_port: Option<ProjectPreparationPort>,
     shared: Arc<ControlShared>,
     startup_sender: std::sync::mpsc::SyncSender<Result<(), SessionControlStartError>>,
 ) -> SessionShutdownReport {
@@ -1575,6 +1699,18 @@ fn run_control_actor(
             );
         }
     };
+    if let Some(port) = preparation_port.as_mut()
+        && let Err(error) = port.bind_session(session.engine().world().session())
+    {
+        shared.request_stop();
+        let _ = startup_sender.send(Err(SessionControlStartError::PreparationPort(error)));
+        let _ = session.engine().shutdown();
+        return shutdown_report(
+            &shared,
+            SessionTermination::EngineError("preparation port could not bind".to_owned()),
+            Tick(0),
+        );
+    }
     #[cfg(feature = "audio")]
     let audio = match audio_options {
         Some(options) => match ProjectAudioRuntime::start(
@@ -1666,6 +1802,8 @@ fn run_control_actor(
         pending_commands: HashMap::new(),
         completed_replay,
         replay_order,
+        preparation_port,
+        last_issued_preparation_epoch: 0,
         #[cfg(feature = "audio")]
         audio,
         active_request: None,
@@ -1876,11 +2014,200 @@ impl ControlActor {
                 };
                 self.finish_cell(cell, credit, Ok(SessionRequestResult::Status(status)));
             }
+            SessionOperation::AssetPreparation(operation) => {
+                self.preparation_operation(cell, credit, operation);
+            }
             #[cfg(feature = "audio")]
             SessionOperation::Audio(operation) => {
                 self.audio_operation(cell, credit, operation);
             }
         }
+    }
+
+    fn preparation_operation(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        operation: AssetPreparationOperation,
+    ) {
+        match operation {
+            AssetPreparationOperation::Status => {
+                if MAX_PREPARATION_STATUS_RESULT_BYTES > MAX_RESULT_BYTES_PER_TICKET {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ResultTooLarge));
+                    return;
+                }
+                let session = self.session.engine().world().session();
+                let result = self
+                    .preparation_port
+                    .as_ref()
+                    .ok_or(SessionRequestError::AssetPreparationUnavailable)
+                    .and_then(|port| {
+                        port.try_status(session)
+                            .map(Box::new)
+                            .map_err(preparation_port_error)
+                    })
+                    .map(|status| {
+                        SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(
+                            status,
+                        ))
+                    });
+                self.finish_cell(cell, credit, result);
+            }
+            mutation @ (AssetPreparationOperation::Prepare { .. }
+            | AssetPreparationOperation::Cancel { .. }) => {
+                self.submit_preparation_command(cell, credit, mutation);
+            }
+        }
+    }
+
+    fn submit_preparation_command(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        operation: AssetPreparationOperation,
+    ) {
+        let (requested_id, caller_id) = match &operation {
+            AssetPreparationOperation::Prepare { command_id }
+            | AssetPreparationOperation::Cancel { command_id, .. } => {
+                (*command_id, command_id.is_some())
+            }
+            AssetPreparationOperation::Status => unreachable!("status has no command ID"),
+        };
+        let (command_id, caller_id) = match requested_id {
+            Some(id) => (id, caller_id),
+            None => match self.next_server_command_id() {
+                Some(id) => (id, false),
+                None => {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ActorFailed(
+                            "server command identifier space is exhausted".to_owned(),
+                        )),
+                    );
+                    return;
+                }
+            },
+        };
+        let Some((cell, credit)) =
+            self.replay_existing_command(cell, credit, command_id, caller_id)
+        else {
+            return;
+        };
+
+        let current_session = self.session.engine().world().session();
+        let candidate = match &operation {
+            AssetPreparationOperation::Prepare { .. } => {
+                let Some(epoch) = self.last_issued_preparation_epoch.checked_add(1) else {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::PreparationEpochExhausted),
+                    );
+                    return;
+                };
+                PreparationId::from_parts(current_session, epoch)
+            }
+            AssetPreparationOperation::Cancel { candidate, .. } => {
+                if candidate.epoch() == 0 || candidate.session() != current_session {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::InvalidCandidate));
+                    return;
+                }
+                if candidate.epoch() > self.last_issued_preparation_epoch {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::InvalidCandidate));
+                    return;
+                }
+                if candidate.epoch() < self.last_issued_preparation_epoch {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::CandidateExpired));
+                    return;
+                }
+                *candidate
+            }
+            AssetPreparationOperation::Status => unreachable!("status handled above"),
+        };
+
+        if let Err(error) = self.prepare_replay_slot() {
+            self.finish_cell(cell, credit, Err(error));
+            return;
+        }
+        if std::mem::size_of::<AssetPreparationCommandResult>() + 128 > MAX_RESULT_BYTES_PER_TICKET
+        {
+            self.finish_cell(cell, credit, Err(SessionRequestError::ResultTooLarge));
+            return;
+        }
+        if self.preparation_port.is_none() {
+            self.finish_cell(
+                cell,
+                credit,
+                Err(SessionRequestError::AssetPreparationUnavailable),
+            );
+            return;
+        }
+        if let Some(active) = self.active_request.as_mut() {
+            active.possible_command_id = Some(command_id);
+        }
+        let accepted = match (&operation, self.preparation_port.as_ref()) {
+            (AssetPreparationOperation::Prepare { .. }, Some(port)) => {
+                port.try_prepare(candidate.epoch())
+            }
+            (AssetPreparationOperation::Cancel { .. }, Some(port)) => {
+                port.try_cancel(candidate.epoch())
+            }
+            _ => Err(ProjectPreparationPortError::Stopped),
+        };
+        if let Err(error) = accepted {
+            if let Some(active) = self.active_request.as_mut() {
+                active.possible_command_id = None;
+            }
+            self.finish_cell(cell, credit, Err(preparation_port_error(error)));
+            return;
+        }
+
+        if matches!(operation, AssetPreparationOperation::Prepare { .. }) {
+            self.last_issued_preparation_epoch = candidate.epoch();
+        }
+        if caller_id {
+            self.caller_command_high_water = Some(
+                self.caller_command_high_water
+                    .map_or(command_id.get(), |current| current.max(command_id.get())),
+            );
+        }
+
+        #[cfg(test)]
+        if self
+            .shared
+            .panic_after_preparation_command_effect
+            .swap(false, Ordering::AcqRel)
+        {
+            panic!("injected actor failure after preparation command effect");
+        }
+        let observed_tick = self.session.engine().clock().current_tick();
+        let outcome = match operation {
+            AssetPreparationOperation::Prepare { .. } => {
+                AssetPreparationCommandOutcome::PrepareAccepted { candidate }
+            }
+            AssetPreparationOperation::Cancel { .. } => {
+                AssetPreparationCommandOutcome::CancelAccepted { candidate }
+            }
+            AssetPreparationOperation::Status => unreachable!("status handled above"),
+        };
+        let command = AssetPreparationCommandResult::new(command_id, observed_tick, outcome);
+        let replay = ReplayEntry {
+            apply_tick: None,
+            resolve_tick: None,
+            result: CachedCommandResult::Preparation(command.clone()),
+        };
+        self.remember_completed(command_id, replay);
+        if let Some(active) = self.active_request.as_mut() {
+            active.possible_command_id = None;
+        }
+        self.finish_cell(
+            cell,
+            credit,
+            Ok(SessionRequestResult::AssetPreparation(
+                AssetPreparationResult::Command(command),
+            )),
+        );
     }
 
     fn project_info_page(
@@ -2344,6 +2671,9 @@ impl ControlActor {
             CachedCommandResult::Audio(result) => {
                 SessionRequestResult::Audio(SessionAudioResult::Command(result))
             }
+            CachedCommandResult::Preparation(result) => {
+                SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(result))
+            }
         };
         self.finish_cell(cell, credit, Ok(result));
     }
@@ -2603,6 +2933,12 @@ fn estimate_result_bytes(result: &SessionRequestResult) -> usize {
                 })
         }
         SessionRequestResult::Status(_) => std::mem::size_of::<SessionStatus>(),
+        SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(_)) => {
+            MAX_PREPARATION_STATUS_RESULT_BYTES
+        }
+        SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_)) => {
+            std::mem::size_of::<AssetPreparationCommandResult>() + 128
+        }
         #[cfg(feature = "audio")]
         SessionRequestResult::Audio(audio) => estimate_audio_result_bytes(audio),
     }
@@ -2704,6 +3040,12 @@ mod tests {
         SessionSubmitError, SessionTermination, WaitStage,
     };
     use crate::EngineConfig;
+    use crate::project_preparation::PreparationTestProject;
+    use crate::{
+        AssetPreparationCommandOutcome, AssetPreparationOperation, AssetPreparationResult,
+        NativeProjectPreparationOptions, NativeProjectPreparationService, PreparationId,
+        PreparationState, PreparationWorkerShutdown,
+    };
 
     const ONE_ENTITY_SCENE: &str = r#"{
         "schema_version": 1,
@@ -4388,5 +4730,448 @@ mod tests {
         );
         spawn.acknowledge().unwrap();
         let _ = service.shutdown();
+    }
+
+    #[test]
+    fn default_service_keeps_preparation_disabled_without_worker() {
+        let service = start(default_config());
+        assert!(!service.asset_preparation_enabled());
+        let client = service.attach().unwrap();
+        assert!(matches!(
+            client.try_submit(SessionOperation::AssetPreparation(
+                AssetPreparationOperation::Status
+            )),
+            Err(SessionSubmitError::AssetPreparationUnavailable)
+        ));
+        let _ = service.shutdown();
+    }
+
+    #[test]
+    fn preparation_uses_same_actor_replay_and_keeps_pre_effect_ids_available() {
+        let fixture = PreparationTestProject::with_audio();
+        let mut owner = NativeProjectPreparationService::start(
+            NativeProjectPreparationOptions::new(fixture.path()),
+        )
+        .expect("start native preparation owner");
+        let project = Arc::clone(owner.initial_project());
+        let port = owner.take_control_port().expect("take one control port");
+        let mut config = default_config();
+        config.engine.session = SessionId::from_raw(7_701);
+        let service = SessionControlService::start_shared_with_preparation(project, config, port)
+            .expect("start one actor with preparation");
+        assert!(service.asset_preparation_enabled());
+
+        let client = service.attach().unwrap();
+        let initial = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Status),
+        )
+        .expect("initial preparation status should succeed");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(initial)) =
+            initial
+        else {
+            panic!("status should use preparation metadata");
+        };
+        assert_eq!(initial.session(), SessionId::from_raw(7_701));
+        assert_eq!(initial.active_generation(), 1);
+        assert_eq!(initial.state(), PreparationState::Idle);
+
+        let first_command_id = CommandId::from_raw(700);
+        let first_terminal = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(first_command_id),
+            }),
+        )
+        .expect("first preparation should be accepted");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(first_result)) =
+            &first_terminal
+        else {
+            panic!("prepare should return its accepted epoch");
+        };
+        let AssetPreparationCommandOutcome::PrepareAccepted { candidate } = *first_result.outcome()
+        else {
+            panic!("prepare should return PrepareAccepted");
+        };
+        assert_eq!(
+            candidate,
+            PreparationId::from_parts(SessionId::from_raw(7_701), 1)
+        );
+        drop(client);
+
+        // A new attachment and a different operation with the same retained command ID must
+        // observe the original preparation receipt before target validation or a second effect.
+        let retry_client = service.attach().unwrap();
+        let mut replay = submit_after_busy(
+            &retry_client,
+            SessionOperation::SetTransform {
+                target: SessionEntityTarget::StableId(stable_id("missing:never-read")),
+                command_id: Some(first_command_id),
+                expected_revision: Revision(0),
+                apply_at: None,
+                transform: moved(9.0),
+            },
+        );
+        assert_eq!(
+            wait_terminal(&replay).terminal().unwrap(),
+            &Ok(first_terminal)
+        );
+        replay.acknowledge().unwrap();
+
+        wait_for_preparation_state(&retry_client, PreparationState::CpuPrepared, 1);
+
+        // A future candidate is rejected after ticket admission but before consuming command ID
+        // 701. Reusing that ID for a valid Prepare therefore starts exactly epoch 2.
+        let second_command_id = CommandId::from_raw(701);
+        let mut invalid_cancel = submit_after_busy(
+            &retry_client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
+                command_id: Some(second_command_id),
+                candidate: PreparationId::from_parts(SessionId::from_raw(7_701), 2),
+            }),
+        );
+        assert_eq!(
+            wait_terminal(&invalid_cancel).terminal().unwrap(),
+            &Err(SessionRequestError::InvalidCandidate)
+        );
+        invalid_cancel.acknowledge().unwrap();
+
+        let second_terminal = terminal_result_after_preparation_busy(
+            &retry_client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(second_command_id),
+            }),
+        )
+        .expect("second preparation should be accepted");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(second_result)) =
+            second_terminal
+        else {
+            panic!("second prepare should return its accepted epoch");
+        };
+        let AssetPreparationCommandOutcome::PrepareAccepted {
+            candidate: second_candidate,
+        } = *second_result.outcome()
+        else {
+            panic!("second prepare should return PrepareAccepted");
+        };
+        assert_eq!(second_candidate.epoch(), 2);
+        wait_for_preparation_state(&retry_client, PreparationState::CpuPrepared, 2);
+
+        // An older issued epoch is expired; the same command ID can then cancel current epoch 2.
+        let cancel_command_id = CommandId::from_raw(702);
+        let mut expired_cancel = submit_after_busy(
+            &retry_client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
+                command_id: Some(cancel_command_id),
+                candidate,
+            }),
+        );
+        assert_eq!(
+            wait_terminal(&expired_cancel).terminal().unwrap(),
+            &Err(SessionRequestError::CandidateExpired)
+        );
+        expired_cancel.acknowledge().unwrap();
+
+        let cancel_terminal = terminal_result_after_preparation_busy(
+            &retry_client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
+                command_id: Some(cancel_command_id),
+                candidate: second_candidate,
+            }),
+        )
+        .expect("current candidate cancellation should be accepted");
+        assert!(matches!(
+            cancel_terminal,
+            SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_))
+        ));
+        wait_for_preparation_state(&retry_client, PreparationState::Cancelled, 2);
+
+        let shutdown = service.shutdown();
+        assert_eq!(shutdown.termination, SessionTermination::StopRequested);
+        owner.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match owner.try_shutdown().unwrap() {
+                PreparationWorkerShutdown::Stopped => break,
+                PreparationWorkerShutdown::Stopping if Instant::now() >= deadline => {
+                    panic!("preparation worker did not stop within bounded test deadline");
+                }
+                PreparationWorkerShutdown::Stopping => thread::yield_now(),
+            }
+        }
+    }
+
+    #[test]
+    fn actor_panic_after_preparation_acceptance_reports_unknown_not_unapplied() {
+        let fixture = PreparationTestProject::with_audio();
+        let mut owner = NativeProjectPreparationService::start(
+            NativeProjectPreparationOptions::new(fixture.path()),
+        )
+        .expect("start native preparation owner");
+        let project = Arc::clone(owner.initial_project());
+        let port = owner.take_control_port().expect("take one control port");
+        let service =
+            SessionControlService::start_shared_with_preparation(project, default_config(), port)
+                .expect("start one actor with preparation");
+        service
+            .shared
+            .panic_after_preparation_command_effect
+            .store(true, Ordering::Release);
+        let client = service.attach().unwrap();
+        let command_id = CommandId::from_raw(703);
+        let terminal = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(command_id),
+            }),
+        );
+        assert_eq!(
+            terminal,
+            Err(SessionRequestError::OutcomeUnknown { command_id })
+        );
+        drop(client);
+
+        let shutdown = service.shutdown();
+        assert!(matches!(
+            shutdown.termination,
+            SessionTermination::Panicked(_)
+        ));
+        owner.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match owner.try_shutdown().unwrap() {
+                PreparationWorkerShutdown::Stopped => break,
+                PreparationWorkerShutdown::Stopping if Instant::now() >= deadline => {
+                    panic!("preparation worker did not stop after actor panic");
+                }
+                PreparationWorkerShutdown::Stopping => thread::yield_now(),
+            }
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn held_preparation_worker_does_not_block_reserved_step_or_same_actor_audio() {
+        let fixture = PreparationTestProject::with_audio();
+        let mut owner = NativeProjectPreparationService::start(
+            NativeProjectPreparationOptions::new(fixture.path()),
+        )
+        .expect("start native preparation owner");
+        let gate = owner.block_preparation_for_test(1);
+        let project = Arc::clone(owner.initial_project());
+        let port = owner.take_control_port().expect("take one control port");
+        let service = SessionControlService::start_shared_with_preparation_and_audio(
+            project,
+            default_config(),
+            port,
+            crate::SessionAudioOptions::offline(8_000),
+        )
+        .expect("start one actor with preparation and offline audio");
+        let client = service.attach().unwrap();
+
+        let mut play = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(9_999)),
+                mutation: crate::SessionAudioMutation::Play {
+                    clip: stable_id("tone"),
+                    volume: 1.0,
+                    pan: 0.0,
+                    looping: true,
+                },
+            }),
+        );
+        let play_state = wait_terminal(&play);
+        assert!(matches!(
+            play_state.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Audio(crate::SessionAudioResult::Command(result)))
+                if matches!(result.outcome(),
+                    Ok(crate::SessionAudioCommandOutcome::Played { .. }))
+        ));
+        play.acknowledge().unwrap();
+        drop(play_state);
+
+        let prepare_id = CommandId::from_raw(10_000);
+        let accepted = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(prepare_id),
+            }),
+        )
+        .expect("preparation command should be accepted");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(result)) =
+            accepted
+        else {
+            panic!("preparation should return its command receipt");
+        };
+        let AssetPreparationCommandOutcome::PrepareAccepted { candidate } = *result.outcome()
+        else {
+            panic!("preparation should accept the candidate");
+        };
+        gate.wait_until_entered();
+
+        // Hold every normal ticket credit. The reserved Manual Step lane must still advance the
+        // same Engine while the importer is deliberately stopped at its before-import gate.
+        let mut normal_tickets = (0..7)
+            .map(|_| submit_after_busy(&client, SessionOperation::Status))
+            .collect::<Vec<_>>();
+        let final_normal = normal_tickets.last().unwrap();
+        assert!(wait_terminal(final_normal).terminal().unwrap().is_ok());
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        let step_state = wait_terminal(&step);
+        assert!(matches!(
+            step_state.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Step(reports))
+                if reports.len() == 1 && reports[0].tick == Tick(1)
+        ));
+
+        let audio_operation = SessionOperation::Audio(crate::SessionAudioOperation::Command {
+            command_id: Some(CommandId::from_raw(10_001)),
+            mutation: crate::SessionAudioMutation::RenderOffline { frames: 16 },
+        });
+        assert_normal_result_capacity(&client, audio_operation.clone());
+        normal_tickets[0].acknowledge().unwrap();
+        let mut audio = submit_after_busy(&client, audio_operation);
+        let audio_state = wait_terminal(&audio);
+        assert!(matches!(
+            audio_state.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Audio(crate::SessionAudioResult::Command(result)))
+                if result.observed_tick() == Tick(1)
+                    && matches!(result.outcome(),
+                        Ok(crate::SessionAudioCommandOutcome::Offline(summary))
+                            if summary.frames() == 16
+                                && summary.cumulative_frames() == 16
+                                && summary.nonzero_samples() > 0
+                                && summary.peak() > 0.0)
+        ));
+        audio.acknowledge().unwrap();
+        step.acknowledge().unwrap();
+        for ticket in normal_tickets.iter_mut().skip(1) {
+            ticket.acknowledge().unwrap();
+        }
+        drop(step_state);
+        drop(audio_state);
+
+        gate.release();
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, 1);
+        let cancel = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
+                command_id: Some(CommandId::from_raw(10_002)),
+                candidate,
+            }),
+        )
+        .expect("ready candidate should accept cancellation");
+        assert!(matches!(
+            cancel,
+            SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_))
+        ));
+        wait_for_preparation_state(&client, PreparationState::Cancelled, 1);
+        drop(client);
+
+        let shutdown = service.shutdown();
+        assert_eq!(shutdown.termination, SessionTermination::StopRequested);
+        owner.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match owner.try_shutdown().unwrap() {
+                PreparationWorkerShutdown::Stopped => break,
+                PreparationWorkerShutdown::Stopping if Instant::now() >= deadline => {
+                    panic!("preparation worker did not stop within bounded test deadline");
+                }
+                PreparationWorkerShutdown::Stopping => thread::yield_now(),
+            }
+        }
+    }
+
+    fn wait_for_preparation_state(
+        client: &super::SessionControlClient,
+        expected: PreparationState,
+        epoch: u64,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = terminal_result_after_preparation_busy(
+                client,
+                SessionOperation::AssetPreparation(AssetPreparationOperation::Status),
+            );
+            let status = match result {
+                Ok(SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(
+                    status,
+                ))) => status,
+                Ok(other) => panic!("status returned an unexpected result: {other:?}"),
+                Err(error) => panic!("status failed while waiting for {expected:?}: {error}"),
+            };
+            if status.state() == expected
+                && status
+                    .desired()
+                    .is_none_or(|desired| desired.epoch() == epoch)
+                && status
+                    .running()
+                    .is_none_or(|running| running.epoch() == epoch)
+                && status
+                    .pending()
+                    .is_none_or(|pending| pending.epoch() == epoch)
+                && (expected != PreparationState::CpuPrepared
+                    || status
+                        .ready_candidate()
+                        .is_some_and(|candidate| candidate.id().epoch() == epoch))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preparation worker did not reach {expected:?} for epoch {epoch}"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn terminal_result_after_preparation_busy(
+        client: &super::SessionControlClient,
+        operation: SessionOperation,
+    ) -> Result<SessionRequestResult, SessionRequestError> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut ticket = submit_after_busy(client, operation.clone());
+            let progress = wait_terminal(&ticket);
+            let terminal = progress
+                .terminal()
+                .expect("terminal wait returns a terminal result")
+                .clone();
+            ticket.acknowledge().unwrap();
+            drop(progress);
+            match terminal {
+                Err(SessionRequestError::PreparationBusy) if Instant::now() < deadline => {
+                    thread::yield_now();
+                }
+                other => return other,
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preparation remained busy past bounded retry deadline"
+            );
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    fn assert_normal_result_capacity(
+        client: &super::SessionControlClient,
+        operation: SessionOperation,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match client.try_submit(operation.clone()) {
+                Err(SessionSubmitError::Busy) if Instant::now() < deadline => {
+                    thread::yield_now();
+                }
+                Err(SessionSubmitError::ResultCapacity) => return,
+                Ok(mut ticket) => {
+                    let _ = ticket.acknowledge();
+                    panic!("normal operation was admitted while all normal credits were held");
+                }
+                Err(error) => panic!("unexpected admission error: {error:?}"),
+            }
+        }
     }
 }

@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,9 +12,10 @@ use daedalus_content::project::{PreparedProject, ProjectLimits, prepare_project_
 use daedalus_content::scene::StableId;
 use daedalus_core::{Revision, Tick};
 use daedalus_runtime::{
-    EngineConfig, RequestTicket, SessionClockMode, SessionControlClient, SessionControlConfig,
-    SessionControlService, SessionEntityTarget, SessionOperation, SessionRequestResult,
-    SessionSubmitError, WaitStage,
+    EngineConfig, NativeProjectPreparationOptions, NativeProjectPreparationService,
+    PreparationWorkerShutdown, RequestTicket, SessionClockMode, SessionControlClient,
+    SessionControlConfig, SessionControlService, SessionEntityTarget, SessionOperation,
+    SessionRequestResult, SessionSubmitError, WaitStage,
 };
 use serde_json::{Value, json};
 
@@ -50,6 +53,8 @@ fn prepared_fixture() -> PreparedProject {
 struct Harness {
     controller: ProtocolController,
     service: Option<SessionControlService>,
+    preparation_owner: Option<NativeProjectPreparationService>,
+    preparation_root: Option<PathBuf>,
 }
 
 type HarnessParts = (
@@ -63,6 +68,23 @@ impl Drop for Harness {
     fn drop(&mut self) {
         if let Some(service) = self.service.take() {
             let _ = service.shutdown();
+        }
+        if let Some(mut owner) = self.preparation_owner.take() {
+            owner.request_stop();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stopped = false;
+            while Instant::now() < deadline {
+                match owner.try_shutdown() {
+                    Ok(PreparationWorkerShutdown::Stopped) | Err(_) => {
+                        stopped = true;
+                        break;
+                    }
+                    Ok(PreparationWorkerShutdown::Stopping) => thread::yield_now(),
+                }
+            }
+            if stopped && let Some(root) = self.preparation_root.take() {
+                let _ = fs::remove_dir_all(root);
+            }
         }
     }
 }
@@ -122,11 +144,52 @@ fn harness_for_service(
         Harness {
             controller,
             service: Some(service),
+            preparation_owner: None,
+            preparation_root: None,
         },
         request_sender,
         responses,
         response_sender,
     )
+}
+
+fn preparation_harness(output_capacity: usize) -> HarnessParts {
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+    let root = std::env::temp_dir().join(format!(
+        "daedalus-cli-preparation-wire-{}-{}",
+        std::process::id(),
+        NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("create unique preparation fixture root");
+    fs::write(
+        root.join("daedalus.project.json"),
+        br#"{"schema_version":1,"name":"wire preparation","scene":"scene.json"}"#,
+    )
+    .expect("write preparation manifest");
+    fs::write(root.join("scene.json"), ONE_ENTITY_SCENE).expect("write preparation scene");
+
+    let mut owner =
+        NativeProjectPreparationService::start(NativeProjectPreparationOptions::new(&root))
+            .expect("start native preparation worker");
+    let project = Arc::clone(owner.initial_project());
+    let port = owner
+        .take_control_port()
+        .expect("take preparation port once");
+    let service = SessionControlService::start_shared_with_preparation(
+        project,
+        SessionControlConfig {
+            engine: EngineConfig::default(),
+            clock_mode: SessionClockMode::Manual,
+            ..SessionControlConfig::default()
+        },
+        port,
+    )
+    .expect("start service with preparation worker");
+    let (mut harness, input, output, response_sender) =
+        harness_for_service(service, SessionClockMode::Manual, output_capacity, false);
+    harness.preparation_owner = Some(owner);
+    harness.preparation_root = Some(root);
+    (harness, input, output, response_sender)
 }
 
 fn request(
@@ -231,7 +294,44 @@ fn poll_until_terminal(
     poll_until_phase(harness, input, output, ticket, "terminal")
 }
 
-#[cfg(feature = "audio")]
+/// Retry a terminal preparation `busy` result without changing its caller command ID.
+///
+/// A fresh protocol request ID is required for each terminal attempt because the server retains
+/// submit request IDs. Every terminal ticket is acknowledged before retrying or returning so a
+/// transient result cannot consume the bounded result-credit budget.
+fn preparation_submit_until_terminal(
+    harness: &mut Harness,
+    input: &SyncSender<Vec<u8>>,
+    output: &Receiver<Vec<u8>>,
+    request_id_prefix: &str,
+    operation: Value,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut attempt = 0_u32;
+    loop {
+        attempt = attempt
+            .checked_add(1)
+            .expect("bounded preparation attempts");
+        let request_id = format!("{request_id_prefix}-{attempt}");
+        let ticket = submit(harness, input, output, &request_id, operation.clone());
+        let terminal = poll_until_terminal(harness, input, output, &ticket);
+        let terminal_result = &terminal["result"]["data"]["terminal"];
+        let retry_busy = terminal_result["ok"] == false
+            && terminal_result["error"]["code"] == "busy"
+            && Instant::now() < deadline;
+        ack(harness, input, output, &ticket);
+        if retry_busy {
+            thread::yield_now();
+            continue;
+        }
+        assert_eq!(
+            terminal_result["ok"], true,
+            "preparation request failed terminally: {terminal}"
+        );
+        return terminal;
+    }
+}
+
 fn ack(
     harness: &mut Harness,
     input: &SyncSender<Vec<u8>>,
@@ -906,6 +1006,10 @@ fn audio_operation_is_explicitly_unavailable_when_session_audio_is_disabled() {
         json!({"op":"capabilities"}),
     );
     assert_eq!(capabilities["result"]["data"]["audio_enabled"], false);
+    assert_eq!(
+        capabilities["result"]["data"]["asset_preparation_enabled"],
+        false
+    );
     assert!(
         !capabilities["result"]["data"]["operations"]
             .as_array()
@@ -922,6 +1026,97 @@ fn audio_operation_is_explicitly_unavailable_when_session_audio_is_disabled() {
     );
     assert_eq!(response["ok"], false);
     assert_eq!(response["error"]["code"], "audio_unavailable");
+
+    let prep_response = request(
+        &mut harness,
+        &input,
+        &output,
+        "preparation-disabled",
+        json!({"op":"submit", "operation":{"op":"asset_preparation_status"}}),
+    );
+    assert_eq!(prep_response["ok"], false);
+    assert_eq!(
+        prep_response["error"]["code"],
+        "asset_preparation_unavailable"
+    );
+}
+
+#[test]
+fn preparation_protocol_reports_decimal_ids_and_typed_receipts() {
+    let (mut harness, input, output, _) = preparation_harness(8);
+    let capabilities = request(
+        &mut harness,
+        &input,
+        &output,
+        "preparation-capabilities",
+        json!({"op":"capabilities"}),
+    );
+    assert_eq!(
+        capabilities["result"]["data"]["asset_preparation_enabled"],
+        true
+    );
+    assert!(
+        capabilities["result"]["data"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "asset_preparation_status")
+    );
+
+    let status = preparation_submit_until_terminal(
+        &mut harness,
+        &input,
+        &output,
+        "preparation-status",
+        json!({"op":"asset_preparation_status"}),
+    );
+    let status_result = &status["result"]["data"]["terminal"]["result"];
+    assert_eq!(status_result["kind"], "asset_preparation");
+    assert_eq!(status_result["data"]["kind"], "status");
+    assert!(status_result["data"]["data"]["session"].is_string());
+    assert_eq!(status_result["data"]["data"]["active_generation"], "1");
+    assert_eq!(status_result["data"]["data"]["state"], "idle");
+    let caller_command_id = "9223372036854775809";
+    let prepared = preparation_submit_until_terminal(
+        &mut harness,
+        &input,
+        &output,
+        "preparation-prepare",
+        json!({
+            "op":"asset_preparation_prepare",
+            "command_id":caller_command_id
+        }),
+    );
+    let prepare_result = &prepared["result"]["data"]["terminal"]["result"];
+    assert_eq!(prepare_result["kind"], "asset_preparation");
+    assert_eq!(prepare_result["data"]["kind"], "command");
+    let command = &prepare_result["data"]["data"];
+    assert_eq!(command["command_id"], caller_command_id);
+    assert_eq!(command["observed_tick"], "0");
+    assert_eq!(command["outcome"]["kind"], "prepare_accepted");
+    let candidate = command["outcome"]["data"]["candidate"].clone();
+    assert_eq!(candidate["epoch"], "1");
+    assert_eq!(
+        candidate["session"],
+        status_result["data"]["data"]["session"]
+    );
+    let cancelled = preparation_submit_until_terminal(
+        &mut harness,
+        &input,
+        &output,
+        "preparation-cancel",
+        json!({
+            "op":"asset_preparation_cancel",
+            "command_id":"9223372036854775810",
+            "candidate":candidate
+        }),
+    );
+    let cancel_result = &cancelled["result"]["data"]["terminal"]["result"];
+    assert_eq!(cancel_result["data"]["kind"], "command");
+    assert_eq!(
+        cancel_result["data"]["data"]["outcome"]["kind"],
+        "cancel_accepted"
+    );
 }
 
 #[cfg(feature = "audio")]

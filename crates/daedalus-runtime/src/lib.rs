@@ -5,6 +5,7 @@ pub mod live_session;
 pub mod project;
 #[cfg(feature = "audio")]
 mod project_audio;
+mod project_preparation;
 mod session_control;
 mod session_primitives;
 
@@ -53,6 +54,15 @@ pub use project_audio::{
     SessionAudioCommandResult, SessionAudioError, SessionAudioMutation, SessionAudioOperation,
     SessionAudioOptions, SessionAudioResult, SessionAudioStartError, SessionAudioStatus,
     SessionAudioVoiceId, SessionAudioVoiceInfo, SessionAudioVoicePage, SessionAudioVoiceState,
+};
+pub(crate) use project_preparation::MAX_PREPARATION_STATUS_RESULT_BYTES;
+pub use project_preparation::{
+    AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
+    AssetPreparationResult, AssetPreparationStatus, NativeProjectPreparationOptions,
+    NativeProjectPreparationService, NativeProjectPreparationStartError,
+    PreparationCandidateSummary, PreparationFailure, PreparationId, PreparationState,
+    PreparationWorkerShutdown, PreparationWorkerShutdownError, ProjectPreparationPort,
+    ProjectPreparationPortError,
 };
 pub use session_control::{
     AuthorityAdmission, CommandTerminalResult, FrameReadError, ProjectEntityBinding,

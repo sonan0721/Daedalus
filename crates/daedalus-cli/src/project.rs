@@ -11,7 +11,9 @@ use clap::ValueEnum;
 use daedalus_content::project::{PreparedProject, ProjectManifest, prepare_project_from_bytes};
 use daedalus_content::scene::SceneDocument;
 use daedalus_runtime::{
-    EngineConfig, ProjectSession, ProjectSessionReport, SessionCapabilities, SessionClockMode,
+    EngineConfig, NativeProjectPreparationOptions, NativeProjectPreparationService,
+    PreparationWorkerShutdown, PreparationWorkerShutdownError, ProjectPreparationPort,
+    ProjectSession, ProjectSessionReport, SessionCapabilities, SessionClockMode,
     SessionControlConfig, SessionControlLimits, SessionControlService, SessionTermination,
     StepReport,
 };
@@ -84,10 +86,14 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             protocol,
             clock,
             audio,
+            asset_preparation,
         } => match protocol {
             1 => {
-                if clock.is_some() || audio.is_some() {
-                    return Err("--clock and --audio require `project serve --protocol 2`".into());
+                if clock.is_some() || audio.is_some() || asset_preparation {
+                    return Err(
+                        "--clock, --audio, and --asset-preparation require `project serve --protocol 2`"
+                            .into(),
+                    );
                 }
                 let mut session = ProjectSession::new(
                     super::project_assets::load_project_runtime(&directory)?,
@@ -108,6 +114,7 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
                 &directory,
                 clock.unwrap_or(ProjectClockArg::Manual),
                 audio,
+                asset_preparation,
             )?,
             _ => unreachable!("Clap constrains project serve protocol to 1 or 2"),
         },
@@ -147,6 +154,105 @@ pub(super) fn start_control_service(
     start_control_service_with_audio(project, config, audio)
 }
 
+pub(super) fn start_control_service_with_preparation(
+    project: Arc<PreparedProject>,
+    config: SessionControlConfig,
+    preparation_port: ProjectPreparationPort,
+    audio: Option<ProjectAudioArg>,
+) -> Result<SessionControlService, Box<dyn Error>> {
+    validate_session_feature_options(audio, true)?;
+    match audio {
+        None => Ok(SessionControlService::start_shared_with_preparation(
+            project,
+            config,
+            preparation_port,
+        )?),
+        Some(audio) => start_control_service_with_preparation_and_audio(
+            project,
+            config,
+            preparation_port,
+            audio,
+        ),
+    }
+}
+
+fn validate_session_feature_options(
+    audio: Option<ProjectAudioArg>,
+    asset_preparation: bool,
+) -> Result<(), Box<dyn Error>> {
+    if audio.is_some() && !cfg!(feature = "audio") {
+        return Err(
+            "audio support is not compiled into this CLI; rebuild with --features audio".into(),
+        );
+    }
+    if audio == Some(ProjectAudioArg::Native) && !cfg!(feature = "native-audio") {
+        return Err(
+            "native audio support is not compiled into this CLI; rebuild with --features native-audio"
+                .into(),
+        );
+    }
+    if asset_preparation && cfg!(target_family = "wasm") {
+        return Err("native asset preparation is unavailable on this target".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "audio")]
+fn start_control_service_with_preparation_and_audio(
+    project: Arc<PreparedProject>,
+    config: SessionControlConfig,
+    preparation_port: ProjectPreparationPort,
+    audio: ProjectAudioArg,
+) -> Result<SessionControlService, Box<dyn Error>> {
+    use daedalus_runtime::SessionAudioOptions;
+
+    let options = match audio {
+        ProjectAudioArg::Offline => SessionAudioOptions::offline(48_000),
+        ProjectAudioArg::Native => SessionAudioOptions::native(),
+    };
+    Ok(
+        SessionControlService::start_shared_with_preparation_and_audio(
+            project,
+            config,
+            preparation_port,
+            options,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "audio"))]
+fn start_control_service_with_preparation_and_audio(
+    _project: Arc<PreparedProject>,
+    _config: SessionControlConfig,
+    _preparation_port: ProjectPreparationPort,
+    _audio: ProjectAudioArg,
+) -> Result<SessionControlService, Box<dyn Error>> {
+    Err("audio support is not compiled into this CLI".into())
+}
+
+pub(super) fn stop_preparation_worker(
+    owner: &mut Option<NativeProjectPreparationService>,
+) -> Result<Option<PreparationWorkerShutdown>, PreparationWorkerShutdownError> {
+    let Some(owner) = owner.as_mut() else {
+        return Ok(None);
+    };
+    owner.request_stop();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match owner.try_shutdown()? {
+            PreparationWorkerShutdown::Stopped => {
+                return Ok(Some(PreparationWorkerShutdown::Stopped));
+            }
+            PreparationWorkerShutdown::Stopping if std::time::Instant::now() >= deadline => {
+                return Ok(Some(PreparationWorkerShutdown::Stopping));
+            }
+            PreparationWorkerShutdown::Stopping => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 #[cfg(feature = "audio")]
 fn start_control_service_with_audio(
     project: Arc<PreparedProject>,
@@ -177,11 +283,24 @@ fn serve_project_protocol2(
     directory: &Path,
     clock: ProjectClockArg,
     audio: Option<ProjectAudioArg>,
+    asset_preparation: bool,
 ) -> Result<(), Box<dyn Error>> {
     use std::thread;
     use std::time::Duration;
 
-    let project = Arc::new(super::project_assets::load_project_runtime(directory)?);
+    validate_session_feature_options(audio, asset_preparation)?;
+    let mut preparation_owner = if asset_preparation {
+        Some(NativeProjectPreparationService::start(
+            NativeProjectPreparationOptions::new(directory),
+        )?)
+    } else {
+        None
+    };
+    let project = if let Some(owner) = preparation_owner.as_ref() {
+        Arc::clone(owner.initial_project())
+    } else {
+        Arc::new(super::project_assets::load_project_runtime(directory)?)
+    };
     let mut engine = EngineConfig::default();
     engine.snapshot_entity_capacity = engine
         .snapshot_entity_capacity
@@ -192,11 +311,31 @@ fn serve_project_protocol2(
         clock_mode: clock.runtime(),
         limits,
     };
-    let service = start_control_service(Arc::clone(&project), config, audio)?;
+    let service_result = if let Some(owner) = preparation_owner.as_mut() {
+        match owner.take_control_port() {
+            Ok(port) => {
+                start_control_service_with_preparation(Arc::clone(&project), config, port, audio)
+            }
+            Err(error) => {
+                let _ = stop_preparation_worker(&mut preparation_owner);
+                return Err(Box::new(error));
+            }
+        }
+    } else {
+        start_control_service(Arc::clone(&project), config, audio)
+    };
+    let service = match service_result {
+        Ok(service) => service,
+        Err(error) => {
+            let _ = stop_preparation_worker(&mut preparation_owner);
+            return Err(error);
+        }
+    };
     let client = match service.attach_with_capabilities(SessionCapabilities::trusted_local()) {
         Ok(client) => client,
         Err(error) => {
             let _ = service.shutdown();
+            let _ = stop_preparation_worker(&mut preparation_owner);
             return Err(Box::new(error));
         }
     };
@@ -204,6 +343,7 @@ fn serve_project_protocol2(
         Ok(transport) => transport,
         Err(error) => {
             let _ = service.shutdown();
+            let _ = stop_preparation_worker(&mut preparation_owner);
             return Err(Box::new(error));
         }
     };
@@ -233,6 +373,13 @@ fn serve_project_protocol2(
     drop(controller);
     service.request_stop();
     let shutdown = service.shutdown();
+    let worker_shutdown = stop_preparation_worker(&mut preparation_owner)?;
+    if let Some(status) = worker_shutdown {
+        eprintln!(
+            "asset_preparation_worker={}",
+            preparation_shutdown_name(status)
+        );
+    }
     if actor_stopped_before_owner_exit || shutdown.termination != SessionTermination::StopRequested
     {
         return Err(format!(
@@ -242,6 +389,13 @@ fn serve_project_protocol2(
         .into());
     }
     Ok(())
+}
+
+pub(super) const fn preparation_shutdown_name(status: PreparationWorkerShutdown) -> &'static str {
+    match status {
+        PreparationWorkerShutdown::Stopping => "stopping",
+        PreparationWorkerShutdown::Stopped => "stopped",
+    }
 }
 
 fn create_empty_project(

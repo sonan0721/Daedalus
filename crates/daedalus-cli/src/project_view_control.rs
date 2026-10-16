@@ -10,13 +10,16 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 
+use daedalus_content::assets::{AssetImportMemorySummary, AssetImportMetrics};
 use daedalus_content::scene::StableId;
 use daedalus_core::{CommandId, EntityHandle, Revision, SessionId, Tick, Transform};
 use daedalus_runtime::{
-    AuthorityAdmission, FrameReadError, ProjectInfoPage, RequestAckError, RequestPhase,
-    RequestProgress, RequestReadError, RequestTicket, SessionClockMode, SessionControlClient,
-    SessionControlLimits, SessionOperation, SessionRequestError, SessionRequestResult,
-    SessionStatus, SessionSubmitError,
+    AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
+    AssetPreparationResult, AssetPreparationStatus, AuthorityAdmission, FrameReadError,
+    PreparationCandidateSummary, PreparationFailure, PreparationId, PreparationState,
+    ProjectInfoPage, RequestAckError, RequestPhase, RequestProgress, RequestReadError,
+    RequestTicket, SessionClockMode, SessionControlClient, SessionControlLimits, SessionOperation,
+    SessionRequestError, SessionRequestResult, SessionStatus, SessionSubmitError,
 };
 #[cfg(feature = "audio")]
 use daedalus_runtime::{
@@ -54,6 +57,35 @@ const AUDIO_OPERATIONS: [&str; 12] = [
     "audio_voice",
     "audio_voices",
     "audio_command",
+];
+const PREPARATION_OPERATIONS: [&str; 10] = [
+    "project_info",
+    "get_transform",
+    "list_transforms",
+    "set_transform",
+    "spawn_transform",
+    "step",
+    "status",
+    "asset_preparation_status",
+    "asset_preparation_prepare",
+    "asset_preparation_cancel",
+];
+const AUDIO_PREPARATION_OPERATIONS: [&str; 15] = [
+    "project_info",
+    "get_transform",
+    "list_transforms",
+    "set_transform",
+    "spawn_transform",
+    "step",
+    "status",
+    "audio_status",
+    "audio_clips",
+    "audio_voice",
+    "audio_voices",
+    "audio_command",
+    "asset_preparation_status",
+    "asset_preparation_prepare",
+    "asset_preparation_cancel",
 ];
 
 const TRANSPORT_RUNNING: u8 = 0;
@@ -272,6 +304,16 @@ enum WireOperation {
         count: u32,
     },
     Status,
+    AssetPreparationStatus,
+    AssetPreparationPrepare {
+        #[serde(default)]
+        command_id: Option<DecimalU128>,
+    },
+    AssetPreparationCancel {
+        #[serde(default)]
+        command_id: Option<DecimalU128>,
+        candidate: WirePreparationId,
+    },
     AudioStatus,
     AudioClips {
         #[serde(default)]
@@ -315,6 +357,13 @@ struct WireVoiceId {
     sequence: DecimalU64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct WirePreparationId {
+    session: DecimalU64,
+    epoch: DecimalU64,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireAudioMutation {
@@ -341,7 +390,11 @@ enum WireAudioMutation {
 }
 
 impl WireOperation {
-    fn native(&self, audio_enabled: bool) -> Result<SessionOperation, ProtocolError> {
+    fn native(
+        &self,
+        audio_enabled: bool,
+        asset_preparation_enabled: bool,
+    ) -> Result<SessionOperation, ProtocolError> {
         let operation = match self {
             Self::ProjectInfo { offset, limit } => {
                 if *offset > 16_384 || limit.is_some_and(|value| !(1..=1024).contains(&value)) {
@@ -412,6 +465,34 @@ impl WireOperation {
                 ));
             }
             Self::Status => SessionOperation::Status,
+            Self::AssetPreparationStatus if asset_preparation_enabled => {
+                SessionOperation::AssetPreparation(AssetPreparationOperation::Status)
+            }
+            Self::AssetPreparationPrepare { command_id } if asset_preparation_enabled => {
+                SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                    command_id: command_id.map(|id| CommandId::from_raw(id.0)),
+                })
+            }
+            Self::AssetPreparationCancel {
+                command_id,
+                candidate,
+            } if asset_preparation_enabled => {
+                SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
+                    command_id: command_id.map(|id| CommandId::from_raw(id.0)),
+                    candidate: PreparationId::from_parts(
+                        SessionId::from_raw(candidate.session.0),
+                        candidate.epoch.0,
+                    ),
+                })
+            }
+            Self::AssetPreparationStatus
+            | Self::AssetPreparationPrepare { .. }
+            | Self::AssetPreparationCancel { .. } => {
+                return Err(ProtocolError::new(
+                    "asset_preparation_unavailable",
+                    "asset preparation operations require an asset-preparation-enabled session",
+                ));
+            }
             Self::AudioStatus => audio_operation(audio_enabled, AudioWireOperation::Status)?,
             Self::AudioClips { offset, limit } => audio_operation(
                 audio_enabled,
@@ -648,6 +729,7 @@ struct Capabilities {
     clock: &'static str,
     operations: &'static [&'static str],
     audio_enabled: bool,
+    asset_preparation_enabled: bool,
     max_line_bytes: usize,
     max_response_bytes: usize,
     max_retained_tickets: usize,
@@ -706,8 +788,73 @@ enum OperationResult {
     Command(WireCommandResult),
     Step(Vec<StepOut>),
     Status(StatusOut),
+    AssetPreparation(AssetPreparationOut),
     #[cfg(feature = "audio")]
     Audio(AudioResultOut),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum AssetPreparationOut {
+    Status(Box<AssetPreparationStatusOut>),
+    Command(AssetPreparationCommandOut),
+}
+
+#[derive(Serialize)]
+struct AssetPreparationStatusOut {
+    session: DecimalU64,
+    active_generation: DecimalU64,
+    active_source_digest: String,
+    active_cooked_accounted_bytes: u64,
+    desired: Option<PreparationIdOut>,
+    running: Option<PreparationIdOut>,
+    pending: Option<PreparationIdOut>,
+    state: &'static str,
+    ready_candidate: Option<PreparationCandidateOut>,
+    latest_failure: Option<PreparationFailureOut>,
+}
+
+#[derive(Serialize)]
+struct PreparationIdOut {
+    session: DecimalU64,
+    epoch: DecimalU64,
+}
+
+#[derive(Serialize)]
+struct PreparationCandidateOut {
+    id: PreparationIdOut,
+    is_current: bool,
+    source_digest: String,
+    catalog_digest: String,
+    source_scene_revision: DecimalU64,
+    asset_count: usize,
+    entity_count: usize,
+    memory: AssetImportMemorySummary,
+    metrics: AssetImportMetrics,
+}
+
+#[derive(Serialize)]
+struct PreparationFailureOut {
+    id: PreparationIdOut,
+    code: String,
+    message: String,
+    source_id: Option<String>,
+    path: Option<String>,
+    diagnostic_truncated: bool,
+}
+
+#[derive(Serialize)]
+struct AssetPreparationCommandOut {
+    command_id: DecimalU128,
+    observed_tick: DecimalU64,
+    outcome: AssetPreparationCommandOutcomeOut,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum AssetPreparationCommandOutcomeOut {
+    PrepareAccepted { candidate: PreparationIdOut },
+    CancelAccepted { candidate: PreparationIdOut },
 }
 
 #[derive(Serialize)]
@@ -1042,6 +1189,7 @@ pub(crate) struct ProtocolController {
     clock: SessionClockMode,
     native_limits: SessionControlLimits,
     audio_enabled: bool,
+    asset_preparation_enabled: bool,
     tickets: HashMap<String, TicketEntry>,
     submit_ids: HashMap<String, String>,
     detached_reason: Option<String>,
@@ -1059,12 +1207,14 @@ impl ProtocolController {
         native_limits: SessionControlLimits,
         audio_enabled: bool,
     ) -> Self {
+        let asset_preparation_enabled = client.asset_preparation_enabled();
         Self {
             transport,
             client,
             clock,
             native_limits,
             audio_enabled,
+            asset_preparation_enabled,
             tickets: HashMap::new(),
             submit_ids: HashMap::new(),
             detached_reason: None,
@@ -1155,6 +1305,7 @@ impl ProtocolController {
     pub(crate) fn errors(&self) -> u64 {
         self.errors
     }
+    #[cfg(any(test, feature = "window"))]
     pub(crate) fn retained_tickets(&self) -> usize {
         self.tickets.len()
     }
@@ -1172,12 +1323,14 @@ impl ProtocolController {
         match request {
             ClientRequest::Capabilities {} => Ok(WireResult::Capabilities(Capabilities {
                 clock: clock_name(self.clock),
-                operations: if self.audio_enabled {
-                    &AUDIO_OPERATIONS
-                } else {
-                    &BASE_OPERATIONS
+                operations: match (self.audio_enabled, self.asset_preparation_enabled) {
+                    (false, false) => &BASE_OPERATIONS,
+                    (true, false) => &AUDIO_OPERATIONS,
+                    (false, true) => &PREPARATION_OPERATIONS,
+                    (true, true) => &AUDIO_PREPARATION_OPERATIONS,
                 },
                 audio_enabled: self.audio_enabled,
+                asset_preparation_enabled: self.asset_preparation_enabled,
                 max_line_bytes: MAX_PROTOCOL_LINE_BYTES,
                 max_response_bytes: MAX_PROTOCOL_RESPONSE_BYTES,
                 max_retained_tickets: MAX_PROTOCOL_TICKETS,
@@ -1374,11 +1527,11 @@ impl ProtocolController {
                     ))
                 } else {
                     match envelope.request {
-                        ClientRequest::Submit { operation } => {
-                            operation.native(self.audio_enabled).and_then(|operation| {
+                        ClientRequest::Submit { operation } => operation
+                            .native(self.audio_enabled, self.asset_preparation_enabled)
+                            .and_then(|operation| {
                                 self.submit_with_id(request_id.clone(), operation)
-                            })
-                        }
+                            }),
                         other => self.handle_request(other),
                     }
                 };
@@ -1475,6 +1628,7 @@ fn submit_error(error: SessionSubmitError) -> ProtocolError {
         SessionSubmitError::CapabilityDenied => "capability_denied",
         SessionSubmitError::ClockModeMismatch => "clock_mode_mismatch",
         SessionSubmitError::InvalidRequest => "invalid_request",
+        SessionSubmitError::AssetPreparationUnavailable => "asset_preparation_unavailable",
         #[cfg(feature = "audio")]
         SessionSubmitError::AudioUnavailable => "audio_unavailable",
         SessionSubmitError::ReservedCommandId => "reserved_command_id",
@@ -1582,6 +1736,9 @@ fn result_out(result: &SessionRequestResult) -> OperationResult {
             OperationResult::Step(steps.iter().map(step_out).collect())
         }
         SessionRequestResult::Status(status) => OperationResult::Status(status_out(status)),
+        SessionRequestResult::AssetPreparation(result) => {
+            OperationResult::AssetPreparation(preparation_result_out(result))
+        }
         #[cfg(feature = "audio")]
         SessionRequestResult::Audio(audio) => OperationResult::Audio(audio_result_out(audio)),
     }
@@ -1849,6 +2006,99 @@ fn status_out(status: &SessionStatus) -> StatusOut {
     }
 }
 
+fn preparation_id_out(id: PreparationId) -> PreparationIdOut {
+    PreparationIdOut {
+        session: DecimalU64(id.session().get()),
+        epoch: DecimalU64(id.epoch()),
+    }
+}
+
+fn preparation_state_name(state: PreparationState) -> &'static str {
+    match state {
+        PreparationState::Idle => "idle",
+        PreparationState::Pending => "pending",
+        PreparationState::Preparing => "preparing",
+        PreparationState::CpuPrepared => "cpu_prepared",
+        PreparationState::CancelRequested => "cancel_requested",
+        PreparationState::Cancelled => "cancelled",
+        PreparationState::Superseded => "superseded",
+        PreparationState::Failed => "failed",
+        PreparationState::Stopping => "stopping",
+        PreparationState::Stopped => "stopped",
+    }
+}
+
+fn preparation_candidate_out(candidate: &PreparationCandidateSummary) -> PreparationCandidateOut {
+    PreparationCandidateOut {
+        id: preparation_id_out(candidate.id()),
+        is_current: candidate.is_current(),
+        source_digest: candidate.source_digest().to_owned(),
+        catalog_digest: candidate.catalog_digest().to_owned(),
+        source_scene_revision: DecimalU64(candidate.source_scene_revision()),
+        asset_count: candidate.asset_count(),
+        entity_count: candidate.entity_count(),
+        memory: candidate.memory().clone(),
+        metrics: candidate.metrics().clone(),
+    }
+}
+
+fn preparation_failure_out(failure: &PreparationFailure) -> PreparationFailureOut {
+    PreparationFailureOut {
+        id: preparation_id_out(failure.id()),
+        code: failure.code().to_owned(),
+        message: failure.message().to_owned(),
+        source_id: failure.source_id().map(str::to_owned),
+        path: failure.path().map(str::to_owned),
+        diagnostic_truncated: failure.diagnostic_truncated(),
+    }
+}
+
+fn preparation_status_out(status: &AssetPreparationStatus) -> AssetPreparationStatusOut {
+    AssetPreparationStatusOut {
+        session: DecimalU64(status.session().get()),
+        active_generation: DecimalU64(status.active_generation()),
+        active_source_digest: status.active_source_digest().to_owned(),
+        active_cooked_accounted_bytes: status.active_cooked_accounted_bytes(),
+        desired: status.desired().map(preparation_id_out),
+        running: status.running().map(preparation_id_out),
+        pending: status.pending().map(preparation_id_out),
+        state: preparation_state_name(status.state()),
+        ready_candidate: status.ready_candidate().map(preparation_candidate_out),
+        latest_failure: status.latest_failure().map(preparation_failure_out),
+    }
+}
+
+fn preparation_command_out(command: &AssetPreparationCommandResult) -> AssetPreparationCommandOut {
+    let outcome = match command.outcome() {
+        AssetPreparationCommandOutcome::PrepareAccepted { candidate } => {
+            AssetPreparationCommandOutcomeOut::PrepareAccepted {
+                candidate: preparation_id_out(*candidate),
+            }
+        }
+        AssetPreparationCommandOutcome::CancelAccepted { candidate } => {
+            AssetPreparationCommandOutcomeOut::CancelAccepted {
+                candidate: preparation_id_out(*candidate),
+            }
+        }
+    };
+    AssetPreparationCommandOut {
+        command_id: DecimalU128(command.command_id().get()),
+        observed_tick: DecimalU64(command.observed_tick().get()),
+        outcome,
+    }
+}
+
+fn preparation_result_out(result: &AssetPreparationResult) -> AssetPreparationOut {
+    match result {
+        AssetPreparationResult::Command(command) => {
+            AssetPreparationOut::Command(preparation_command_out(command))
+        }
+        AssetPreparationResult::Status(status) => {
+            AssetPreparationOut::Status(Box::new(preparation_status_out(status)))
+        }
+    }
+}
+
 fn request_error(error: &SessionRequestError) -> ProtocolError {
     use SessionRequestError as E;
     let mut result = match error {
@@ -1903,11 +2153,22 @@ fn request_error(error: &SessionRequestError) -> ProtocolError {
         E::UnknownPendingCommand(_) => {
             ProtocolError::new("unknown_pending_command", error.to_string())
         }
+        E::AssetPreparationUnavailable => {
+            ProtocolError::new("asset_preparation_unavailable", error.to_string())
+        }
+        E::PreparationBusy => ProtocolError::retryable("busy", error.to_string()),
+        E::PreparationCapacity => ProtocolError::new("preparation_capacity", error.to_string()),
+        E::PreparationStopped => ProtocolError::new("preparation_stopped", error.to_string()),
+        E::InvalidCandidate => ProtocolError::new("invalid_candidate", error.to_string()),
+        E::CandidateExpired => ProtocolError::new("candidate_expired", error.to_string()),
+        E::CandidateNotActive => ProtocolError::new("candidate_not_active", error.to_string()),
+        E::PreparationEpochExhausted => {
+            ProtocolError::new("preparation_epoch_exhausted", error.to_string())
+        }
         #[cfg(feature = "audio")]
         E::AudioUnavailable => ProtocolError::new("audio_unavailable", error.to_string()),
         #[cfg(feature = "audio")]
         E::Audio(audio_error) => ProtocolError::new(audio_error.code(), audio_error.message()),
-        #[cfg(feature = "audio")]
         E::ReplayStorageUnavailable => {
             ProtocolError::retryable("replay_storage_unavailable", error.to_string())
         }

@@ -135,7 +135,7 @@ admission을 닫고 desired epoch를 취소한 뒤 worker가 실제 반환하는
 | `try_shutdown(&mut self)` | `Result<PreparationWorkerShutdown, ...>`; Stopping/Stopped. 종료 확인 후 join·실패 관찰. 실행 중이면 owner가 handle/cache 수명을 유지 |
 | `SessionControlService::start_shared_with_preparation(project, config, port)` | 원래 actor를 한 번만 생성. source와 port initial Arc의 ptr identity를 spawn 전에 검증 |
 | `start_shared_with_preparation_and_audio(project, config, port, audio_options)` | audio feature의 additive 조합. 기존 private startup 하나로 합류하며 별도 actor 없음 |
-| `SessionControlClient::asset_preparation_enabled()` | bool. 기존 public SessionCapabilities/config/limits field를 늘리지 않음 |
+| `SessionControlService::asset_preparation_enabled()` / `SessionControlClient::asset_preparation_enabled()` | 같은 actor의 bool capability 조회. 기존 public SessionCapabilities/config/limits field를 늘리지 않음 |
 
 Native service/port Drop은 stop을 요청한다. actor가 port를 drop하면 worker에도 stop이 전달되고, 외부 Native owner가 실제 worker join을 관찰한다. Native owner를 버려도 실행 중 thread closure가 cache owner를 유지한다. 다른 service에 port를 복제·재부착할 수 없고, source mismatch/두 번째 take는 명시적 오류다. native factory가 없는 target에서는 기능 unavailable이며 filesystem worker를 시작하지 않는다. 이번 변화로 runtime/browser 전체 target 지원을 인증하지 않는다.
 
@@ -151,7 +151,7 @@ source 분담 seam도 동결한다. `ProjectPreparationPort` type 자체는 publ
 | --- | --- |
 | `PreparationId` | opaque session+epoch, Copy/Eq/Debug, `from_parts/session/epoch`.0·foreign·future는 요청에서 검사 |
 | `SessionOperation::AssetPreparation(AssetPreparationOperation)` | `Prepare {command_id}`, `Cancel {command_id,candidate}`, `Status` |
-| `SessionRequestResult::AssetPreparation(AssetPreparationResult)` | `Command(AssetPreparationCommandResult)` 또는 `Status(AssetPreparationStatus)` |
+| `SessionRequestResult::AssetPreparation(AssetPreparationResult)` | `Command(AssetPreparationCommandResult)` 또는 `Status(Box<AssetPreparationStatus>)`. 큰 optional metadata가 모든 result 크기를 키우지 않도록 status만 box |
 | `AssetPreparationCommandResult` | private fields/public `command_id/observed_tick/outcome` getters |
 | `AssetPreparationCommandOutcome` | `PrepareAccepted {candidate}` / `CancelAccepted {candidate}`. worker 완료와 별개 |
 | `AssetPreparationStatus` | public read-only getters `session/active_generation/active_source_digest/active_cooked_accounted_bytes/desired/running/pending/state/ready_candidate/latest_failure` |
@@ -191,7 +191,9 @@ AlreadyTaken/AlreadyBound/initial source mismatch는 startup 오류이며 foreig
 
 capability 목록은 실제 연결 상태를 반영한다. worker를 켜지 않은 service는 명시적 unavailable이고 경로/asset payload를 요청 인자로 받지 않는다. 정상 inspect/mutate와 normal/Step ticket 예산, terminal을 AuthorityAccepted wait 충족으로 보는 기존 동작을 그대로 적용한다. 상태 복사 전에 count/byte를 검사하며 진단이 잘리면 truncated flag를 보존한다.
 
-현재 ticket 하나의 결과 상한은 기존 고정1MiB이며 public limits의 가변 total byte 예산과 구분한다. bounded status의 최대 DTO/진단/digest 크기에 대해 공통 보수 상한32KiB를 두고 이 cap 안에 드는지 복사 전에 검사한다. CLI에 또 다른 추정기를 만들거나, 존재하지 않는 가변 per-ticket 설정을 추가하지 않는다. Prepare/Cancel receipt도 effect 전에 결과 공간을 확인한다.
+현재 ticket 하나의 결과 상한은 기존 고정1MiB이며 public limits의 가변 total byte 예산과 구분한다. bounded status의 owned DTO/진단/digest에 대해 공통 보수 상한32KiB를 두고 이 cap 안에 드는지 복사 전에 검사한다. 이것은 escape된 JSON 전체의32KiB 한도가 아니며 encoded wire는 기존1MiB writer가 별도로 제한한다. port는 status를 값으로 반환하며 actor가 이 사전 검사 뒤 metadata box 하나를 만든다. asset payload export나 별도 무한 allocation이 아니다. CLI에 또 다른 추정기를 만들거나, 존재하지 않는 가변 per-ticket 설정을 추가하지 않는다. Prepare/Cancel receipt도 effect 전에 결과 공간을 확인한다.
+
+정상 worker metadata 경합의 terminal `busy`는 ticket 생성 뒤에도 발생할 수 있다. 자동화 helper는 이 정확한 오류에 한해 이전 ticket을 ACK하고 같은 caller command ID/새 transport request ID로 유한 deadline 안에서 재시도한다. semantic invalid candidate·import failure·다른 terminal 오류를 성공 재시도로 숨기지 않는다. queue admission Busy의 기존 retry와 actor의 pre-effect Busy를 구분하며, 어느 경로도 effect를 중복 생성하지 않는다.
 
 ## CLI·종료·파일 책임
 
@@ -206,11 +208,14 @@ Luna xhigh 파일 책임은 content memory summary, runtime worker/types+exports
 ## 하위 gate 검증
 
 - 실제 PNG/glTF/atlas/WAV project의 Prepare→CpuPrepared·metrics/source/catalog identity와 기본 render/audio 계속 실행을 같은 persistent session에서 관찰한다.
+- process helper에서 `--audio --asset-preparation`을 함께 고르면 preparation service 자체도 offline audio를 켜고 같은 actor의 실제 비영 PCM·독립 audio clock을 확인한다. `--view` 조합도 같은 audio/preparation factory를 사용하는 실행 창에서 확인한다. audio flag 없는 preparation-only mode는 출력 장치/오디오 feature를 새로 요구하지 않는다. 이 검사는 별도 audio-only process 성공으로 대신하지 않으며, import와 mix의 동시 실행 순서는 held-worker library test가 따로 증명한다.
 - worker를 importer 경계에서 제어해 one-running/one-latest, supersede/cancel, stale 성공/실패, private ready 해제 순서를 결정적으로 검사한다. 임의 sleep으로 경쟁을 통과시키지 않는다.
 - ACK/detach/reconnect 후 retained Prepare/Cancel replay가 epoch·import를 중복 생성하지 않고 eviction/cross-kind 결과가 기존 world/audio와 일치한다.
 - candidate payload가 ticket/status에 새어 나오지 않으며 여러 조회/ACK로 큰 backing이 누적되지 않는다. 기본 CPU/normal 포화에서도 reserved Step이 진행한다.
 - 같은 cache root의 두 owner는 Busy, 한 worker의 반복 준비는 정상 재사용, unchanged warm은 decode/cook0이며 read/parse가 남으면 그대로 기록한다.
 - 실제 요청 취소와 actual worker exit·cache lock 회수를 구분한다. non-cooperative read stub에서는 Stopping을 유지한다.
 - default/audio/전체 feature CPU·strict Clippy/Python, 기존 real Metal/visible/control/audio 회귀, clean extracted package와 PR/CI/main을 인수한다.
+
+두 native release/PR job은 기존 packaged assets+offline audio step에 `--asset-preparation` opt-in을 함께 전달해 **같은 staged CLI**의 새 CPU 경로도 확인한다. 새 job/별도 packaging backend/네트워크 fixture를 만들지 않고 기존 step 이름을 준비 검사까지 포함하도록 맞춘다. package backend의 기존 자동 CPU/audio smoke와 일반 사용자 smoke의 기본 의미는 유지하며, 로컬 clean archive 추출본의 preparation smoke는 별도로 실행한다. 공개 tag/Release는 이번 작업에서 만들지 않는다.
 
 P03.4 비용 표는 기존 smoke helper에 opt-in preparation 검증을 더해 source/binary hash·operator steps·wall time·read/parse/decode/cook/bytes·epoch·cancel/stale·active identity를 기록한다. 실제 화면·audio 교체 비용은 후속 b/c가 연결된 뒤 계측한다. 숫자나 테스트 개수로 엔진 제품 완료율을 만들지 않는다.

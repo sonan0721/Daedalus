@@ -34,6 +34,7 @@ worker가 concrete FileCookCache 하나를 직접 만들고 모든 준비에 순
 
 | 상태 | 실제 의미 |
 | --- | --- |
+| Idle | initial project만 있고 Prepare를 아직 수락하지 않음. candidate ID·running/pending/ready는 None |
 | Pending | 최신 요청 metadata가 bounded slot에 있고 이전 작업 반환을 기다림 |
 | Preparing | worker가 해당 epoch의 입력을 실제 읽고 import/cook 중 |
 | CpuPrepared | immutable PreparedProject를 worker의 private ready slot에 보유. 아직 active/display/audio 교체 아님 |
@@ -62,7 +63,7 @@ worker completion은 epoch를 다시 비교해 stale 성공/실패를 active 또
 
 ## 예산과 계측 범위
 
-P03.1의 source·decoded/cooked·metadata·cache 상한은 후보마다 그대로 적용한다. source 감사는 CookedBytes에 payload와 catalog/binding 추정치가 포함되지만 parsed manifest/scene JSON·legacy mesh 자료·모든 allocation이 들어가지는 않음을 확인했다. active PreparedProject와 uncommitted candidate가 동시에 존재하므로 단일 catalog128MiB를 전체 runtime memory 한도로 표현하지 않는다. private ready slot과 running import를 겹치지 않는 수명 규칙을 고정한다.
+P03.1의 source·decoded/cooked·metadata·cache 상한은 후보마다 그대로 적용한다. CookedBytes에는 imported payload·legacy mesh의 vertex/index byte charge·catalog/binding 추정치가 포함된다. 그러나 parsed manifest/scene JSON·추가로 복제된 legacy mesh backing·모든 allocation을 완전히 세는 장부는 아니다. active PreparedProject와 uncommitted candidate가 동시에 존재하므로 단일 catalog128MiB를 전체 runtime memory 한도로 표현하지 않는다. private ready slot과 running import를 겹치지 않는 수명 규칙을 고정한다.
 
 | 항목 | 기본값/하드 상한 | admission과 의미 |
 | --- | --- | --- |
@@ -92,13 +93,15 @@ memory summary 단독 하위 API는 source 감사와 리뷰 후 다음과 같이
 
 summary는 Clone/Debug/PartialEq/Serialize를 제공하고 JSON report의 additive `memory` 아래 camelCase 필드로 기록한다. public constructor나 mutable field는 제공하지 않는다. legacy의 unavailable은 기존 `PreparedProject::asset_import_report() == None`로 나타낸다. report가 있는 empty catalog도 실제 ledger를 반환하며 임의0이나 missing으로 바꾸지 않는다. source/catalog/cook key·저장 cache format·기존 metrics 필드는 그대로다. 계측을 위해 PCM/image/geometry를 clone·재해시하거나 두 번째 byte estimator를 만들지 않고 기존 BudgetState와 이미 수집한 source identities를 사용한다.
 
+`project cook`의 기존 bounded 요약에도 같은 `report.memory()`를 additive `memory`로 직렬화한다. library report·CLI·향후 preparation status가 각자 별도 메모리 계산기를 만들지 않는다. 기존 metrics/counts와 CPU-only runtime-consumer 의미는 유지한다.
+
 첫 status는 진행 중인 외부 parser의 live byte counter를 만들어 채우지 않는다. running epoch와 active cooked 장부는 알려진 값으로 표시하고 candidate의 최종 cooked/input/scratch summary는 준비가 반환한 뒤에만 Some으로 보고한다. 아직 없거나 legacy인 값은 unavailable/None이며0과 구분한다. summary는 captured 입력과 엔진의 예약 장부이고 외부 allocator를 관측한 값이 아니다.
 
 native factory가 만든 initial project의 새 summary를 사용해 active 장부를 초기화한다. legacy/외부 prepared 값에 summary가 없으면 unknown을0으로 처리하지 않고 preparation 기능의 startup unsupported/계측 불가 오류로 구분한다. 기본 기존 service는 계속 그 prepared 값을 사용할 수 있다. active/candidate가 같은 cook key를 참조하더라도 이 논리적 두-catalog 장부는 보수적으로 각각 charge하며 cross-generation pointer dedup을 구현했다고 표시하지 않는다.
 
 | ledger | 측정할 자료 | 포함했다고 주장하지 않을 범위 |
 | --- | --- | --- |
-| retained active/candidate | 기존 cooked-accounted 장부·catalog/binding metadata 추정과 owner/slot 수 | scene/manifest JSON의 미계측 heap·legacy geometry·caller가 명시적으로 복제한 자료 전체·정확한 unique backing 계측 |
+| retained active/candidate | 기존 cooked-accounted 장부·catalog/binding metadata 추정과 owner/slot 수 | scene/manifest JSON의 미계측 heap·추가 legacy geometry 복제 backing·caller가 명시적으로 복제한 자료 전체·정확한 unique backing 계측 |
 | preparation input/transient | source bytes·decoded PNG/audio·변환 scratch의 기존 budget | 외부 parser 내부 allocator/전체 process RSS의 완전 계측 |
 | control/result | 요청·status/page·ticket·replay의 bounded count/bytes | asset payload를 작은 status 크기로 대체 회계 |
 | cache | 기존 concrete cache limits·정확한 owner lock·entry validation | cache hit를 runtime consumer activation으로 해석 |
@@ -138,6 +141,10 @@ Native service/port Drop은 stop을 요청한다. actor가 port를 drop하면 wo
 
 port의 효과 함수는 crate-private다. `initial_project()`와 `try_prepare(epoch: u64)`, `try_cancel(epoch: u64)`, `try_status(session: SessionId)` 및 stop 신호를 actor에서만 사용한다. epoch issuer는 actor 한 곳이고 worker는 전달된 epoch를 검증한다. 일반 SDK 사용자가 port를 통해 replay/capability를 우회할 mutation API를 얻지 않는다.
 
+source 분담 seam도 동결한다. `ProjectPreparationPort` type 자체는 public opaque이고 non-Clone이다. crate-private `matches_initial_project(&Arc<PreparedProject>) -> bool`로 spawn 전 pointer identity를 확인하며, `bind_session(SessionId)`는 actor가 실제 ProjectSession을 만든 뒤 startup 성공을 보내기 전에 한 번만 호출한다. 별도 session ID를 만들지 않는다. `try_status(session)`은 `Result<AssetPreparationStatus, ProjectPreparationPortError>`를 직접 반환해 actor에 또 다른 snapshot 변환기를 만들지 않는다. 상태의 current 판정은 같은 lock에서 수락한 desired/cancel metadata를 기준으로 한다.
+
+`AssetPreparationCommandResult::new(CommandId, Tick, AssetPreparationCommandOutcome)`는 crate-private constructor다. port 오류는 Busy·Stopped·SessionMismatch·InvalidEpoch·NoActiveCandidate·AlreadyBound·AlreadyTaken·Capacity를 구분한다. actor는 자신의 epoch issuer로0/foreign/future/expired를 효과 전에 검사하며, worker의 pre-read capacity 거부도 ID를 소비하지 않는다. 이 내부 seam의 오류/DTO는 기존 request/replay가 요구하는 Clone/Debug/Eq 범위를 맞추되 public mutable field나 payload export를 추가하지 않는다.
+
 ## 공통 operation·결과·wire 동결
 
 | runtime type/API | 형태·의미 |
@@ -152,6 +159,8 @@ port의 효과 함수는 crate-private다. `initial_project()`와 `try_prepare(e
 | `PreparationFailure` | read-only `id/code/message/source_id/path/diagnostic_truncated`. 마지막1개, code64/message2048/source_id4096/path4096 UTF-8 bytes 상한 |
 
 새 타입/enum은 실험적0.1 additive API다. 기존 enum을 audio feature로 확장한 것과 마찬가지로 exhaustive match의 source 변경 가능성을 문서화한다. 기존 public literal config/metrics/capabilities를 바꾸지 않는다. 상태 getters의 optional ID/summary/failure는 값이 없을 때 None이고 임의 generation0/bytes0으로 바꾸지 않는다.
+
+candidate의 `asset_count`는 legacy mesh descriptor도 포함한 `prepared.scene().assets.len()`, `entity_count`는 검증한 `prepared.entities().len()`이다. imported catalog digest/memory와 선언 수의 범위를 혼동하지 않는다.
 
 상태의 `desired`와 실제 `running/ready` epoch는 다를 수 있다. newer Prepare가 수락된 직후 이전 ready의 큰 payload는 worker가 실제 해제하기 전까지 존재할 수 있다. ready summary의 `is_current`는 desired epoch·취소 상태와 함께 계산하며 stale 것을 activation-ready처럼 표시하지 않는다. worker가 그 payload를 해제하기 전에 retained byte/slot을0으로 보고하지 않는다. 새 import는 이전 ready를 worker에서 해제한 뒤 시작한다.
 

@@ -1565,3 +1565,67 @@ pub struct AssetImportMetrics {
     pub cache_entries_current: u64,
     pub catalog_metadata_bytes: u64,
 }
+
+/// Immutable summary of bytes accounted during one asset-aware project preparation.
+///
+/// These values describe engine-owned budget ledgers and captured source identities. They do not
+/// represent complete process memory or allocations inside external parsers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetImportMemorySummary {
+    schema_version: u32,
+    cooked_accounted_bytes: u64,
+    decoded_base_image_bytes: u64,
+    parser_scratch_peak_bytes: u64,
+    unique_source_count: usize,
+    captured_source_bytes: u64,
+}
+
+impl AssetImportMemorySummary {
+    pub(crate) fn new(
+        cooked_accounted_bytes: u64,
+        decoded_base_image_bytes: u64,
+        parser_scratch_peak_bytes: u64,
+        unique_source_count: usize,
+        captured_source_bytes: u64,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            cooked_accounted_bytes,
+            decoded_base_image_bytes,
+            parser_scratch_peak_bytes,
+            unique_source_count,
+            captured_source_bytes,
+        }
+    }
+
+    /// Version of this additive serialized summary schema.
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Current cooked-byte ledger at the end of preparation, including catalog metadata estimates.
+    pub fn cooked_accounted_bytes(&self) -> u64 {
+        self.cooked_accounted_bytes
+    }
+
+    /// Decoded base-image bytes in the separate image budget; these may overlap cooked bytes.
+    pub fn decoded_base_image_bytes(&self) -> u64 {
+        self.decoded_base_image_bytes
+    }
+
+    /// Peak simultaneous accepted scoped parser/cache scratch reservations in this context.
+    pub fn parser_scratch_peak_bytes(&self) -> u64 {
+        self.parser_scratch_peak_bytes
+    }
+
+    /// Number of distinct captured source identities.
+    pub fn unique_source_count(&self) -> usize {
+        self.unique_source_count
+    }
+
+    /// Sum of bytes for distinct captured source identities.
+    pub fn captured_source_bytes(&self) -> u64 {
+        self.captured_source_bytes
+    }
+}

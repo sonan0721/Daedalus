@@ -18,13 +18,13 @@ pub use source::{
     ByteMapSourceResolver, NativeProjectResolver, SourceBlob, SourceId, SourceResolver,
 };
 pub use types::{
-    AssetDependencySummary, AssetImportError, AssetImportErrorCode, AssetImportMetrics, AssetKind,
-    AssetSummary, AtlasRegion, AudioAsset, CacheKey, CacheNamespace, CookedResourceKeySummary,
-    CookedResourceKind, DecodedImage, GeometryResource, ImageAsset, ImageColorPolicy, ImageMip,
-    ImageRole, ImageSampler, ImportCancellation, ImportLimits, ImportLocation, ImportedAsset,
-    LeafCookKey, MipPolicy, MipmapFilter, ModelImageIdentity, ModelMaterial, ModelNode,
-    ModelOwnedImage, ModelPrimitive, ModelTextureRef, SpriteAtlas, StaticModel, TextureFilter,
-    TextureWrap,
+    AssetDependencySummary, AssetImportError, AssetImportErrorCode, AssetImportMemorySummary,
+    AssetImportMetrics, AssetKind, AssetSummary, AtlasRegion, AudioAsset, CacheKey, CacheNamespace,
+    CookedResourceKeySummary, CookedResourceKind, DecodedImage, GeometryResource, ImageAsset,
+    ImageColorPolicy, ImageMip, ImageRole, ImageSampler, ImportCancellation, ImportLimits,
+    ImportLocation, ImportedAsset, LeafCookKey, MipPolicy, MipmapFilter, ModelImageIdentity,
+    ModelMaterial, ModelNode, ModelOwnedImage, ModelPrimitive, ModelTextureRef, SpriteAtlas,
+    StaticModel, TextureFilter, TextureWrap,
 };
 
 /// Selects how PNG color metadata affects the decoded base pixels.
@@ -178,6 +178,7 @@ pub struct AssetImportReport {
     assets: Vec<AssetSummary>,
     sources: Vec<AssetSourceSummary>,
     metrics: AssetImportMetrics,
+    memory: AssetImportMemorySummary,
 }
 
 impl AssetImportReport {
@@ -185,6 +186,7 @@ impl AssetImportReport {
         catalog: &PreparedAssetCatalog,
         sources: Vec<SourceBlob>,
         metrics: AssetImportMetrics,
+        memory: AssetImportMemorySummary,
     ) -> Self {
         let sources = sources
             .into_iter()
@@ -199,6 +201,7 @@ impl AssetImportReport {
             assets: catalog.summaries.clone(),
             sources,
             metrics,
+            memory,
         }
     }
     pub fn catalog_digest(&self) -> &str {
@@ -212,6 +215,9 @@ impl AssetImportReport {
     }
     pub fn metrics(&self) -> &AssetImportMetrics {
         &self.metrics
+    }
+    pub fn memory(&self) -> &AssetImportMemorySummary {
+        &self.memory
     }
 }
 
@@ -232,7 +238,10 @@ pub enum BudgetKind {
 }
 
 #[derive(Clone, Debug, Default)]
-struct BudgetState(BTreeMap<BudgetKind, u64>);
+struct BudgetState {
+    current: BTreeMap<BudgetKind, u64>,
+    parser_scratch_peak_bytes: u64,
+}
 
 /// Temporary checked allocation allowance. Drop returns the reserved bytes.
 #[derive(Debug)]
@@ -245,11 +254,11 @@ pub struct TemporaryBudget {
 impl Drop for TemporaryBudget {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock()
-            && let Some(value) = state.0.get_mut(&self.kind)
+            && let Some(value) = state.current.get_mut(&self.kind)
         {
             *value = value.saturating_sub(self.amount);
             if *value == 0 {
-                state.0.remove(&self.kind);
+                state.current.remove(&self.kind);
             }
         }
     }
@@ -269,7 +278,7 @@ fn reserve_shared_budget(
             "budget ledger is unavailable",
         )
     })?;
-    let current = ledger.0.get(&kind).copied().unwrap_or_default();
+    let current = ledger.current.get(&kind).copied().unwrap_or_default();
     let next = current.checked_add(amount).ok_or_else(|| {
         AssetImportError::new(
             AssetImportErrorCode::LimitExceeded,
@@ -284,7 +293,10 @@ fn reserve_shared_budget(
             format!("{kind:?} budget would exceed configured limit {limit}"),
         ));
     }
-    ledger.0.insert(kind, next);
+    ledger.current.insert(kind, next);
+    if kind == BudgetKind::ParserScratchBytes {
+        ledger.parser_scratch_peak_bytes = ledger.parser_scratch_peak_bytes.max(next);
+    }
     drop(ledger);
     Ok(TemporaryBudget {
         state,
@@ -441,7 +453,7 @@ impl<'a> AssetImportContext<'a> {
             ));
         }
         let mut usage = BudgetState::default();
-        usage.0.insert(BudgetKind::SourceBytes, source_bytes);
+        usage.current.insert(BudgetKind::SourceBytes, source_bytes);
         let cache_start = cache.stats();
         Ok(Self {
             resolver,
@@ -582,7 +594,7 @@ impl<'a> AssetImportContext<'a> {
             .usage
             .lock()
             .ok()
-            .and_then(|usage| usage.0.get(&BudgetKind::SourceBytes).copied())
+            .and_then(|usage| usage.current.get(&BudgetKind::SourceBytes).copied())
             .unwrap_or_default();
         let remaining_total = self
             .limits
@@ -647,7 +659,7 @@ impl<'a> AssetImportContext<'a> {
                     "budget ledger is unavailable",
                 )
             })?
-            .0
+            .current
             .get(&kind)
             .copied()
             .unwrap_or_default();
@@ -681,7 +693,7 @@ impl<'a> AssetImportContext<'a> {
             )
         })?;
         let next = state
-            .0
+            .current
             .get(&kind)
             .copied()
             .unwrap_or_default()
@@ -693,7 +705,7 @@ impl<'a> AssetImportContext<'a> {
                     "budget counter overflow",
                 )
             })?;
-        state.0.insert(kind, next);
+        state.current.insert(kind, next);
         Ok(())
     }
 
@@ -1004,6 +1016,42 @@ impl<'a> AssetImportContext<'a> {
         metrics.cache_entries_current = stats.current_entries;
         metrics
     }
+
+    pub(crate) fn memory_summary(&self) -> Result<AssetImportMemorySummary, AssetImportError> {
+        let location = ImportLocation::default();
+        let captured_source_bytes = self.sources.values().try_fold(0u64, |total, source| {
+            total.checked_add(source.byte_len()).ok_or_else(|| {
+                AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    location.clone(),
+                    "captured source byte count overflow",
+                )
+            })
+        })?;
+        let usage = self.usage.lock().map_err(|_| {
+            AssetImportError::new(
+                AssetImportErrorCode::Internal,
+                location.clone(),
+                "budget ledger is unavailable",
+            )
+        })?;
+        Ok(AssetImportMemorySummary::new(
+            usage
+                .current
+                .get(&BudgetKind::CookedBytes)
+                .copied()
+                .unwrap_or_default(),
+            usage
+                .current
+                .get(&BudgetKind::DecodedImageBytes)
+                .copied()
+                .unwrap_or_default(),
+            usage.parser_scratch_peak_bytes,
+            self.sources.len(),
+            captured_source_bytes,
+        ))
+    }
+
     pub fn cache_stats(&self) -> crate::assets::CacheStats {
         self.cache.stats()
     }

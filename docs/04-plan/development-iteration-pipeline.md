@@ -137,3 +137,15 @@ PNG alpha 감사는 같은 readback/row-unpadding/encoder에 private 표현 poli
 QA에서도 관찰 경계를 재사용한다. 첫 sprite native 회귀가 initial frame coalescing 때문에 실패했고 published snapshot 조회는 실제 present ACK를 대신하지 못했다. 중복 polling·sleep을 추가하지 않고 최종 native actual view와 기존 ordered Metal dirty-write 시험으로 근거를 나눴다. device 없는 CPU24(audio 포함)와 실제 native1을 opt-in으로 결합하며, package CI도 기존 asset step에 audio를 붙인다. clean archive·CI/main 결과는 아직 대기이며 DEV06/07 전체 완료는 아니다.
 
 후속 clean archive `95de9b0`도 동일 helper의46건/15.094582초와 공개 WAV offline·native-view를 통과했다. same-window 음향 QA는 기존 public source·JSONL/ACK/timeout·window-report helper를 확장한 ignored 일회성 mode로 확인했다. 새 별도 protocol/게임 project를 추가하지 않았다. notice 누락은 실제 두 target graph를 먼저 검사해 macOS10/Linux공통2를 함께 보강했고 strict221/236dependency의 missing0을 확인했다. 실제 PR CI/main 인수는 아직 대기다. 구체 source/artifact hash와 첫 실패는 audio worklog를 따른다.
+
+그 뒤 PR13의 다섯 CI·두 packaged assets/audio37건·Linux 동적 linkage와 main 동일 tree를 확인해 P03.2c를 인수했다. 이 결과로 DEV06/07 전체나 엔진 제품을 완료 처리하지 않는다.
+
+## P03.3a에서 줄일 개발 반복
+
+[비동기 준비 계약](../03-architecture/project-asset-preparation.md)은 에셋을 고칠 때마다 project load·service/장치 생성·session handle 취득을 반복해야 하는 현재 경로를 다음 대상으로 삼는다. 한 native worker/cache owner를 유지하고 기존 protocol2의 Prepare/Cancel/Status와 ticket/replay를 사용한다. CLI 전용 importer나 두 번째 authority를 만들지 않는다. 첫 단계는 CPU 후보 준비까지이며 화면/audio 전환과 자동 watcher는 후속이다.
+
+메모리 계측도 importer의 기존 budget ledger와 captured input identities에서 한 번 만든다. library report·bounded CLI cook 출력·후속 preparation status가 같은 summary schema를 참조한다. cold/warm마다 payload를 다시 clone·hash하거나 별도 estimator를 유지하는 중복을 추가하지 않는다. CookedBytes는 전체 heap/RSS가 아니며 decoded image와 중복되는 범위를 명시한다.
+
+구현 분담은 content memory summary → runtime worker/공통 type의 정확한 signature 공유 → actor/CLI adapter 순서다. worker와 actor를 병렬로 작성하기 전에 private 오류·constructor·getter까지 맞춰 컴파일 후 API 재작업을 줄인다. Cargo는 한 담당이 shared target을 사용하고 focused 검증 뒤 통합·장치·archive로 확장한다. 테스트 count와 API 공유 자체는 개발 속도 개선의 측정 결과가 아니다. 실제 반복 import의 read/parse/decode/cook·epoch·session/active identity·wall time과 실패는 [준비 작업 기록](../06-worklog/2026-10-16-project-asset-preparation.md)에 남긴다.
+
+작은 cook-summary 테스트에서 두 번의 lexical compile 오류를 조정자 빌드→작업자 source 수정으로 왕복한 뒤 검증 소유권을 조정했다. source-only 병렬 작업 중에도 다른 Cargo 사용자가 없고 동시 source 변경을 멈춘 구간이면, 해당 Luna에게 **한정한 focused command와 shared-target lease**를 넘겨 자기 범위의 compile/test를 마치게 한다. 완료 뒤 source/Cargo를 명시적으로 회수하고 조정자는 실제 CLI/통합 동작을 검증한다. 하나의 Cargo owner·실패 raw log·독립 제품 검증은 유지하면서 단순 compiler feedback 전달을 줄이는 변경이다. 이전 대비 wall-time 개선은 측정하지 않았다.

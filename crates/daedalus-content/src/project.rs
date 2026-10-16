@@ -1098,7 +1098,8 @@ fn prepare_project_with_asset_sources(
         dependencies,
         context.take_cache_leases(),
     );
-    let report = AssetImportReport::new(&catalog, sources, context.metrics());
+    let memory = context.memory_summary()?;
+    let report = AssetImportReport::new(&catalog, sources, context.metrics(), memory);
     let prepared = PreparedProject {
         manifest,
         scene,
@@ -3851,8 +3852,133 @@ mod tests {
         assert_eq!(byte_metrics.source_reads, 2);
         assert_eq!(native_metrics.source_reads, 2);
         assert_eq!(byte_metrics.source_bytes, native_metrics.source_bytes);
+        let empty_report = from_bytes.asset_import_report().unwrap();
+        let empty_memory = empty_report.memory();
+        assert!(empty_report.assets().is_empty());
+        assert_eq!(empty_memory.unique_source_count(), 2);
+        assert_eq!(
+            empty_memory.captured_source_bytes(),
+            empty_report
+                .sources()
+                .iter()
+                .map(|source| source.byte_len())
+                .sum::<u64>()
+        );
+        assert_eq!(
+            empty_memory.cooked_accounted_bytes(),
+            empty_report.metrics().catalog_metadata_bytes
+        );
         from_bytes.validate().unwrap();
         from_native.validate().unwrap();
+    }
+
+    #[test]
+    fn asset_import_memory_summary_matches_cold_and_warm_project_sources() {
+        let manifest_bytes = manifest("scene.json");
+        let scene_bytes = model_project_scene(true);
+        let mut sources = minimal_model_sources();
+        sources.insert("sprites/pixel.png".to_owned(), png_rgba([23, 47, 89, 255]));
+        let cancellation = ImportCancellation::never();
+        let mut cache = crate::assets::MemoryCookCache::default();
+
+        let mut cold_resolver =
+            crate::assets::ByteMapSourceResolver::from_bytes(sources.clone()).unwrap();
+        let cold = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut cold_resolver,
+            &mut cache,
+            ImportLimits::default(),
+            &cancellation,
+        )
+        .unwrap();
+        let cold_report = cold.asset_import_report().unwrap();
+        let cold_memory = cold_report.memory();
+        let source_bytes = cold_report
+            .sources()
+            .iter()
+            .try_fold(0u64, |total, source| total.checked_add(source.byte_len()))
+            .unwrap();
+
+        assert_eq!(cold_memory.schema_version(), 1);
+        assert!(cold_memory.cooked_accounted_bytes() > 0);
+        assert_eq!(cold_memory.decoded_base_image_bytes(), 4);
+        assert!(cold_memory.parser_scratch_peak_bytes() > 0);
+        assert_eq!(
+            cold_memory.unique_source_count(),
+            cold_report.sources().len()
+        );
+        assert_eq!(cold_memory.captured_source_bytes(), source_bytes);
+        assert_eq!(cold_report.metrics().png_base_decodes, 1);
+
+        let serialized = serde_json::to_value(cold_report).unwrap();
+        assert_eq!(serialized["memory"]["schemaVersion"], 1);
+        assert_eq!(
+            serialized["memory"]["capturedSourceBytes"],
+            cold_memory.captured_source_bytes()
+        );
+        assert!(serialized["memory"].get("parserScratchPeakBytes").is_some());
+
+        let mut warm_resolver =
+            crate::assets::ByteMapSourceResolver::from_bytes(sources.clone()).unwrap();
+        let warm = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut warm_resolver,
+            &mut cache,
+            ImportLimits::default(),
+            &cancellation,
+        )
+        .unwrap();
+        let warm_report = warm.asset_import_report().unwrap();
+        let warm_memory = warm_report.memory();
+        let warm_source_bytes = warm_report
+            .sources()
+            .iter()
+            .try_fold(0u64, |total, source| total.checked_add(source.byte_len()))
+            .unwrap();
+
+        assert_eq!(warm_report.metrics().png_base_decodes, 0);
+        assert_eq!(
+            warm_memory.cooked_accounted_bytes(),
+            cold_memory.cooked_accounted_bytes()
+        );
+        assert_eq!(
+            warm_memory.decoded_base_image_bytes(),
+            cold_memory.decoded_base_image_bytes()
+        );
+        assert_eq!(
+            warm_memory.unique_source_count(),
+            warm_report.sources().len()
+        );
+        assert_eq!(warm_memory.captured_source_bytes(), warm_source_bytes);
+        assert_eq!(
+            warm_memory.captured_source_bytes(),
+            cold_memory.captured_source_bytes()
+        );
+        assert!(warm_memory.parser_scratch_peak_bytes() > 0);
+
+        let cooked_limit = cold_memory
+            .cooked_accounted_bytes()
+            .checked_sub(1)
+            .expect("the accepted cold preparation must have a nonzero cooked ledger");
+        let limits = ImportLimits {
+            max_cooked_bytes: cooked_limit,
+            ..ImportLimits::default()
+        };
+        let mut limited_resolver =
+            crate::assets::ByteMapSourceResolver::from_bytes(sources).unwrap();
+        let mut limited_cache = crate::assets::MemoryCookCache::default();
+        let error = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut limited_resolver,
+            &mut limited_cache,
+            limits,
+            &cancellation,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), AssetImportErrorCode::LimitExceeded);
     }
 
     #[test]

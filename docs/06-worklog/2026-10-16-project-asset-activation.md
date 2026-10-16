@@ -40,8 +40,18 @@ move-only opaque project lease·single handoff slot·off-actor retirement owner�
 
 PR15의 실제 cache restore·compile 구간·기존 packaged50·다섯 CI/main 동일 tree까지 확인했다. [개발 반복 기록](../04-plan/development-iteration-pipeline.md)에 exact identity와 raw log를 둔다. 새 main push 실행은 진행 중이며 activation code가 추가된 것으로 계산하지 않는다.
 
+후속 자동 main push run38909669190도 두 실제 package/staged50·cache restore·Publish skipped를 확인했다. 이 좁은 개발 pipeline 개선은 인수했으며 새 activation source의 근거와 분리한다.
+
 ## P03.3b.1 공통 비교기부터 구현
 
 소비자마다 중복 비교를 만들지 않도록 [호환성 상세 계약](../03-architecture/asset-replacement-compatibility.md)을 먼저 동결했다. manifest/asset metadata·entity/component 관계와 authored data는 보존하고, source payload/URI/hash·scene revision/배열 순서의 허용 범위를 명시했다. 큰 JSON을 복사하지 않는4MiB logical reference-index 상한과 deterministic bounded 오류를 둔다. 아직 구현 통과로 체크하지 않는다.
 
 Luna project 담당에게 content 새 module·lib re-export·필요한 기존 project test 최소 변경만 배정했다. 단독 Cargo/shared-target lease와 고유 `p03-compatibility-*-luna-attemptNN.log`를 사용해 focused→content 전체→strict Clippy→content Wasm/fmt를 검사한다. 다른 Luna 두 명은 additive consuming native owner/retirement, 실제 audio Frame backing 회수 seam을 각각 read-only로 조사한다. renderer/runtime/audio의 dependent source는 API를 동결하기 전 수정하지 않는다.
+
+focused attempt01은8개 중6개 통과·2개 실패였다. 하나는 기존 loader가 parent/hierarchy를 거부해 valid PreparedProject fixture를 만들 수 없는 사례였고 허위 입력으로 비교기 지원을 증명하지 않는다. 다른 하나는 entity mismatch를 기대하면서 asset set도 다른 fixture여서 deterministic 우선순위상 AssetSet이 올바르게 먼저 반환된 test 구성 오류였다. 작업자는 같은 asset set의 valid 입력으로 수정 중이며 최초 raw를 보존했다. 아직 최종 통과가 아니다.
+
+## P03.3b.2 다음 소유권 계약
+
+[headless CPU 세대 계약](../03-architecture/headless-asset-generation.md)을 작성했다. 공통 Stage/Commit/Cancel/Status·consuming owner·worker reclamation Arc·같은 snapshot의 새 frame sequence를 명시했다. renderer/audio를 지원한 것으로 우회하지 않고 CPU identity/수명을 먼저 검사하는 b의 내부 단계다. b.1 검증/source 리뷰와 다음 계약의 구현 가능성 확인을 마친 뒤 runtime 코드를 배정한다.
+
+audio read-only 리뷰도 마쳤다. pinned Kira0.12.5의 render-owned sound가 실제 Frame Arc를 잡고 있고 handle reap은 이를 증명하지 않는다. weak observer만으로 callback의 마지막 큰 free를 막을 수 없어 실제 leaf 공유 store·generation alias/voice·cleanup strong sentinel과 정확한 owner baseline이 필요하다. project-audio/service source map은 명세에 반영했으며 audio 새 API·multibank/실제 회수는 아직 구현하지 않았다. 리뷰 담당은 source 수정과 tests를 실행하지 않았다.

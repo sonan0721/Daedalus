@@ -66,6 +66,8 @@ P03.3a의 worker-local payload를 그냥 actor로 이동하면 마지막 Vec/Arc
 
 worker의 active cooked 장부도 현재 초기 source 값으로 고정돼 있다. commit/retire 시 generation별 charge가 정확히 이동해야 한다. 후보를 queue로 넘기거나 취소 표시하는 시점에 byte quota를 먼저 돌려주지 않는다. retirement slot이 가득 찼을 때 commit 전에 공간을 예약하고 명시적 Busy를 반환할 수 있어야 한다. 종료/Drop 경로도 큰 backing을 caller thread로 떠넘기지 않는지 검증한다.
 
+회수의 구체 후보는 worker가 모든 engine-owned project의 reclamation Arc를 유지하고 `Arc::try_unwrap` 성공 뒤 큰 project를 worker에서 파괴하는 방식이다. 실패 Arc는 장부와 함께 유지하며 `.ok()`로 버리지 않는다. source 단독 소유권과 초기 참조 consume·panic/stop 정리 순서는 아직 다음 native owner 계약에서 동결할 사항이다. [공식 Arc 계약](https://doc.rust-lang.org/std/sync/struct.Arc.html#method.try_unwrap)은 이 선택의 근거이며 refcount를 한 번 읽은 것만으로 회수 완료를 보고하지 않는다. worker의 기존 outer catch 안에만 backstop을 두면 panic unwind 때 먼저 사라질 수 있어, failure guard와 actor 종료·실제 final drop도 함께 검토한다.
+
 read-only 리뷰의 API 후보는 non-Clone opaque `PreparedProjectLease`와 단일 bounded handoff slot이다. lease에는 candidate ID·memory charge·borrowed source view를 묶고 commit/폐기까지 reservation을 유지한다. `try_take_candidate`의 정확한 visibility·receiver/coordinator 경계와 `project()` borrow가 기존 Clone API에 노출하는 범위는 아직 동결하지 않았다. renderer/runtime 사이에 현재 없는 dependency를 가정해 crate-private 메서드를 다른 crate에서 호출하는 signature를 확정하지 않는다.
 
 one-running/one-latest 준비 정책을 유지한다. staged/retired 자원이 다음 후보와 겹칠 때의 합산 예산을 먼저 확보한다. 확보할 수 없으면 retryable Busy/Capacity를 반환하거나 최신 metadata만 보류한다. 무제한 source를 미리 읽거나 old consumer를 파괴해 공간을 만들지 않는다. staged 후보가 취소/교체되어도 제출된 GPU 작업과 audio backing이 실제 해제될 때까지 charge를 유지한다.
@@ -106,6 +108,8 @@ GPU staging은 기존 device와 completion tracking을 사용한다. CPU upload 
 Frame 변환은 `(실제 audio leaf identity, Frame layout version)`의 동일한 backing을 재사용하는 방향이다. 동일 key라도 실제로 별도 allocation을 만들었으면 공유한 것처럼 계수하지 않는다. 새 bank 전체를 매번 다시 변환하는 반복과 voice마다 PCM 복사를 피한다. backend sample clock·기존 native stream과 voice ID는 유지한다.
 
 old bank/frame charge를 해제하려면 tracked voice 종료뿐 아니라 backend/callback의 보유도 설명해야 한다. 기존 private Arc·backend ownership을 조사해 안전한 observation/retirement seam을 동결한다. 확인할 수 없으면 보수적으로 charge를 유지하고 explicit backpressure를 반환한다. 사용자 모드의 임의 native allocation까지 제한한다고 주장하지 않는다.
+
+추가 pinned-source 리뷰는 `PcmClip`→`StaticSoundData`→Kira render-owned `StaticSound`가 같은 `Arc<[Frame]>`를 보유하고 handle은 command/playback state만 보유함을 확인했다. 따라서 voice reap과 backing 회수는 다르다. 다음 audio 계약의 후보는 actual allocation별 단일 Frame store·`(LeafCookKey, Frame layout version)` 재사용·generation별 alias metadata와 voice origin·opaque backing observer다. observer만 weak로 두면 실제 소멸은 알 수 있어도 마지막 큰 free를 callback/actor에서 피하지 못한다. retirement cleanup owner가 strong sentinel을 유지하고 old Play 차단·bank/candidate owner 해제 뒤 sentinel-only baseline을 확인한 후 그 owner에서 해제하는 순서까지 필요하다. unsized `[Frame]`에 Sized project의 try_unwrap을 그대로 적용하지 않는다. 아직 API/owner baseline·metadata/종료 계약을 동결하거나 구현하지 않았다.
 
 ## 한도와 수명 장부
 

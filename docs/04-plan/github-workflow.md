@@ -52,6 +52,8 @@ PR14에서 두 새 combined50 step·Linux linkage·다섯 CI와 main 동일 tree
 
 후속 [PR15](https://github.com/sonan0721/Daedalus/pull/15)는 두 primary-key cache restore·두 staged50·다섯 CI·Publish skipped를 확인해 main `c2283cb`에 인수했다. head `9c7e271`·CI synthetic `a4fd018`·main의 tree `9d484f6be44d7ea1b4359eeb6328e675e6a28388`도 같았다. 새 main push의 release workflow가 실제 시작했으며 최종 결과와 compile 시간의 범위는 [개발 반복 기록](development-iteration-pipeline.md)에 이어 기록한다. 이 workflow 이름의 실행 자체가 공개 Release 발행을 뜻하지 않는다.
 
+그 뒤 자동 main push run38909669190도 두 cache restore·두 package/staged50·Linux linkage 성공과 Publish skipped를 확인했다. manual→PR→main 경로의 좁은 cache 개선만 인수했고 전체 DEV06/07·P03·D1의 완료로 계산하지 않는다.
+
 기여 문서의 구조는 Bevy·Godot의 공식 기여 입구를 참고하되 대규모 팀 규칙을 그대로 복제하지 않았다. [Bevy](https://github.com/bevyengine/bevy/blob/main/CONTRIBUTING.md), [Godot](https://raw.githubusercontent.com/godotengine/godot/master/CONTRIBUTING.md)
 
 ## 개발·CI 파이프라인 최적화

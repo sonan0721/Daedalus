@@ -31,3 +31,9 @@ source 근거는 `crates/daedalus-cli/src/{main,control,view}.rs`, `crates/daeda
 ## 반복 개발 최적화
 
 사용자의 추가 정정은 개발 과정의 반복을 줄이라는 요구다. [반복 파이프라인](../04-plan/development-iteration-pipeline.md)에 code/schema binding·scene 검증·asset 변환·AI 수정/실행/관찰·검증/배포의 공통 경계를 두었다. 구현과 정확성·효과 근거가 없는 항목은 backlog로 남긴다.
+
+## 첫 구현 분담
+
+`772ef64`에서 제품 인수·반복 파이프라인·ADR-0005·준비도 감사·project lifecycle 계약을 먼저 커밋했다. Luna xhigh에게 content/project, runtime/project, CLI/project와 renderer projection을 disjoint 파일로 맡겼다. 지원 API와 Cargo.lock 소유권을 먼저 공유하고, 명령별 project parser를 중복 작성하지 않도록 한다.
+
+이 시점의 새 project 구현은 진행 중이며 실제 실행 검증 전이다. 기존 fixture 결과를 새 project 기능의 근거로 재사용하지 않는다. P01.1 하위 구현 결과는 확인 후 기록하고, 전체 엔진 제품 gate는 계속 열어둔다.

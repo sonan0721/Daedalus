@@ -6,9 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use daedalus_content::project::{
-    PreparedProject, ProjectManifest, load_project, prepare_project_from_bytes,
-};
+use daedalus_content::project::{PreparedProject, ProjectManifest, prepare_project_from_bytes};
 use daedalus_content::scene::SceneDocument;
 use daedalus_runtime::{EngineConfig, ProjectSession, ProjectSessionReport, StepReport};
 use serde_json::{Value, json};
@@ -22,7 +20,7 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             print_json(&result)?;
         }
         ProjectCommands::Validate { directory } => {
-            let prepared = load_project(&directory)?;
+            let prepared = super::project_assets::load_project_read_only(&directory)?;
             print_json(&validation_output(&prepared))?;
         }
         ProjectCommands::Cook {
@@ -30,7 +28,10 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             cache_dir,
         } => super::project_assets::run(directory, cache_dir)?,
         ProjectCommands::Inspect { directory } => {
-            let session = ProjectSession::new(load_project(&directory)?, EngineConfig::default())?;
+            let session = ProjectSession::new(
+                super::project_assets::load_project_read_only(&directory)?,
+                EngineConfig::default(),
+            )?;
             let report = session.report()?;
             session.engine().shutdown()?;
             print_json(&json!({"command":"project_inspect","project":report}))?;
@@ -39,8 +40,10 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             if ticks == 0 || ticks > MAX_CLI_TICKS {
                 return Err(format!("tick count must be in 1..={MAX_CLI_TICKS}").into());
             }
-            let mut session =
-                ProjectSession::new(load_project(&directory)?, EngineConfig::default())?;
+            let mut session = ProjectSession::new(
+                super::project_assets::load_project_runtime(&directory)?,
+                EngineConfig::default(),
+            )?;
             let mut steps = Vec::with_capacity(ticks as usize);
             for _ in 0..ticks {
                 steps.push(session.step_tick()?);
@@ -50,8 +53,10 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             print_json(&run_output(report, steps))?;
         }
         ProjectCommands::Serve { directory } => {
-            let mut session =
-                ProjectSession::new(load_project(&directory)?, EngineConfig::default())?;
+            let mut session = ProjectSession::new(
+                super::project_assets::load_project_runtime(&directory)?,
+                EngineConfig::default(),
+            )?;
             let info = project_info(&session);
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
@@ -242,7 +247,10 @@ fn capture_project(
     if ticks == 0 || ticks > MAX_CLI_TICKS {
         return Err(format!("tick count must be in 1..={MAX_CLI_TICKS}").into());
     }
-    let mut session = ProjectSession::new(load_project(directory)?, EngineConfig::default())?;
+    let mut session = ProjectSession::new(
+        super::project_assets::load_project_runtime(directory)?,
+        EngineConfig::default(),
+    )?;
     for _ in 0..ticks {
         session.step_tick()?;
     }
@@ -256,15 +264,31 @@ fn capture_project(
         .iter()
         .map(|entity| (entity.id.clone(), entity.handle))
         .collect::<BTreeMap<_, _>>();
-    let projection =
-        daedalus_renderer::project_snapshot(prepared, report.session, &bindings, &snapshot)?;
+    let packet_limits = daedalus_renderer::PacketRendererLimits::default();
+    let resources = daedalus_renderer::ProjectRenderResources::prepare(
+        prepared,
+        1,
+        report.session,
+        &bindings,
+        packet_limits,
+    )?;
+    let packet = resources.extract(&snapshot, None)?;
+    let projection_counts = packet_projection_counts(&packet)?;
     session.engine().shutdown()?;
 
     let renderer = daedalus_renderer::Renderer::new_offscreen_blocking()?;
-    let artifact = renderer.render_png(
-        &projection.scene,
+    let mut packet_renderer = renderer.into_packet_renderer_with_asset_limits(
+        packet_limits,
+        daedalus_renderer::PacketAssetLimits::default(),
+    )?;
+    let artifact = packet_renderer.render_packet_png(
+        &packet,
         &daedalus_renderer::CaptureOptions::new(width, height, &output),
     )?;
+    let asset_resources =
+        super::project_assets::asset_resource_stats_json(&packet_renderer.asset_resource_stats());
+    let resources =
+        super::project_assets::packet_resource_stats_json(&packet_renderer.resource_stats());
     let authority_entity_revisions = report
         .entities
         .iter()
@@ -273,20 +297,24 @@ fn capture_project(
     print_json(&json!({
         "command":"project_capture",
         "project_name":report.project_name,
-        "session":projection.session,
+        "session":packet.session(),
         "authority_tick":report.tick,
-        "snapshot_tick":projection.snapshot_tick,
+        "snapshot_tick":packet.tick(),
         "source_schema_version":report.source_schema_version,
         "source_scene_revision":report.source_scene_revision,
         "source_digest":report.source_digest,
         "source_files":source_files(prepared),
         "authority_entity_revisions":authority_entity_revisions,
         "projection":{
-            "object_count":projection.object_count,
-            "expanded_vertices":projection.expanded_vertices,
-            "expanded_indices":projection.expanded_indices,
-            "expanded_geometry_bytes":projection.expanded_geometry_bytes,
+            "object_count":packet.instances().len(),
+            "expanded_vertices":projection_counts.0,
+            "expanded_indices":projection_counts.1,
+            "expanded_geometry_bytes":projection_counts.2,
+            "expanded_geometry_bytes_basis":"per_draw_packed_geometry_plus_legacy_object_record",
+            "packet_expanded_gpu_geometry_bytes":projection_counts.3,
         },
+        "resources":resources,
+        "asset_resources":asset_resources,
         "capture":{
             "path":artifact.path,
             "width":artifact.width,
@@ -301,6 +329,34 @@ fn capture_project(
         "note":"capture used a new project session; it is not a frame from another serve or visible window session"
     }))?;
     Ok(())
+}
+
+/// Retains the legacy CLI projection estimate while separately reporting exact packed mesh bytes.
+/// The compatibility value sums each draw's actual layout-aware geometry bytes plus the public
+/// `RenderObject` record size; it does not recreate a `RenderScene` or infer an imported stride.
+#[cfg(feature = "capture")]
+fn packet_projection_counts(
+    packet: &daedalus_renderer::RenderPacket,
+) -> Result<(usize, usize, usize, usize), &'static str> {
+    let object_record_bytes = std::mem::size_of::<daedalus_renderer::RenderObject>();
+    packet
+        .instances()
+        .iter()
+        .try_fold(
+            (0usize, 0usize, 0usize, 0usize),
+            |(vertices, indices, compatibility_bytes, gpu_geometry_bytes), instance| {
+                let mesh_bytes = instance.mesh.gpu_bytes();
+                Some((
+                    vertices.checked_add(instance.mesh.vertex_count())?,
+                    indices.checked_add(instance.mesh.index_count())?,
+                    compatibility_bytes
+                        .checked_add(mesh_bytes)?
+                        .checked_add(object_record_bytes)?,
+                    gpu_geometry_bytes.checked_add(mesh_bytes)?,
+                ))
+            },
+        )
+        .ok_or("project packet expanded geometry counters overflowed")
 }
 
 #[cfg(test)]
@@ -458,5 +514,111 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn packet_capture_projection_counts_match_legacy_for_mesh_project() {
+        use std::collections::BTreeMap;
+
+        use daedalus_content::project::{ProjectLimits, prepare_project_from_bytes};
+        use daedalus_runtime::{EngineConfig, ProjectSession};
+
+        use super::packet_projection_counts;
+
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "name": "capture-counter-regression",
+            "scene": "scene.json"
+        });
+        let scene = serde_json::json!({
+            "schema_version": 1,
+            "revision": 0,
+            "entities": [{
+                "id": "entity:counter",
+                "components": [
+                    {
+                        "id": "component:transform",
+                        "type_id": "daedalus.transform",
+                        "data": {
+                            "translation": [0.0, 0.0, 0.0],
+                            "rotation": [0.0, 0.0, 0.0, 1.0],
+                            "scale": [1.0, 1.0, 1.0]
+                        }
+                    },
+                    {
+                        "id": "component:mesh-renderer",
+                        "type_id": "daedalus.mesh_renderer",
+                        "asset_refs": ["asset:mesh"],
+                        "data": {
+                            "mesh": "asset:mesh",
+                            "material": {
+                                "base_color": [0.4, 0.5, 0.6],
+                                "metallic": 0.0,
+                                "roughness": 0.8,
+                                "emissive": [0.0, 0.0, 0.0]
+                            }
+                        }
+                    }
+                ]
+            }],
+            "assets": [{
+                "id": "asset:mesh",
+                "kind": "daedalus.mesh",
+                "uri": "mesh.json",
+                "metadata": {}
+            }]
+        });
+        let mesh = serde_json::json!({
+            "schema_version": 1,
+            "vertices": [
+                {"position": [-0.5, -0.5, 0.0], "normal": [0.0, 0.0, 1.0]},
+                {"position": [0.5, -0.5, 0.0], "normal": [0.0, 0.0, 1.0]},
+                {"position": [0.0, 0.5, 0.0], "normal": [0.0, 0.0, 1.0]}
+            ],
+            "indices": [0, 1, 2]
+        });
+        let mut assets = BTreeMap::new();
+        assets.insert("mesh.json".to_owned(), serde_json::to_vec(&mesh).unwrap());
+        let prepared = prepare_project_from_bytes(
+            &serde_json::to_vec(&manifest).unwrap(),
+            &serde_json::to_vec(&scene).unwrap(),
+            &assets,
+            ProjectLimits::default(),
+        )
+        .unwrap();
+        let mut session = ProjectSession::new(prepared.clone(), EngineConfig::default()).unwrap();
+        session.step_tick().unwrap();
+        let report = session.report().unwrap();
+        let snapshot = session.latest_snapshot().unwrap().unwrap();
+        let bindings = report
+            .entities
+            .iter()
+            .map(|entity| (entity.id.clone(), entity.handle))
+            .collect::<BTreeMap<_, _>>();
+        let packet_limits = daedalus_renderer::PacketRendererLimits::default();
+        let resources = daedalus_renderer::ProjectRenderResources::prepare(
+            &prepared,
+            1,
+            report.session,
+            &bindings,
+            packet_limits,
+        )
+        .unwrap();
+        let packet = resources.extract(&snapshot, None).unwrap();
+        let old =
+            daedalus_renderer::project_snapshot(&prepared, report.session, &bindings, &snapshot)
+                .unwrap();
+        let counts = packet_projection_counts(&packet).unwrap();
+        assert_eq!(packet.instances().len(), old.object_count);
+        assert_eq!(counts.0, old.expanded_vertices);
+        assert_eq!(counts.1, old.expanded_indices);
+        assert_eq!(counts.2, old.expanded_geometry_bytes);
+        assert_eq!(
+            counts.3
+                + packet.instances().len() * std::mem::size_of::<daedalus_renderer::RenderObject>(),
+            counts.2
+        );
+        session.engine().shutdown().unwrap();
     }
 }

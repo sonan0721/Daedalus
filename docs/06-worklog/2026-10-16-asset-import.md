@@ -1,6 +1,6 @@
 # P03.1 공통 에셋 import·cook 작업 기록
 
-상태: 로컬 CPU·원본 에셋·native 회귀·clean package 통과, PR CI 대기 · 2026-10-16
+상태: P03.1 CPU gate 통과·PR10 main 병합, 실제 runtime consumer 후속 · 2026-10-16
 
 ## 이번 목표와 선행 상태
 
@@ -94,6 +94,8 @@ content 구현은 `1623bc6`, CLI/smoke/문서 연결은 clean source `15c68c9285
 
 압축 해제한 binary hash를 manifest와 대조했다. notice inventory는201개/missing0/reference-only4이며 archive에 포함했다. debug와 release의 시간은 서로 다른 build profile이므로 cache 개선 배율 비교가 아니다. tag/GitHub Release는 만들지 않았다. 정확한 archive/build-manifest는 ignored 로컬 산출물이며 engine repository에 게임이나 공개 원본 에셋을 추가하지 않았다.
 
-## 남은 인수 절차
+## 최종 PR 인수와 다음 경계
 
-PR의 필수 다섯 job과 두 native packaged asset smoke까지 확인한 뒤 P03.1 최종 gate를 판단한다. 이후 실제 model/texture·sprite/audio 소비 P03.2를 구현한다. P03 전체·DEV03 전체·D1/D2/D3는 계속 미완료다.
+[PR10](https://github.com/sonan0721/Daedalus/pull/10)의 최종 head `1c4631c0e64b30a64e9c7a0a877d0f7c99c89a18`에서 docs·rust·managed native integration·macOS arm64 package·Linux x64 package가 모두 통과했다. package run `38849950627`의 두 `Verify packaged CLI asset cook smoke` step도 각각success였다. publish job은 PR에서skipped로 tag/GitHub Release를 만들지 않았다.
+
+저장소의 squash-only 정책에 따라 main `5c04db825436d28c39119f74aab6fcf1a55eb51e`에 병합했고, `git diff --exit-code <PR-final-head> main`으로 file tree 동일성을 확인했다. P03.1 CPU gate를 체크하며 이후 실제 model/texture·sprite/audio 소비 P03.2를 구현한다. P03 전체·DEV03 전체·D1/D2/D3는 계속 미완료다.

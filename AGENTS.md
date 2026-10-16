@@ -37,6 +37,7 @@
 ## Git and collaboration
 
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md).
+- Before opening or merging a PR, read [the GitHub workflow](docs/04-plan/github-workflow.md). The repository currently allows squash merges only; use the verified head SHA when merging and distinguish required protection checks from the full product-gate checks.
 - Make periodic, coherent commits as requested; do not commit unrelated changes, credentials, proprietary SDKs, or unlicensed assets.
 - Use issue/goal/requirement IDs in substantial changes. PR descriptions state the concrete behavior, evidence, and limitations.
 - Explain the purpose and key findings of each newly created specification to the user. Small related batches are acceptable if every file is accounted for.

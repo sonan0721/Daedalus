@@ -1,12 +1,12 @@
 # P03.2 실제 model·texture·sprite·audio 소비
 
-상태: 다음 구현 계약 초안·착수 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
+상태: a 로컬 구현·검증 통과/PR 대기, b·c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
 
 ## 목적과 선행 조건
 
 [P03.1](asset-import-foundation.md)의 CPU catalog를 실제 실행 경로에서 사용한다. `project cook`의 summary나 PNG decoder 성공은 화면 표시·2D·사운드 재생의 근거가 아니다. 동일 PreparedProject/catalog와 authority snapshot을 renderer/audio adapter가 소비하게 하며 CLI별 loader·geometry 복사·임시 fixture를 새로 만들지 않는다.
 
-P03.1 로컬 인수와 필수 CI 확인 뒤 구현을 연다. 아래 세 하위 경로를 각각 검증하되 P03.2는 모두 통과해야 체크한다. W단계/D1 인수와 두 게임 인수는 계속 별도다.
+P03.1은 로컬 인수와 PR10 필수 CI·main 병합까지 확인했다. a 경로는 [상세 구현 계약](model-texture-runtime.md)으로 구체화했다. 아래 세 하위 경로를 각각 검증하되 P03.2는 모두 통과해야 체크한다. W단계/D1 인수와 두 게임 인수는 계속 별도다.
 
 | 하위 경로 | 필요한 실제 결과 | 대체할 수 없는 검증 |
 | --- | --- | --- |
@@ -18,9 +18,9 @@ skin/animation·고급 재질·tile simulation·UI·spatial audio·web runtime�
 
 ## 확인한 현재 seam
 
-2026-10-16 로컬 source 감사 기준이다. `PreparedProject`는 private field에 catalog를 추가할 수 있지만 `PreparedEntity`의 공개 field에 새 필드를 바로 추가하면 외부 struct literal을 깨뜨린다. 기존 `daedalus.mesh_renderer`는 legacy `daedalus.mesh`만 받는다. model catalog가 있어도 model entity가 실행되는 상태는 아니다.
+2026-10-16 로컬 source 감사 기준이다. `PreparedProject`는 private field에 catalog를 추가할 수 있지만 `PreparedEntity`의 공개 field에 새 필드를 바로 추가하면 외부 struct literal을 깨뜨린다. 기존 `daedalus.mesh_renderer`는 legacy `daedalus.mesh`를 받는다. additive `daedalus.model_renderer`는 asset-aware 경로의 validated private binding map으로 연결했으며 로컬 실제 GPU/native 검증을 통과했다.
 
-renderer의 `ProjectRenderResources::prepare`와 `extract`는 project/source identity를 고정하고 실제 session snapshot에서 transform을 가져온다. 이 경로를 확장한다. legacy `project_snapshot`/`RenderScene`·공개 `Vertex`/`MeshHandle`·기존 packet 사용의 의미는 유지한다. 현재 GPU vertex는 position/normal만 있고 shader는 texture를 sample하지 않는다. content의 UV를 기존 vertex로 버려 넣어 성공 처리하지 않는다.
+renderer의 `ProjectRenderResources::prepare`와 `extract`는 project/source identity를 고정하고 실제 session snapshot에서 transform을 가져온다. 이 경로를 확장한다. legacy `project_snapshot`/`RenderScene`·공개 `Vertex`/`MeshHandle`·기존 packet 사용의 의미는 유지한다. 기존 24-byte GPU vertex는 보존하고 모델용 32-byte position/normal/UV 경로를 추가했다. 모델 shader가 실제 sRGB texture와 primitive sampler를 사용한다.
 
 AudioService는 이미 PCM·voice·offline/native backend를 가진다. importer를 서비스 안에 다시 만들지 않고 immutable PCM resource에서 재생 자료를 준비하는 adapter를 둔다. 실제 API/정수/수명은 각 하위 착수 전 문서의 확정 표와 구현을 대조한다.
 
@@ -38,7 +38,7 @@ schema 1의 generic component envelope 안에 additive component를 정의한다
 
 prepare 시 selected-scene roots에서 node hierarchy를 따라 draw를 열거한다. glTF의 global primitive index는 같은 mesh를 여러 node가 참조하면 반복되므로 instance ID로 단독 사용하지 않는다. 각 `(node index, global primitive index)` 발생에 deterministic draw ordinal을 부여하고 generation 안에서 고정한다. `RenderInstanceId`는 실제 EntityHandle와 이 ordinal을 사용한다. node/primitive 개수와 expanded draw 한도를 allocation 전에 검사한다.
 
-프레임의 최종 matrix는 `authority entity world × glTF ancestor/local matrices`다. entity transform을 원본 scene이나 CLI report에서 다시 가져오지 않는다. node hierarchy의 full affine matrix를 보존하고, 최종 matrix의 inverse-transpose로 normal을 변환한다. nonuniform scale·부모 회전·여러 node 공유를 검증한다. nonfinite/singular transform과 normal 계산 불능은 진단한다. 허용 determinant epsilon은 실제 f32 연산·기존 renderer 정책을 확인한 뒤 P03.2a 착수 표에서 고정한다.
+프레임의 최종 matrix는 `authority entity world × glTF ancestor/local matrices`다. entity transform을 원본 scene이나 CLI report에서 다시 가져오지 않는다. node hierarchy의 full affine matrix를 보존하고, 최종 matrix의 inverse-transpose로 normal을 변환한다. nonuniform scale·부모 회전·여러 node 공유를 검증한다. nonfinite/singular transform과 normal 계산 불능은 진단한다. [상세 계약](model-texture-runtime.md)대로 determinant가 정확히0이거나 nonfinite이면 거부하고 임의 near-zero epsilon은 사용하지 않는다. inverse/최종 matrix도 finite여야 한다.
 
 현재 pipeline은 cull_mode None이다. mirrored transform을 지원할 때 이 상태의 픽셀을 검증하며, 나중에 back-face culling을 켜면 determinant sign과 winding/front-face를 함께 처리해야 한다. 무조건 인덱스를 뒤집어 공유 geometry를 node별로 복제하지 않는다.
 
@@ -56,7 +56,7 @@ glTF의 실제 sampler는 `ModelTextureRef::sampler()`가 기준이다. owner im
 
 ## 자원 한도와 수명
 
-geometry cache와 별도의 무제한 image/sampler cache를 만들지 않는다. 기존 packet geometry preferred64/hard128 MiB에 texture·mip·sampler/bind-group·instance/material metadata를 합산하는 device admission을 정의한다. numeric 기본값·active/retired entry 상한·upload staging 한도는 실제 descriptor/adapter 한도와 packet lifecycle를 리뷰한 뒤 P03.2a 착수 전에 확정한다. CPU import의128 MiB 한도를 GPU 전체 한도로 혼동하지 않는다.
+geometry cache와 별도의 무제한 image/sampler cache를 만들지 않는다. 기존 packet geometry preferred64/hard128 MiB에 texture·mip·sampler/bind-group·instance/material metadata를 합산하는 device admission을 정의한다. numeric 기본값·active/retired entry 상한·별도 staging128 MiB·최대 in-flight submission3은 [상세 계약](model-texture-runtime.md)에 확정했고 로컬 검증했다. CPU import의128 MiB 한도를 GPU 전체 한도로 혼동하지 않는다.
 
 비용 계산은 checked arithmetic으로 allocation/create/write 전에 수행한다. 장치 세대와 layout을 resource identity에 포함하고, 이전 submission의 실제 완료 전 retired resource를 재사용·회수하지 않는다. queue submit 성공을 GPU 완료로 취급하지 않는다. 후보가 예산을 넘거나 pinned resource 때문에 들어갈 수 없으면 명시적으로 Pending/Busy/Rejected를 반환한다. 현재 정상 frame을 먼저 파괴하거나 required texture를 흰색 fallback으로 숨기지 않는다.
 

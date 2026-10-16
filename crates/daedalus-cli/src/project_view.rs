@@ -11,12 +11,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Args, ValueEnum};
-use daedalus_content::project::{PreparedProject, load_project};
+use daedalus_content::project::PreparedProject;
 use daedalus_content::scene::StableId;
 use daedalus_core::EntityHandle;
 use daedalus_renderer::{
-    PacketRendererLimits, PacketWindowMessage, ProjectRenderResources, WindowInput, WindowKeyCode,
-    WindowOptions, run_packet_windowed_reported, window_input_channel,
+    PacketAssetLimits, PacketRendererLimits, PacketWindowMessage, ProjectRenderResources,
+    WindowInput, WindowKeyCode, WindowOptions, run_packet_windowed_reported_with_asset_limits,
+    window_input_channel,
 };
 use daedalus_runtime::{
     EngineConfig, ProjectInfoPage, RequestPhase, RequestReadError, RequestTicket, SessionClockMode,
@@ -115,7 +116,9 @@ pub(super) fn run(args: ProjectViewArgs) -> Result<(), Box<dyn Error>> {
         ClockArg::Realtime => SessionClockMode::Realtime,
         ClockArg::Manual => SessionClockMode::Manual,
     };
-    let project = Arc::new(load_project(&args.directory)?);
+    let project = Arc::new(super::project_assets::load_project_runtime(
+        &args.directory,
+    )?);
     let control_limits = SessionControlLimits::default();
     let mut service_config = SessionControlConfig {
         engine: EngineConfig::default(),
@@ -198,6 +201,7 @@ fn run_window(
     }
 
     let limits = PacketRendererLimits::default();
+    let asset_limits = PacketAssetLimits::default();
     let resources = ProjectRenderResources::prepare(
         project.as_ref(),
         PROJECT_VIEW_GENERATION,
@@ -256,7 +260,13 @@ fn run_window(
         ..WindowOptions::default()
     };
 
-    let window_result = run_packet_windowed_reported(initial_packet, packet_rx, options, limits);
+    let window_result = run_packet_windowed_reported_with_asset_limits(
+        initial_packet,
+        packet_rx,
+        options,
+        limits,
+        asset_limits,
+    );
     worker_stop.store(true, Ordering::Release);
     let coordinator = worker.join().map_err(|payload| {
         format!(
@@ -272,7 +282,7 @@ fn run_window(
 }
 
 struct WindowRun {
-    outcome: daedalus_renderer::PacketWindowOutcome,
+    outcome: daedalus_renderer::PacketAssetWindowOutcome,
     coordinator: CoordinatorReport,
 }
 
@@ -676,7 +686,9 @@ fn build_report(
     run: WindowRun,
     shutdown: daedalus_runtime::SessionShutdownReport,
 ) -> Value {
-    let outcome = run.outcome;
+    let asset_resources =
+        super::project_assets::asset_resource_stats_json(&run.outcome.asset_resource_stats);
+    let outcome = run.outcome.packet;
     let presented = outcome.last_presented.as_ref().map(|frame| json!({
         "session":frame.session.get().to_string(), "tick":frame.tick.get().to_string(),
         "sequence":frame.sequence.to_string(), "project_generation":frame.project_generation.to_string(),
@@ -737,26 +749,7 @@ fn build_report(
         "window_title":outcome.report.window_title,
         "final_camera":final_camera,
     });
-    let resources = json!({
-        "active_bytes":outcome.resource_stats.active_bytes,
-        "active_entries":outcome.resource_stats.active_entries,
-        "retired_bytes":outcome.resource_stats.retired_bytes,
-        "retired_entries":outcome.resource_stats.retired_entries,
-        "geometry_upload_count":outcome.resource_stats.geometry_upload_count,
-        "geometry_upload_bytes":outcome.resource_stats.geometry_upload_bytes,
-        "cache_hit_count":outcome.resource_stats.cache_hit_count,
-        "cache_miss_count":outcome.resource_stats.cache_miss_count,
-        "instance_write_count":outcome.resource_stats.instance_write_count,
-        "instance_write_bytes":outcome.resource_stats.instance_write_bytes,
-        "material_write_count":outcome.resource_stats.material_write_count,
-        "material_write_bytes":outcome.resource_stats.material_write_bytes,
-        "global_write_count":outcome.resource_stats.global_write_count,
-        "global_write_bytes":outcome.resource_stats.global_write_bytes,
-        "depth_target_recreation_count":outcome.resource_stats.depth_target_recreation_count,
-        "cache_eviction_count":outcome.resource_stats.cache_eviction_count,
-        "pending_candidate_count":outcome.resource_stats.pending_candidate_count,
-        "pending_candidate":outcome.resource_stats.pending_candidate,
-    });
+    let resources = super::project_assets::packet_resource_stats_json(&outcome.resource_stats);
     let coordinator = json!({
         "observed_frames":run.coordinator.observed_frames,
         "presented_candidates":run.coordinator.presented_candidates,
@@ -793,6 +786,7 @@ fn build_report(
         "last_presented":presented,
         "window":window,
         "resources":resources,
+        "asset_resources":asset_resources,
         "coordinator":coordinator,
         "limits":{"width":args.width,"height":args.height,"seconds":args.seconds,"frames":args.frames},
         "live_capture":false,"mcp":false,

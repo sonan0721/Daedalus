@@ -119,6 +119,9 @@ impl PreparedAssetCatalog {
     pub fn asset(&self, id: &StableId) -> Option<&ImportedAsset> {
         self.assets.get(id)
     }
+    pub(crate) fn assets_map(&self) -> &BTreeMap<StableId, ImportedAsset> {
+        &self.assets
+    }
     pub fn assets(&self) -> impl Iterator<Item = (&StableId, &ImportedAsset)> {
         self.assets.iter()
     }
@@ -139,6 +142,10 @@ impl PreparedAssetCatalog {
     }
     pub fn is_empty(&self) -> bool {
         self.assets.is_empty()
+    }
+
+    pub(crate) fn release_cache_pins(&mut self) {
+        self._cache_leases.clear();
     }
 }
 

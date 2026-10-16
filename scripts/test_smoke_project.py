@@ -24,6 +24,8 @@ from smoke_project import (
     _v2_submit,
     _decode_glb,
     _write_asset_project,
+    _write_model_view_project,
+    ENTITY_ID,
     _validate_native_view_report,
     _validate_native_liveness_report,
     _validate_timeout,
@@ -83,6 +85,40 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         with wave.open(os.fspath(project / "audio" / "tone.wav"), "rb") as audio:
             self.assertEqual((audio.getnchannels(), audio.getframerate(), audio.getnframes()), (1, 8_000, 4))
 
+    def test_model_view_fixture_reuses_offline_textured_gltf_and_authority_entity(self) -> None:
+        project = self.root / "model-view-fixture"
+        _write_model_view_project(project)
+        manifest = json.loads((project / "daedalus.project.json").read_text(encoding="utf-8"))
+        scene = json.loads((project / "scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "offline-model-view-smoke")
+        self.assertEqual(
+            {asset["id"] for asset in scene["assets"]},
+            {"asset:model-external"},
+        )
+        self.assertEqual(len(scene["entities"]), 1)
+        entity = scene["entities"][0]
+        self.assertEqual(entity["id"], ENTITY_ID)
+        components = {component["type_id"]: component for component in entity["components"]}
+        self.assertEqual(
+            components["daedalus.transform"]["data"],
+            {
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": [1.0, 1.0, 1.0],
+            },
+        )
+        self.assertEqual(
+            components["daedalus.model_renderer"]["asset_refs"],
+            ["asset:model-external"],
+        )
+        self.assertEqual(
+            components["daedalus.model_renderer"]["data"],
+            {"model": "asset:model-external"},
+        )
+        model = json.loads((project / "models" / "external.gltf").read_text(encoding="utf-8"))
+        self.assertEqual(model["images"][0]["uri"], "../images/base.png")
+        self.assertTrue((project / "images" / "base.png").is_file())
+
     def test_timeout_parser_rejects_zero_non_finite_and_non_numeric_values(self) -> None:
         self.assertEqual(_validate_timeout("1"), 1.0)
         for value in ("0", "nan", "bad"):
@@ -94,13 +130,20 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertEqual(arguments.timeout, 1.0)
         self.assertFalse(arguments.view)
         self.assertFalse(arguments.assets)
+        self.assertFalse(arguments.models)
         view_arguments = _parse_args(["--cli", "/bin/true", "--view"])
         self.assertTrue(view_arguments.view)
         asset_arguments = _parse_args(["--cli", "/bin/true", "--assets"])
         self.assertTrue(asset_arguments.assets)
+        model_arguments = _parse_args(["--cli", "/bin/true", "--models"])
+        self.assertTrue(model_arguments.models)
         combined_arguments = _parse_args(["--cli", "/bin/true", "--assets", "--view"])
         self.assertTrue(combined_arguments.assets)
         self.assertTrue(combined_arguments.view)
+        combined_models = _parse_args(["--cli", "/bin/true", "--assets", "--view", "--models"])
+        self.assertTrue(combined_models.assets)
+        self.assertTrue(combined_models.view)
+        self.assertTrue(combined_models.models)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])

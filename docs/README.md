@@ -74,6 +74,7 @@
 | [ADR-0003](05-decisions/0003-csharp-and-native-gameplay.md) | C# 14/.NET 10/CoreCLR·빌드형 Rust 게임플레이·C++ 통합·오토파일럿 결정 |
 | [ADR-0004](05-decisions/0004-start-engine-implementation.md) | 사용자 구현 착수 승인과 모듈별 설계·검증 진행 방식 |
 | [ADR-0005](05-decisions/0005-engine-product-and-game-validation.md) | 엔진 제품 인수·별도 3D/2D 게임 검증·완료 보고 기준 정정 |
+| [ADR-0006](05-decisions/0006-owned-session-control-results.md) | 공통 actor의 owned ticket·유한 replay/retention·Manual Step 포화 진행 계약 |
 | [R01 작업 기록](06-worklog/2026-10-15-r01.md) | 작성 문서별 목적·확인 범위·검증·후속 과제 기록 |
 | [R02 스크립팅 작업 기록](06-worklog/2026-10-15-r02-scripting.md) | 언어·모드 범위 변경, 새 문서별 목적과 남은 통합 조사 기록 |
 | [E01~E03 첫 구현 검증](06-worklog/2026-10-15-e01-foundation.md) | 실제 Rust·CLI·Metal 검증과 아직 완료하지 않은 기능의 경계 |

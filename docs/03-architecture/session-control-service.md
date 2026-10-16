@@ -69,7 +69,13 @@ Luna xhigh의 read-only 제안을 검토한 초기 계약이다. 소유 구현�
 
 query는 Queued→Terminal, set은 Queued→AuthorityAccepted→Terminal이다. authority 거부도 해당 ticket의 명시적 terminal 오류다. duplicate pending은 모든 소유 ticket이 같은 실제 outcome을 받되 world 명령을 한 번만 적용한다. duplicate completed는 실제 cached CommandResult를 반환한다. 서로 다른 adapter의 auto ID allocator를 따로 두지 않는다.
 
+wait의 목표 단계보다 terminal이 먼저 관찰되면 즉시 terminal을 반환한다. realtime이 빨리 완료했거나 authority에서 거부된 요청을 AuthorityAccepted 대기로 다시 묶지 않는다. query에 대한 잘못된 wait stage도 무한 대기 경로가 될 수 없다.
+
 ticket drop은 결과를 포기하는 의미이며 이미 authority가 수락한 명령을 취소하지 않는다. pending credit은 actor의 terminal 처리까지 유지한다. ack/drop된 ticket의 결과 Arc를 consumer가 보유하면 실제 engine-owned payload lease가 살아 있는 동안 byte credit을 성급히 반환하지 않는다. client detach 후에도 살아 있는 ticket의 읽기 권한은 유지할 수 있으나 새 제출은 거부한다. 초기 reconnect/resume API는 만들지 않는다.
+
+completed replay ledger는 기본 1024/hard 16,384 entries로 제한하고 pending ticket map과 별도로 계수한다. 새 service의 caller-provided lower-half CommandId는 session 전역에서 **새 ID가 단조 증가**해야 한다. pending/보존 ledger에 있는 ID는 실제 결과를 replay한다. ledger에 없고 caller high-water 이하인 ID는 ReplayWindowExpired/OutOfOrderCallerId로 거부하며 fresh 명령으로 재적용하지 않는다. 새 ID가 authority에 접수됐을 때 high-water를 갱신한다. 복수 attachment가 caller ID 공간을 공유하므로 일반 SDK/AI는 auto ID를 사용하고, 별도 retry가 필요하면 이 명시적 범위 안의 receipt를 보존한다. upper-half auto ID는 session 전역 단조 allocator만 발급하고 외부 지정은 계속 거부한다.
+
+이는 새 service의 명시적인 replay 정책이다. 기존 bare JSONL/bridge/world의 bounded dedup API를 이 단계에서 몰래 변경하지 않는다. 후속 adapter migration 때 이 강화된 caller ID 정책과 expired 오류를 공개하고 wire 회귀를 검증한다. 프로세스 재시작을 넘는 exactly-once를 약속하지 않으며 durable/network replay는 P10/P11에서 별도 다룬다.
 
 | 초기 제한 | 기본값 | hard ceiling |
 | --- | --- | --- |
@@ -82,8 +88,13 @@ ticket drop은 결과를 포기하는 의미이며 이미 authority가 수락한
 | page entities | 1024 | 1024 |
 | Manual step/request | 120 | 120 |
 | retained frames | 3 | 64 |
+| completed replay entries | 1024 | 16,384 |
 
 수치가 상한 안이라도 0/상호 모순인 config는 시작 전에 거부한다. 요청별 보수적 payload/metadata 예산을 실제 생성 전에 예약하며, source 문자열·StepReport/command 수·page 결과도 계산에 넣는다. query 처리 실패나 queue full은 모든 예약을 되돌린다. runtime-spawn entity 수도 기존 16,384 상한을 유지한다. 별도 frame/source/CPU pool 예산을 이 result budget 하나로 모두 제한했다고 주장하지 않는다.
+
+result byte 계수는 engine-owned typed payload/metadata의 보수적 상한이다. allocator padding·사용자가 직접 clone한 데이터·프로세스 RSS 전체를 정확히 제한하는 값으로 보고하지 않는다. Arc 공유 수명·실제 예약/회수 수·peak를 진단해 잘못된 credit 반환을 검사한다.
+
+Manual 모드는 **Step 전용 ticket/byte reserve**를 total hard budget 안에 둔다. normal query/mutation이 client별/세션 전체 ticket 또는 result bytes를 모두 소진해 다음 Step을 제출하지 못하는 deadlock을 금지한다. 최초 기준은 client별 control slot 1개, 세션 control slot 1개와 최대 Step 결과를 담는 보수적 bytes이며 이 reserve는 normal admission이 소비하지 못한다. reserve를 만족하지 못하는 tiny config는 거부한다. 완료된 Step ticket/reader를 계속 보유한 경우의 backpressure는 ack/drop으로 회복하게 하며, pending write만 포화된 경우에는 Step→terminal 처리까지 반드시 진행할 수 있어야 한다. stop은 그와 별개의 out-of-band 신호다.
 
 world 목록에 offset page가 필요하면 `daedalus-world`의 기존 bounded extraction을 작은 공통 page helper로 확장한다. 전체 entity Vec를 만든 뒤 잘라내거나 runtime에서 ECS handle 해석을 재구현하지 않는다. mutable 목록 page에는 실제 읽은 authority tick을 기록하며 서로 다른 tick의 page를 일관된 한 snapshot이라고 표시하지 않는다. immutable source binding page와 runtime entity page를 구분한다.
 
@@ -96,6 +107,8 @@ Manual set은 AuthorityAccepted까지만 기다린 기존 wire 응답을 유지�
 공통 frame은 session ID·tick·frame sequence·active project generation/source digest/revision과 `Arc<RenderSnapshot>`를 가진다. 한 fixture의 terrain 통계는 공통 필수 payload로 넣지 않는다. source metadata와 entity revision/state를 복사해 오래된 현재값으로 표시하지 않는다. inspect 결과의 읽은 tick과 presentation frame의 snapshot tick을 구분한다.
 
 표시는 latest complete frame을 coalesce할 수 있다. consumer가 이전 Arc를 오래 보유할 때 snapshot/resource retention 예산을 드러낸다. simulation은 render 소비를 기다리지 않고 이전 정상 표시를 유지한다. frame drop/coalesce와 reliable result drop을 같은 정책으로 처리하지 않는다.
+
+retained-frame 상한은 mailbox 안의 값만이 아니라 client가 보유한 서로 다른 frame Arc generation까지 Weak/lease로 계수한다. 모두 pinned이면 새 frame 게시를 nonblocking으로 건너뛰고 마지막 complete frame을 유지하며 authority tick은 계속 진행한다. frame payload의 snapshot은 기존 entity/byte/retention 예산도 적용한다. wrapper frame을 drop하고 내부 snapshot Arc만 남긴 경우도 snapshot producer의 retention 예산을 우회하지 못해야 한다. 고정 metadata·digest와 bounded snapshot으로 frame bytes를 제한하고, count/bytes·skipped publication 원인을 진단한다.
 
 같은 source mesh는 불변 handle/generation으로 공유하고 transform-only tick마다 vertex/index를 clone·flatten·upload하지 않는 renderer 경로를 만든다. CPU projection과 GPU resident cache 둘 다 관찰한다. 동일 scene unchanged/transform edit/resource generation edit별 decode·mesh clone·GPU upload byte/count를 기록한다. CPU 변환 cache 하나로 GPU 재업로드까지 해결했다고 보고하지 않는다.
 

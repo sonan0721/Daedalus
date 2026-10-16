@@ -1,12 +1,14 @@
 # 같은 project 세션의 실행·제어·표시 service
 
-상태: P02/DEV01 다음 구현 계약 초안·미구현 · 2026-10-16
+상태: native P02.1 kernel 구현·독립 검증, P02/DEV01 전체 미완료 · 2026-10-16
 
 ## 목적과 실제 기준선
 
 외부 project를 창에서 실행하고 CLI/MCP/SDK가 동일한 authority를 관찰·조작하게 한다. 엔진을 transport마다 새로 만드는 반복, 별도 command 의미, 장면별 fixture 분기를 공통 session service로 줄인다. [project lifecycle](project-lifecycle.md)은 저작 자료 준비/동기 실행 계층이고, 이 문서는 그 위의 지속 실행·제어·표시 계층이다.
 
-현재 `ProjectSession`은 실제 Engine과 stable ID map을 소유하지만 공통 live actor가 없다. JSONL control은 `&mut Engine`을 직접 제어한다. 기존 `LiveSession`은 bounded queue/result credit/latest mailbox/stop·join을 구현했으나 한 demo entity와 terrain job의 actor다. bridge는 별도 Engine과 atomic transform batch 의미를 가진다. `view --capture-output`은 창 종료 뒤의 별도 offscreen render다. 어느 경로도 같은 live project의 MCP/입력/표시 frame capture 완성을 증명하지 않는다.
+PR #6 기준 `ProjectSession`은 실제 Engine과 stable ID map을 소유하지만 공통 live actor가 없었다. 후속 P02.1은 아래 owned ticket API의 native actor를 구현했다. 현재 JSONL control은 여전히 `&mut Engine`을 직접 제어하고 bridge는 별도 Engine과 atomic transform batch 의미를 가진다. 기존 `LiveSession`은 한 demo entity와 terrain job의 actor다. `view --capture-output`은 창 종료 뒤의 별도 offscreen render다. 새 kernel 검사로 같은 live project의 MCP/입력/표시 frame capture까지 완성했다고 주장하지 않는다.
+
+실제 구현 범위는 고정 API 절의 typed operation·Manual/Realtime·ticket/frame/replay/stop이다. 뒤 절의 pause/clock 전환·입력/action·visible project·transport/managed attach·live capture는 후속 계약이며 현재 지원 기능이 아니다.
 
 구현 전에 공통 public API와 소유 파일을 Luna xhigh 담당자에게 공유한다. 아래 API 이름은 후보이며 실제 type 서명과 error enum을 먼저 합의한 뒤 dependent adapter 코딩을 시작한다. 새 빈 service interface나 기존 fixture의 이름 변경을 P02 통과로 보고하지 않는다.
 
@@ -110,6 +112,10 @@ Manual set은 AuthorityAccepted까지만 기다린 기존 wire 응답을 유지�
 
 공통 frame은 session ID·tick·frame sequence·active project generation/source digest/revision과 `Arc<RenderSnapshot>`를 가진다. 한 fixture의 terrain 통계는 공통 필수 payload로 넣지 않는다. source metadata와 entity revision/state를 복사해 오래된 현재값으로 표시하지 않는다. inspect 결과의 읽은 tick과 presentation frame의 snapshot tick을 구분한다.
 
+frame의 값 자체에는 Clone을 제공하지 않고 바깥 Arc를 공유한다. 내부 snapshot의 `entities: Arc<[RenderEntitySnapshot]>`만 보존한 경우도 core producer의 generation 보존에 계수한다. core는 wrapper와 backing allocation의 weak reference를 함께 추적하고 둘 다 해제돼야 보존 기록을 제거한다. 같은 generation의 두 참조를 두 번 세지 않는다. service가 실제 사용하는 snapshot capacity는 `min(요청한 EngineConfig.snapshot_capacity, max_retained_frames)`로 제한해 내부 배열 참조만 남아도 service 한도를 우회하지 못하게 한다. 포화 시 새 추출/게시를 건너뛰며 authority tick·결과 처리는 계속된다.
+
+service의 `EngineConfig.command_dedup_capacity`도 1~16,384 entries로 검증한다. service replay ledger와 world dedup cache는 별도 유한 cache다. 한쪽만 제한하고 다른 쪽에 무제한 설정을 전달하지 않는다.
+
 표시는 latest complete frame을 coalesce할 수 있다. consumer가 이전 Arc를 오래 보유할 때 snapshot/resource retention 예산을 드러낸다. simulation은 render 소비를 기다리지 않고 이전 정상 표시를 유지한다. frame drop/coalesce와 reliable result drop을 같은 정책으로 처리하지 않는다.
 
 retained-frame 상한은 mailbox 안의 값만이 아니라 client가 보유한 서로 다른 frame Arc generation까지 Weak/lease로 계수한다. 모두 pinned이면 새 frame 게시를 nonblocking으로 건너뛰고 마지막 complete frame을 유지하며 authority tick은 계속 진행한다. frame payload의 snapshot은 기존 entity/byte/retention 예산도 적용한다. wrapper frame을 drop하고 내부 snapshot Arc만 남긴 경우도 snapshot producer의 retention 예산을 우회하지 못해야 한다. 고정 metadata·digest와 bounded snapshot으로 frame bytes를 제한하고, count/bytes·skipped publication 원인을 진단한다.
@@ -159,4 +165,12 @@ attachment는 inspect/input/mutate/manual-step/capture/shutdown capability를 �
 - P02.3: 동일 live session의 조건/입력/관찰/capture identity·실제 MCP adapter·재현 trace, managed/SDK attach와 atomic migration 회귀.
 - P02 제품 gate: 위 연결과 UI tree/action·reload·server authority까지 [상위 인수표](../04-plan/product-delivery-and-acceptance.md)의 실제 제작 루프로 확인. 하위 kernel/창 추가로 전체 gate를 닫지 않는다.
 
-회귀는 기존 P01.1 CPU smoke·bridge/C#·fixture view·renderer/CPU 제한을 유지한다. 새 검증은 같은 actor에 여러 client, 충돌 request ID, wrong-session/stale revision, acceptance와 적용 분리, queue/result 포화와 취소, frame retention/coalesce, manual/realtime 오용, pending 중 종료를 포함한다. 실제 창의 ongoing capture와 state/tick/sequence 및 upload count 증거는 별도로 남긴다. 현재 이 문서는 설계이며 위 검사가 통과했다는 보고가 아니다.
+회귀는 기존 P01.1 CPU smoke·bridge/C#·fixture view·renderer/CPU 제한을 유지한다. 새 검증은 같은 actor에 여러 client, 충돌 request ID, wrong-session/stale revision, acceptance와 적용 분리, queue/result 포화와 취소, frame retention/coalesce, manual/realtime 오용, pending 중 종료를 포함한다. 실제 창의 ongoing capture와 state/tick/sequence 및 upload count 증거는 별도로 남긴다.
+
+## P02.1 구현과 확인한 경계
+
+`daedalus-runtime/src/session_control.rs`가 실제 ProjectSession 한 개를 소유하고, `session_primitives.rs`가 atomic credit lease·bounded latest-value mailbox·stop signal을 제공한다. `daedalus-world`의 transform page는 ECS iterator에서 skip/take 후 작은 Vec만 만든다. source metadata는 result size를 계산한 뒤 복사한다. query/Step의 처리 중 panic도 ticket을 terminal로 만들고, 적용 여부가 불명확한 command는 OutcomeUnknown으로 남긴다.
+
+조정자의 all-feature workspace 검사는 CPU 151건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 통과했다. 세부 입력·binary identity·한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
+
+legacy `LiveSession`은 같은 mailbox/stop primitive를 사용하지만 count-only AtomicUsize result credit와 기존 단일 result receiver는 유지한다. owned ticket 서비스와 accounting 의미가 달라 강제로 통합하지 않았다. 이 남은 migration은 P02.1c/DEV01 미완료이며 두 path의 테스트를 유지한다. CLI protocol 2·실제 project window·MCP·SDK attach는 아직 이 service의 adapter로 구현되지 않았다.

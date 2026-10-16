@@ -879,6 +879,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -904,9 +905,12 @@ name = "daedalus-renderer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "daedalus-content",
+ "daedalus-core",
  "glam 0.30.9",
  "png",
  "pollster",
+ "thiserror 2.0.21",
  "wgpu",
  "winit",
 ]

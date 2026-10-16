@@ -91,6 +91,12 @@ enum Operation {
         #[serde(default)]
         limit: Option<usize>,
     },
+    ProjectInfo {
+        #[serde(default)]
+        offset: usize,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Exit,
 }
 
@@ -165,9 +171,40 @@ impl ControlError {
 /// gets one response, and worker shutdown runs after both normal and I/O-error exits.
 pub fn serve_jsonl<R, W>(
     engine: &mut Engine,
+    input: R,
+    output: W,
+    limits: ControlLimits,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    W: Write,
+{
+    serve_jsonl_inner(engine, input, output, limits, None)
+}
+
+/// Serve the same JSON Lines operations as [`serve_jsonl`] with bounded project metadata.
+/// The project value should contain an `entities` array of stable-ID/handle bindings and
+/// source fields; individual `project_info` requests return only one bounded page.
+pub fn serve_project_jsonl<R, W>(
+    engine: &mut Engine,
+    input: R,
+    output: W,
+    limits: ControlLimits,
+    project_info: Value,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    W: Write,
+{
+    serve_jsonl_inner(engine, input, output, limits, Some(project_info))
+}
+
+fn serve_jsonl_inner<R, W>(
+    engine: &mut Engine,
     mut input: R,
     mut output: W,
     limits: ControlLimits,
+    project_info: Option<Value>,
 ) -> io::Result<usize>
 where
     R: BufRead,
@@ -185,7 +222,13 @@ where
         ));
     }
 
-    let loop_result = serve_loop(engine, &mut input, &mut output, limits);
+    let loop_result = serve_loop_with_project_info(
+        engine,
+        &mut input,
+        &mut output,
+        limits,
+        project_info.as_ref(),
+    );
     let shutdown_result = engine
         .shutdown()
         .map_err(|error| io::Error::other(error.to_string()));
@@ -196,11 +239,26 @@ where
     }
 }
 
-fn serve_loop<R: BufRead, W: Write>(
+#[cfg(test)]
+fn serve_loop<R, W>(
     engine: &mut Engine,
     input: &mut R,
     output: &mut W,
     limits: ControlLimits,
+) -> io::Result<usize>
+where
+    R: BufRead,
+    W: Write,
+{
+    serve_loop_with_project_info(engine, input, output, limits, None)
+}
+
+fn serve_loop_with_project_info<R: BufRead, W: Write>(
+    engine: &mut Engine,
+    input: &mut R,
+    output: &mut W,
+    limits: ControlLimits,
+    project_info: Option<&Value>,
 ) -> io::Result<usize> {
     let mut request_count = 0;
     let mut command_ids = CommandIds(1);
@@ -279,8 +337,13 @@ fn serve_loop<R: BufRead, W: Write>(
         }
         let request_id = envelope.request_id;
         let should_exit = matches!(&envelope.request, Operation::Exit);
-        let (result, state_changed) =
-            handle_request(engine, envelope.request, &mut command_ids, limits);
+        let (result, state_changed) = handle_request(
+            engine,
+            envelope.request,
+            &mut command_ids,
+            limits,
+            project_info,
+        );
         match result {
             Ok(value) => write_response(
                 output,
@@ -350,6 +413,7 @@ fn handle_request(
     operation: Operation,
     command_ids: &mut CommandIds,
     limits: ControlLimits,
+    project_info: Option<&Value>,
 ) -> (Result<Value, ControlError>, bool) {
     match operation {
         Operation::SpawnTransform { transform } => {
@@ -516,6 +580,64 @@ fn handle_request(
                 .map(|snapshot| json!({"snapshot": snapshot}));
             (result, false)
         }
+        Operation::ProjectInfo { offset, limit } => {
+            let Some(project_info) = project_info else {
+                return (
+                    Err(ControlError::new(
+                        "project_not_loaded",
+                        "this JSONL engine session was started without an external project",
+                    )),
+                    false,
+                );
+            };
+            let Some(all_entities) = project_info.get("entities").and_then(Value::as_array) else {
+                return (
+                    Err(ControlError::new(
+                        "project_info_unavailable",
+                        "the loaded project's stable entity map is unavailable",
+                    )),
+                    false,
+                );
+            };
+            if limit == Some(0) {
+                return (
+                    Err(ControlError::new(
+                        "project_info_limit",
+                        "project_info limit must be positive",
+                    )),
+                    false,
+                );
+            }
+            let page_limit = requested_entity_limit(limit, limits);
+            let total = all_entities.len();
+            let start = offset.min(total);
+            let end = start.saturating_add(page_limit).min(total);
+            let page = all_entities[start..end].to_vec();
+            let next_offset = (end < total).then_some(end);
+            if let Some(base) = project_info.as_object() {
+                let mut object = base
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "entities")
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<serde_json::Map<_, _>>();
+                object.insert("session".into(), json!(engine.world().session()));
+                object.insert("tick".into(), json!(engine.clock().current_tick()));
+                object.insert("entities".into(), Value::Array(page));
+                object.insert("entity_count".into(), json!(total));
+                object.insert("offset".into(), json!(start));
+                object.insert("limit".into(), json!(page_limit));
+                object.insert("next_offset".into(), json!(next_offset));
+                (Ok(Value::Object(object)), false)
+            } else {
+                (
+                    Err(ControlError::new(
+                        "project_info_unavailable",
+                        "the loaded project's metadata is not a JSON object",
+                    )),
+                    false,
+                )
+            }
+        }
         Operation::Exit => (Ok(json!({"closed": true})), true),
     }
 }
@@ -595,7 +717,7 @@ mod tests {
     use daedalus_core::{SessionId, Transform};
     use serde_json::{Value, json};
 
-    use super::{ControlLimits, MIN_CONTROL_RESPONSE_BYTES, serve_jsonl};
+    use super::{ControlLimits, MIN_CONTROL_RESPONSE_BYTES, serve_jsonl, serve_project_jsonl};
     use daedalus_runtime::{EngineBuilder, EngineConfig};
 
     fn engine() -> daedalus_runtime::Engine {
@@ -809,5 +931,72 @@ mod tests {
         );
         assert_eq!(responses[3]["error"]["code"], "reserved_command_id");
         assert_eq!(engine.clock().current_tick().0, 1);
+    }
+
+    #[test]
+    fn project_info_is_explicitly_unavailable_in_bare_serve_and_paginated_in_project_serve() {
+        let bare_input = format!(
+            "{}\n",
+            json!({"protocol":1,"request_id":"bare","request":{"op":"project_info"}})
+        );
+        let mut bare_engine = engine();
+        let mut bare_output = Vec::new();
+        serve_jsonl(
+            &mut bare_engine,
+            Cursor::new(bare_input),
+            &mut bare_output,
+            ControlLimits::default(),
+        )
+        .unwrap();
+        let bare: Value = serde_json::from_slice(bare_output.strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(bare["error"]["code"], "project_not_loaded");
+
+        let project_info = json!({
+            "project_name":"three entities",
+            "source_scene_revision":4,
+            "source_digest":"sha256:abc",
+            "tick":0,
+            "entities":[
+                {"id":"entity/one","handle":{"session":"71","index":0,"generation":0}},
+                {"id":"entity/two","handle":{"session":"71","index":1,"generation":0}},
+                {"id":"entity/last-authored-entity","handle":{"session":"71","index":2,"generation":0}}
+            ]
+        });
+        let project_input = format!(
+            "{}\n{}\n",
+            json!({"protocol":1,"request_id":"step","request":{"op":"step","count":1}}),
+            json!({"protocol":1,"request_id":"last","request":{"op":"project_info","offset":2,"limit":99}}),
+        );
+        let limits = ControlLimits {
+            entities_per_result: 2,
+            ..ControlLimits::default()
+        };
+        let mut project_engine = engine();
+        let mut project_output = Vec::new();
+        serve_project_jsonl(
+            &mut project_engine,
+            Cursor::new(project_input),
+            &mut project_output,
+            limits,
+            project_info,
+        )
+        .unwrap();
+        let last: Value = serde_json::from_slice(
+            project_output
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .nth(1)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last["result"]["entity_count"], 3);
+        assert_eq!(last["result"]["entities"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            last["result"]["entities"][0]["id"],
+            "entity/last-authored-entity"
+        );
+        assert_eq!(last["result"]["next_offset"], Value::Null);
+        assert_eq!(last["result"]["tick"], 1);
+        assert!(last["result"]["entities"][0].get("transform").is_none());
     }
 }

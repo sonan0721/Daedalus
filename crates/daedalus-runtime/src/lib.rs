@@ -2,6 +2,7 @@
 
 mod clock;
 pub mod live_session;
+pub mod project;
 
 use std::time::Duration;
 
@@ -9,27 +10,34 @@ use bevy_ecs::prelude::{IntoScheduleConfigs, Resource, Schedule};
 use bevy_ecs::schedule::ExecutorKind;
 use bevy_ecs::system::ScheduleSystem;
 use bevy_tasks::{ComputeTaskPool, TaskPoolBuilder};
-use daedalus_core::{SessionId, Tick, Transform};
 use daedalus_tasks::{ShutdownError, TaskPool, TaskPoolError};
-use daedalus_world::{
-    CommandResult, CommandSubmission, CommandSubmitError, SimulationWorld, SpawnError, WorldCommand,
-};
+use daedalus_world::{SimulationWorld, SpawnError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use bevy_ecs;
 pub use clock::{ClockAdvance, ClockConfigError, FixedClock, FixedClockConfig};
-pub use daedalus_core::{RenderEntitySnapshot, RenderSnapshot, SnapshotConsumer};
+pub use daedalus_core::{
+    CommandId, EntityHandle, RenderEntitySnapshot, RenderSnapshot, Revision, SessionId,
+    SnapshotConsumer, SnapshotReadError, Tick, Transform,
+};
 pub use daedalus_tasks::{
     CancellationToken, SubmitError, TaskCompletion, TaskFailure, TaskHandle, TaskId, TaskOutcome,
     TaskPool as CpuTaskPool,
 };
-pub use daedalus_world::{RevisionComponent, TransformComponent};
+pub use daedalus_world::{
+    CommandOutcome, CommandResult, CommandSubmission, CommandSubmitError, RevisionComponent,
+    TransformComponent, WorldCommand, WorldCommandKind, WorldReadError,
+};
 pub use live_session::{
     CommandAccepted, LiveCommand, LiveCommandOutcome, LiveCommandResult, LiveCommandSubmitError,
     LiveCpuBudget, LiveFrame, LiveResultReadError, LiveSession, LiveSessionConfig,
     LiveSessionStartError, LiveSessionStats, LiveShutdownReport, LiveStatusReadError,
     LiveTermination, LiveTerrainFrame,
+};
+pub use project::{
+    ProjectEntityState, ProjectSession, ProjectSessionCommandError, ProjectSessionReadError,
+    ProjectSessionReport, ProjectSessionStartError,
 };
 
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]

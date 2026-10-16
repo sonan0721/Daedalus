@@ -6,6 +6,7 @@
 //! term and ACES-style tone mapping; shadows, transparency, texture sampling,
 //! temporal effects, and asset residency are future work.
 
+mod project;
 mod renderer;
 mod scene;
 #[cfg(feature = "window")]
@@ -14,6 +15,10 @@ mod window;
 #[cfg(feature = "test-fixtures")]
 pub mod test_fixtures;
 
+pub use project::{
+    ProjectProjection, ProjectProjectionError, ProjectProjectionLimits, project_snapshot,
+    project_snapshot_with_limits,
+};
 pub use renderer::{CaptureArtifact, CaptureOptions, Renderer, RendererError, RendererInfo};
 pub use scene::{Camera, DirectionalLight, Material, Mesh, RenderObject, RenderScene, Vertex};
 #[cfg(feature = "window")]

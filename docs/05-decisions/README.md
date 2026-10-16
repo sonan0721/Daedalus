@@ -16,6 +16,7 @@
 | [0003](0003-csharp-and-native-gameplay.md) | 채택 | C# 14/.NET 10/CoreCLR 주 SDK·빌드형 Rust 게임플레이·C++ 어댑터·오토파일럿 |
 | [0004](0004-start-engine-implementation.md) | 채택 | 구현 착수 승인·모듈별 계약·Luna xhigh 코딩·실제 검증 추적 |
 | [0005](0005-engine-product-and-game-validation.md) | 채택 | D1 엔진 제품→D2 3D 게임→D3 2D 게임 인수·엔진/게임 저장소 분리·반복 개발 자동화 |
+| [0006](0006-owned-session-control-results.md) | 채택: 구현 계약·검증 진행 중 | 같은 session의 owned 결과·유한 보존·Manual Step 진행 보장 |
 
 스크립트 언어는 사용자와 최종 검토 후 C#으로 선택했다. 초기 TypeScript strict 권고는 ADR-0003으로 대체한다. Rust 코어·C++ 부품 통합과 Rust 게임 작성 경로를 유지하되 Rust는 재빌드, C#은 hot-reload로 반영한다. host 진입점·패키징·ECS·큐 알고리즘 등의 세부 구현은 아직 미선정이다.
 

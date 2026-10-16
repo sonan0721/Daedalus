@@ -57,6 +57,8 @@
 | [실행·제어·표시 통합](03-architecture/runtime-control-and-presentation.md) | 지속 세션·CPU 예산·CLI 캡처·독립 창 실행의 다음 통합 계약 |
 | [Native live session](03-architecture/native-live-session.md) | 실제 창·권한 ECS·background terrain 연결과 입력/반응성 증거 계약 |
 | [외부 project lifecycle](03-architecture/project-lifecycle.md) | 사용자 project/scene/mesh 자료를 같은 Engine·snapshot·renderer에 연결하는 선행 계약 |
+| [같은 session의 공통 제어](03-architecture/session-control-service.md) | 하나의 project actor에 창/CLI/MCP/SDK를 연결하는 결과·clock·입력·capture·종료 계약 |
+| [렌더 자원 재사용](03-architecture/renderer-resource-reuse.md) | 반복 geometry 복사/업로드를 mesh handle·instance 갱신·in-flight cache 예산으로 줄이는 다음 설계 |
 | [릴리스·공개 API](03-architecture/releases-and-public-api.md) | 엔진·API·저장·네트워크 버전과 HTML/Wasm export의 경계 |
 | [CLI 빌드·태그 릴리스](03-architecture/cli-build-and-release.md) | 로컬 실행 파일 관리와 후속 tag push 기반 GitHub Release 자동화 계약 |
 | [목표 지도](04-plan/goal-map.md) | 조사와 구현을 각각 끝낼 수 있는 goal로 분해 |
@@ -73,6 +75,7 @@
 | [ADR-0003](05-decisions/0003-csharp-and-native-gameplay.md) | C# 14/.NET 10/CoreCLR·빌드형 Rust 게임플레이·C++ 통합·오토파일럿 결정 |
 | [ADR-0004](05-decisions/0004-start-engine-implementation.md) | 사용자 구현 착수 승인과 모듈별 설계·검증 진행 방식 |
 | [ADR-0005](05-decisions/0005-engine-product-and-game-validation.md) | 엔진 제품 인수·별도 3D/2D 게임 검증·완료 보고 기준 정정 |
+| [ADR-0006](05-decisions/0006-owned-session-control-results.md) | 공통 actor의 owned ticket·유한 replay/retention·Manual Step 포화 진행 계약 |
 | [R01 작업 기록](06-worklog/2026-10-15-r01.md) | 작성 문서별 목적·확인 범위·검증·후속 과제 기록 |
 | [R02 스크립팅 작업 기록](06-worklog/2026-10-15-r02-scripting.md) | 언어·모드 범위 변경, 새 문서별 목적과 남은 통합 조사 기록 |
 | [E01~E03 첫 구현 검증](06-worklog/2026-10-15-e01-foundation.md) | 실제 Rust·CLI·Metal 검증과 아직 완료하지 않은 기능의 경계 |

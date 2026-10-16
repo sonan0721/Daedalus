@@ -25,7 +25,13 @@ struct SnapshotState {
     next_sequence: u64,
     max_retained: usize,
     latest: Option<Arc<RenderSnapshot>>,
-    retained: Vec<Weak<RenderSnapshot>>,
+    retained: Vec<RetainedSnapshot>,
+}
+
+#[derive(Debug)]
+struct RetainedSnapshot {
+    snapshot: Weak<RenderSnapshot>,
+    entities: Weak<[RenderEntitySnapshot]>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,10 +69,11 @@ pub enum SnapshotReadError {
     Poisoned,
 }
 
-/// Create a one-slot latest-value mailbox with a cap on simultaneously retained snapshots.
+/// Create a one-slot latest-value mailbox with a cap on retained snapshot generations.
 ///
-/// The consumer can keep snapshots alive after a later publication. When those retained
-/// snapshots consume the cap, publication returns `SkippedAtCapacity` rather than waiting.
+/// Consumers can keep either snapshot wrappers or their shared entity backing alive after a
+/// later publication. When those retained generations consume the cap, publication returns
+/// `SkippedAtCapacity` rather than waiting.
 #[must_use]
 pub fn snapshot_channel(max_retained: usize) -> (SnapshotPublisher, SnapshotConsumer) {
     assert!(
@@ -124,22 +131,28 @@ impl SnapshotPublisher {
             Err(TryLockError::Poisoned(_)) => return Err(SnapshotPublishError::Poisoned),
         };
 
-        state
-            .retained
-            .retain(|snapshot| snapshot.strong_count() > 0);
-        let externally_retained = state
-            .retained
-            .iter()
-            .filter_map(Weak::upgrade)
-            .filter(|snapshot| {
-                let is_current = state
-                    .latest
-                    .as_ref()
-                    .is_some_and(|latest| Arc::ptr_eq(latest, snapshot));
+        let mut externally_retained = 0_usize;
+        let latest_ptr = state.latest.as_ref().map(Arc::as_ptr);
+        state.retained.retain(|generation| {
+            let snapshot = generation.snapshot.upgrade();
+            let snapshot_alive = snapshot.is_some();
+            let wrapper_retained = snapshot.as_ref().is_some_and(|snapshot| {
+                let is_current =
+                    latest_ptr.is_some_and(|latest| std::ptr::eq(latest, Arc::as_ptr(snapshot)));
                 let mailbox_and_upgrade = if is_current { 2 } else { 1 };
                 Arc::strong_count(snapshot) > mailbox_and_upgrade
-            })
-            .count();
+            });
+            let entities_retained = generation.entities.upgrade().is_some_and(|entities| {
+                // A live snapshot wrapper owns one backing Arc; this check owns another
+                // temporary Arc from upgrading the weak reference.
+                let internal_and_upgrade = 1 + usize::from(snapshot_alive);
+                Arc::strong_count(&entities) > internal_and_upgrade
+            });
+            if wrapper_retained || entities_retained {
+                externally_retained += 1;
+            }
+            snapshot_alive || generation.entities.strong_count() > 0
+        });
         if externally_retained.saturating_add(1) > state.max_retained {
             return Ok(PublicationStatus::SkippedAtCapacity);
         }
@@ -160,7 +173,10 @@ impl SnapshotPublisher {
             tick,
             entities: entities.into(),
         });
-        state.retained.push(Arc::downgrade(&snapshot));
+        state.retained.push(RetainedSnapshot {
+            snapshot: Arc::downgrade(&snapshot),
+            entities: Arc::downgrade(&snapshot.entities),
+        });
         state.latest = Some(snapshot);
         Ok(PublicationStatus::Published { sequence })
     }
@@ -179,6 +195,8 @@ impl SnapshotConsumer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::{RenderEntitySnapshot, SnapshotPublishError, SnapshotReadError, Tick, Transform};
 
     use super::{PublicationStatus, snapshot_channel};
@@ -196,6 +214,48 @@ mod tests {
             PublicationStatus::SkippedAtCapacity
         );
         drop(retained);
+        assert_eq!(
+            publisher.try_publish(Tick(2), vec![]).unwrap(),
+            PublicationStatus::Published { sequence: 2 }
+        );
+    }
+
+    #[test]
+    fn independently_retained_entity_backing_exhausts_capacity_until_released() {
+        let (publisher, consumer) = snapshot_channel(1);
+        publisher
+            .try_publish(Tick(1), vec![render_entity()])
+            .unwrap();
+        let snapshot = consumer.try_latest().unwrap().unwrap();
+        let entities = Arc::clone(&snapshot.entities);
+        drop(snapshot);
+
+        assert_eq!(
+            publisher.try_publish(Tick(2), vec![]).unwrap(),
+            PublicationStatus::SkippedAtCapacity
+        );
+        drop(entities);
+        assert_eq!(
+            publisher.try_publish(Tick(2), vec![]).unwrap(),
+            PublicationStatus::Published { sequence: 2 }
+        );
+    }
+
+    #[test]
+    fn cloned_snapshot_value_retains_the_entity_generation_until_released() {
+        let (publisher, consumer) = snapshot_channel(1);
+        publisher
+            .try_publish(Tick(1), vec![render_entity()])
+            .unwrap();
+        let snapshot = consumer.try_latest().unwrap().unwrap();
+        let cloned_snapshot = snapshot.as_ref().clone();
+        drop(snapshot);
+
+        assert_eq!(
+            publisher.try_publish(Tick(2), vec![]).unwrap(),
+            PublicationStatus::SkippedAtCapacity
+        );
+        drop(cloned_snapshot);
         assert_eq!(
             publisher.try_publish(Tick(2), vec![]).unwrap(),
             PublicationStatus::Published { sequence: 2 }
@@ -280,6 +340,42 @@ mod tests {
     }
 
     #[test]
+    fn lazy_extraction_is_skipped_for_backing_only_retention() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (publisher, consumer) = snapshot_channel(1);
+        publisher
+            .try_publish(Tick(1), vec![render_entity()])
+            .unwrap();
+        let snapshot = consumer.try_latest().unwrap().unwrap();
+        let entities = Arc::clone(&snapshot.entities);
+        drop(snapshot);
+        let calls = AtomicUsize::new(0);
+
+        assert_eq!(
+            publisher
+                .try_publish_with(Tick(2), 1, 1, || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    vec![]
+                })
+                .unwrap(),
+            PublicationStatus::SkippedAtCapacity
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        drop(entities);
+        assert_eq!(
+            publisher
+                .try_publish_with(Tick(3), 1, 1, || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    vec![render_entity()]
+                })
+                .unwrap(),
+            PublicationStatus::Published { sequence: 2 }
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn lazy_extraction_is_skipped_when_mailbox_is_busy() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -295,5 +391,16 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert_eq!(consumer.try_latest(), Err(SnapshotReadError::Busy));
+    }
+
+    fn render_entity() -> RenderEntitySnapshot {
+        RenderEntitySnapshot {
+            entity: crate::EntityHandle {
+                session: crate::SessionId::from_raw(4),
+                index: 3,
+                generation: 2,
+            },
+            transform: Transform::IDENTITY,
+        }
     }
 }

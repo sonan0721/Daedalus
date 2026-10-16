@@ -7,6 +7,8 @@ use bevy_ecs::prelude::{Changed, Component, Entity, World as EcsWorld};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const MAX_TRANSFORM_PAGE_ENTITIES: usize = 1_024;
+
 pub use daedalus_core::{
     CommandId, EntityHandle, RenderEntitySnapshot, RenderSnapshot, Revision, SessionId, Tick,
     Transform,
@@ -78,6 +80,26 @@ pub enum CommandOutcome {
 pub struct CommandResult {
     pub command_id: CommandId,
     pub outcome: CommandOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldTransformState {
+    pub handle: EntityHandle,
+    pub transform: Transform,
+    pub revision: Revision,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldTransformPage {
+    pub total: usize,
+    pub offset: usize,
+    pub entities: Vec<WorldTransformState>,
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum WorldTransformPageError {
+    #[error("transform page limit must be in 1..=1024")]
+    InvalidLimit,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -295,6 +317,41 @@ impl SimulationWorld {
             .collect::<Vec<_>>()
     }
 
+    /// Read one bounded transform/revision page without first collecting the full world.
+    pub fn transform_page(
+        &mut self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<WorldTransformPage, WorldTransformPageError> {
+        if limit == 0 || limit > MAX_TRANSFORM_PAGE_ENTITIES {
+            return Err(WorldTransformPageError::InvalidLimit);
+        }
+        let session = self.session;
+        let mut query = self
+            .ecs
+            .query::<(Entity, &TransformComponent, &RevisionComponent)>();
+        let total = query.iter(&self.ecs).len();
+        let entities = query
+            .iter(&self.ecs)
+            .skip(offset)
+            .take(limit)
+            .map(|(entity, transform, revision)| WorldTransformState {
+                handle: EntityHandle {
+                    session,
+                    index: entity.index_u32(),
+                    generation: entity.generation().to_bits(),
+                },
+                transform: transform.0,
+                revision: revision.0,
+            })
+            .collect();
+        Ok(WorldTransformPage {
+            total,
+            offset: offset.min(total),
+            entities,
+        })
+    }
+
     #[must_use]
     pub fn entity_count(&self) -> usize {
         self.ecs.entities().count_spawned() as usize
@@ -430,8 +487,9 @@ impl SimulationWorld {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandError, CommandOutcome, CommandSubmission, CommandSubmitError, SimulationWorld,
-        TransformComponent, WorldCommand, WorldCommandKind,
+        CommandError, CommandOutcome, CommandSubmission, CommandSubmitError,
+        MAX_TRANSFORM_PAGE_ENTITIES, SimulationWorld, TransformComponent, WorldCommand,
+        WorldCommandKind, WorldTransformPageError,
     };
     use daedalus_core::{CommandId, EntityHandle, Revision, SessionId, Tick, Transform};
 
@@ -449,6 +507,35 @@ mod tests {
             apply_at: Tick(tick),
             kind,
         }
+    }
+
+    #[test]
+    fn transform_pages_bound_collection_and_report_total_offset() {
+        let mut world = SimulationWorld::new(SessionId::from_raw(25), 8, 8);
+        let handles = (0..3)
+            .map(|index| {
+                world
+                    .spawn_transform(Transform {
+                        translation: [index as f32, 0.0, 0.0],
+                        ..Transform::IDENTITY
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let page = world.transform_page(2, 1).unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(page.offset, 2);
+        assert_eq!(page.entities.len(), 1);
+        assert!(handles.contains(&page.entities[0].handle));
+        assert_eq!(
+            world.transform_page(0, MAX_TRANSFORM_PAGE_ENTITIES + 1),
+            Err(WorldTransformPageError::InvalidLimit)
+        );
+        assert_eq!(
+            world.transform_page(0, 0),
+            Err(WorldTransformPageError::InvalidLimit)
+        );
     }
 
     #[test]

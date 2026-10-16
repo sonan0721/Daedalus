@@ -28,6 +28,18 @@ The initial tests exercise generation/session handles, stale revisions, command 
 
 The ECS schedule now uses Bevy's parallel executor with an explicit process-global compute worker budget and a separate per-engine bounded Rayon pool. An integration test uses two compute workers to verify independent-system overlap and conflicting mutable-access serialization. Conflicting global-pool configurations return errors. Reported CPU totals are per-engine estimates, not a limit on every process, driver, physics, or audio thread. Snapshot publication and result polling use nonwaiting entry points, but the whole engine is not formally lock-free or wait-free.
 
+## Native session-control library
+
+`daedalus-runtime` exports `SessionControlService`, attached clients, typed operations, and owned request tickets. The native actor owns one real `ProjectSession`; Manual Step and Realtime have separate clock rules. Focused checks are:
+
+```sh
+cargo test -p daedalus-runtime session_control::tests --locked
+cargo test -p daedalus-runtime session_primitives::tests --locked
+cargo test -p daedalus-world --lib --locked
+```
+
+The latest local all-feature coordinator run passes 158 CPU tests with two hardware tests ignored by default. Service tests cover real authority admission versus application, multiple clients, wrong-session/stale revisions, bounded pages, reserved Step capacity under saturation, reader-held result/frame lifetimes, duplicate replay and eviction, nonwaiting contention, timeouts, shutdown, and injected actor failures. Core retention also counts an independently retained entity-array Arc or cloned snapshot value. Frame-cap-one progress and pin/release recovery use a separate producer budget; native service producer capacity must be 2–64. A controlled actor pause verifies that ACK and last-reader release free Step credit before actor bookkeeping cleanup. The first Linux PR run exposed that race; subsequent CI is recorded separately in the worklog. Unknown post-failure command outcomes are reported explicitly. This is a native Rust API; no new CLI/MCP endpoint or managed attach is implied. The legacy window shares mailbox/stop primitives but retains its old count-only result guard. See the [service contract](docs/03-architecture/session-control-service.md) for exact limits and remaining migration.
+
 ## Current CLI smoke
 
 ```sh

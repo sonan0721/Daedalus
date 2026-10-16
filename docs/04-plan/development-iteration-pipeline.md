@@ -12,7 +12,7 @@
 
 | ID | 반복되는 작업 | 공통화할 책임 | 정확성 조건 | 현재 |
 | --- | --- | --- | --- | --- |
-| DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 공통 경로 확인. visible/MCP/bridge service 통합 미완료 |
+| DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. legacy credit migration·visible/MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
 | DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | 미구현 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | 일부 JSONL 제어만 구현 |
@@ -60,3 +60,13 @@ AI 루프는 GUI automation만 반복하는 방식에 의존하지 않는다. CL
 로컬 검증과 native package 검증은 같은 smoke 함수를 재사용한다. 기존 archive 무결성·version/inspect 검사는 유지하고, 추출한 binary로 project smoke를 추가한다. release workflow는 이미 package backend를 호출하므로 별도 workflow/중복 smoke를 만들지 않는다. stub 기반 package unit test는 실제 process를 성공으로 위조하지 않도록 기존 mock 경계를 명시적으로 조정하고, 실제 binary smoke는 별도로 실행한다. CLI/source 변경이 없는 경우 이 자동화 추가 때문에 Rust workspace 전체를 다시 빌드하지 않는다.
 
 실제 첫 결과: `python3 scripts/smoke_project.py --cli target/debug/daedalus` 한 번으로 18개 계약 검사를 통과했다. 조정자의 같은 Mac warm 관찰은 0.093575초이며 executable SHA-256은 worklog와 ignored JSON에 기록했다. 반복 수동 fixture/JSONL 조립을 한 invocation으로 묶은 근거다. 과거 수동 wall time과 통제된 비교 측정은 없으므로 속도 향상 배율을 주장하지 않는다. Python regression 41건은 별도 통과했다. GPU/GUI/.NET 검사를 이 CPU helper로 대체하지 않는다.
+
+## DEV01/DEV08 후속 설계
+
+P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 typed 요청·owned 결과·clock·포화/종료를 먼저 고정했다. 계약 감사에서 Manual Step admission deadlock, client-held frame retention, 유한 replay의 의미를 보완한 뒤 Luna xhigh가 runtime/world를 구현했다. root는 backing 회수 수정 후 workspace CPU 157건을 통과했고 기존 control/managed/fixture window는 별도 회귀로 확인한다. actor panic 때 in-flight ticket이 남는 문제와 중복 ticket의 종료 통계도 regression으로 막았다.
+
+실제 공통화는 native service와 legacy mailbox/stop까지다. legacy count-only result guard/receiver, JSONL·visible project·MCP·SDK attach는 남아 있다. 따라서 DEV01 전체 완료나 제작 속도 배율을 주장하지 않는다. 새 frontend는 이 kernel을 사용하고 adapter-specific envelope·동기/비동기 수명만 추가하는 것이 다음 검증 대상이다.
+
+같은 작업에서 테스트의 정상 admission/frame 조회가 합법적인 Busy를 곧바로 실패 처리하는 경로를 점검했다. 정상 성공 검사는 기존 bounded retry helper(제출 2초·frame 조회 3초)를 사용하고 의도한 Busy/ResultCapacity/권한/clock 오류 검사는 그대로 실패를 대조한다. 실제 flaky 발생률을 측정한 것은 아니며 무조건 retry로 오류를 숨기지 않는다. 마지막 helper 수정은 test-only라 focused 23건을 재검증하고 GPU/package 검사를 불필요하게 반복하지 않았다.
+
+별도 [renderer resource 재사용](../03-architecture/renderer-resource-reuse.md) 문서는 로컬 source 감사에서 확인한 per-frame flatten/buffer 생성과 project entity별 mesh 복제를 없애기 위한 다음 계약이다. CPU mesh handle/instance 갱신·GPU cache·in-flight retirement를 함께 다루고 upload count/bytes로 검증한다. 현재는 미구현이며 cache 속도 향상이나 전체 DEV08 완료를 뜻하지 않는다.

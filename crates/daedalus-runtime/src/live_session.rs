@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
-use std::sync::{Arc, Mutex, TryLockError, Weak};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,7 @@ use thiserror::Error;
 use crate::{
     CpuBudgetDiagnostics, Engine, EngineBuildError, EngineBuilder, EngineConfig, EngineError,
     SnapshotPublication,
+    session_primitives::{LatestValueMailbox, MailboxError, StopSignal},
 };
 
 const MAX_COMMAND_CAPACITY: usize = 4_096;
@@ -355,7 +356,7 @@ pub struct LiveSession {
     shared: Arc<SessionShared>,
     command_sender: SyncSender<CommandEnvelope>,
     result_receiver: Mutex<Receiver<LiveCommandResult>>,
-    frames: Arc<FrameMailbox>,
+    frames: Arc<LatestValueMailbox<LiveFrame>>,
     join: Option<JoinHandle<LiveShutdownReport>>,
     config: LiveSessionConfig,
     initial_entity: EntityHandle,
@@ -370,15 +371,15 @@ impl LiveSession {
         let (result_sender, result_receiver) = mpsc::sync_channel(config.result_capacity);
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let shared = Arc::new(SessionShared {
-            stop_requested: AtomicBool::new(false),
+            stop_requested: StopSignal::default(),
             next_command_id: AtomicU64::new(1),
             outstanding_results: AtomicUsize::new(0),
+            result_capacity: config.result_capacity,
             stop_command_id: AtomicU64::new(0),
             submit_gate: Mutex::new(()),
             termination: Mutex::new(None),
-            result_capacity: config.result_capacity,
         });
-        let frames = Arc::new(FrameMailbox::new(config.engine.snapshot_capacity));
+        let frames = Arc::new(LatestValueMailbox::new(config.engine.snapshot_capacity));
         let actor_shared = Arc::clone(&shared);
         let actor_frames = Arc::clone(&frames);
         let actor_config = config.clone();
@@ -441,7 +442,7 @@ impl LiveSession {
             Err(TryLockError::WouldBlock) => return Err(LiveCommandSubmitError::Busy),
             Err(TryLockError::Poisoned(_)) => return Err(LiveCommandSubmitError::Stopped),
         };
-        if self.shared.stop_requested.load(Ordering::Acquire) {
+        if self.shared.stop_requested.is_requested() {
             return Err(LiveCommandSubmitError::Stopped);
         }
         self.shared.reserve_result_credit()?;
@@ -463,7 +464,7 @@ impl LiveSession {
                 self.shared.release_result_credit();
                 return Err(LiveCommandSubmitError::Stopped);
             }
-            self.shared.stop_requested.store(true, Ordering::Release);
+            self.shared.stop_requested.request();
             return Ok(CommandAccepted { id });
         }
 
@@ -487,10 +488,7 @@ impl LiveSession {
     /// `None` includes an empty mailbox, a busy mailbox, or a retained-frame budget hit.
     #[must_use]
     pub fn try_latest_frame(&self) -> Option<Arc<LiveFrame>> {
-        match self.frames.state.try_lock() {
-            Ok(state) => state.latest.clone(),
-            Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => None,
-        }
+        self.frames.try_latest().ok().flatten()
     }
 
     /// Poll one reliable command result without waiting.
@@ -521,7 +519,7 @@ impl LiveSession {
 
     /// Request cooperative shutdown independently of command-queue capacity.
     pub fn request_stop(&self) {
-        self.shared.stop_requested.store(true, Ordering::Release);
+        self.shared.stop_requested.request();
     }
 
     /// Request stop and join the simulation thread. Call this outside event/presentation callbacks.
@@ -555,18 +553,18 @@ impl Drop for LiveSession {
     fn drop(&mut self) {
         // Do not join from Drop: it can run on a UI callback. The actor observes this signal and
         // performs cooperative task cancellation; explicit `shutdown` is the reporting join path.
-        self.shared.stop_requested.store(true, Ordering::Release);
+        self.shared.stop_requested.request();
     }
 }
 
 struct SessionShared {
-    stop_requested: AtomicBool,
+    stop_requested: StopSignal,
     next_command_id: AtomicU64,
     outstanding_results: AtomicUsize,
+    result_capacity: usize,
     stop_command_id: AtomicU64,
     submit_gate: Mutex<()>,
     termination: Mutex<Option<LiveTermination>>,
-    result_capacity: usize,
 }
 
 impl SessionShared {
@@ -618,65 +616,6 @@ struct CommandEnvelope {
     command: LiveCommand,
 }
 
-struct FrameMailbox {
-    state: Mutex<FrameMailboxState>,
-    max_retained: usize,
-}
-
-struct FrameMailboxState {
-    latest: Option<Arc<LiveFrame>>,
-    retained: Vec<Weak<LiveFrame>>,
-}
-
-impl FrameMailbox {
-    fn new(max_retained: usize) -> Self {
-        Self {
-            state: Mutex::new(FrameMailboxState {
-                latest: None,
-                retained: Vec::new(),
-            }),
-            max_retained,
-        }
-    }
-
-    /// Bounded try-publish; a slow consumer keeps its last complete frame.
-    fn try_publish(&self, frame: LiveFrame) -> Result<(), FramePublishError> {
-        let mut state = match self.state.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::WouldBlock) => return Err(FramePublishError::Busy),
-            Err(TryLockError::Poisoned(_)) => return Err(FramePublishError::Poisoned),
-        };
-        state.retained.retain(|frame| frame.strong_count() > 0);
-        let externally_retained = state
-            .retained
-            .iter()
-            .filter_map(Weak::upgrade)
-            .filter(|frame| {
-                let is_latest = state
-                    .latest
-                    .as_ref()
-                    .is_some_and(|latest| Arc::ptr_eq(latest, frame));
-                let mailbox_refs = if is_latest { 2 } else { 1 };
-                Arc::strong_count(frame) > mailbox_refs
-            })
-            .count();
-        if externally_retained.saturating_add(1) > self.max_retained {
-            return Err(FramePublishError::AtCapacity);
-        }
-        let frame = Arc::new(frame);
-        state.retained.push(Arc::downgrade(&frame));
-        state.latest = Some(frame);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum FramePublishError {
-    Busy,
-    Poisoned,
-    AtCapacity,
-}
-
 #[derive(Clone)]
 struct DesiredTerrain {
     generation: u64,
@@ -718,7 +657,7 @@ struct ActorState {
 fn run_session_thread(
     config: LiveSessionConfig,
     shared: Arc<SessionShared>,
-    frames: Arc<FrameMailbox>,
+    frames: Arc<LatestValueMailbox<LiveFrame>>,
     command_receiver: Receiver<CommandEnvelope>,
     result_sender: SyncSender<LiveCommandResult>,
     startup_sender: SyncSender<Result<EntityHandle, LiveSessionStartError>>,
@@ -761,7 +700,7 @@ fn run_session_thread(
         Err(payload) => LiveTermination::Panicked(panic_text(payload)),
     };
 
-    shared.stop_requested.store(true, Ordering::Release);
+    shared.stop_requested.request();
     let pending = drain_commands_at_stop(&shared, &command_receiver);
     for command in pending {
         actor.stats.commands_accepted = actor.stats.commands_accepted.saturating_add(1);
@@ -1260,7 +1199,7 @@ impl ActorState {
         }
     }
 
-    fn publish_frame(&mut self, mailbox: &FrameMailbox) {
+    fn publish_frame(&mut self, mailbox: &LatestValueMailbox<LiveFrame>) {
         if !self.frame_dirty {
             return;
         }
@@ -1294,11 +1233,11 @@ impl ActorState {
                 self.stats.frames_published = self.stats.frames_published.saturating_add(1);
                 self.frame_dirty = false;
             }
-            Err(FramePublishError::AtCapacity | FramePublishError::Busy) => {
+            Err(MailboxError::AtCapacity | MailboxError::Busy) => {
                 self.stats.frames_skipped_at_capacity =
                     self.stats.frames_skipped_at_capacity.saturating_add(1);
             }
-            Err(FramePublishError::Poisoned) => {
+            Err(MailboxError::Poisoned) => {
                 self.stats.last_error = Some("live frame mailbox was poisoned".to_owned());
             }
         }
@@ -1334,7 +1273,7 @@ impl ActorState {
 fn run_actor_loop(
     actor: &mut ActorState,
     shared: &SessionShared,
-    frames: &FrameMailbox,
+    frames: &LatestValueMailbox<LiveFrame>,
     command_receiver: &Receiver<CommandEnvelope>,
     result_sender: &SyncSender<LiveCommandResult>,
 ) -> Result<(), String> {
@@ -1364,7 +1303,7 @@ fn run_actor_loop(
         actor.publish_frame(frames);
         actor.flush_results(result_sender, false);
 
-        if shared.stop_requested.load(Ordering::Acquire) {
+        if shared.stop_requested.is_requested() {
             return Ok(());
         }
         if !received_command {

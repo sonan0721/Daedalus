@@ -80,3 +80,57 @@ P01.1a~c의 좁은 기반만 체크했다. P01 전체·D1, 이후 별도 D2/D3�
 ignored artifact directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e4a172b015a5-clean-20261016T002407Z-a337222d37f449238d24e36df9585d31/`다. manifest의 `dirty`는 false, features는 `window`, binary SHA-256은 `e203bbaebed0836047b0844cf90e0e8ec6ca9efd307e05b5bb726f8a7a12ed1b`다. 원본 소스·SDK를 다시 찾아야 init이 동작하는 경로는 제거했고, 추출 검사는 외부 임시 directory에서 수행한다.
 
 같은 package staging executable로 외부 project를 513×289 Metal PNG로 출력하는 것도 통과했다(`dist/project-evidence/packaged-project.png`). 새 interactive GUI 입력을 다시 시험한 결과는 아니며, 기존 fixture 창의 실제 입력 근거와 구분한다. tag/public Release는 만들지 않았다. PR의 native Linux/macOS 결과는 확인 후 별도 기록한다.
+
+## PR #6 검증과 다음 미통과
+
+[PR #6](https://github.com/sonan0721/Daedalus/pull/6)은 head `9035efab9ed397e459ee23612f8fd83ebdd91636`의 필수 docs/rust/managed native integration 및 두 native package job이 모두 통과한 뒤 `cd2c2ec9ce20b0e3ee7a624f2f74dc529e8263d6`로 squash 병합됐다. docs 7초·managed 54초·Rust 1분34초, package macOS 2분36초·Linux 2분39초다. 서로 다른 역할/환경의 job 시간을 성능 향상률로 비교하지 않는다. 두 package job은 실제 추출 binary의 공통 project smoke까지 실행했고, publish는 PR이므로 skipped다.
+
+이 병합은 P01.1과 DEV06 하위 결과이며 P01/P02/P03 및 D1 전체를 통과시킨 것이 아니다. 다음 작업은 fixture window와 동기 project control 사이의 간극이다. 새 [session service 문서](../03-architecture/session-control-service.md)는 하나의 project actor·client별 결과·manual/realtime·visible/CLI/MCP·resource reuse·live capture·종료 계약을 먼저 정리하기 위해 만들었다. typed API와 legacy migration 방법을 Luna xhigh가 read-only로 구체화한 뒤 관련 구현을 시작한다.
+
+## P02 설계와 코드 분담
+
+`feat/shared-session-service`에서 service/owned ticket API와 limits를 먼저 커밋했다. [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 결과 소유권·Manual Step reserve·유한 replay/retention의 선택 이유를 보존하기 위해 만들었다. read-only red-team에서 frame Arc retention과 bounded replay 의미를 보완했다. initial backend는 native이며 새 MCP/웹 지원을 구현했다고 표시하지 않는다.
+
+Luna xhigh 한 명이 runtime의 typed service·공통 primitive·기존 LiveSession 재사용 및 필요한 world의 bounded page helper를 단독 소유한다. root는 코드·테스트를 작성하지 않고 계약·리뷰·독립 검증·Git을 맡는다. 다른 Luna의 renderer 감사는 read-only로 유지하고 core API와 file ownership을 먼저 고정해 충돌/재작업을 줄인다. source가 안정화되기 전 중복 전체 Cargo 검사를 병렬로 실행하지 않는다.
+
+새 [renderer resource 재사용 문서](../03-architecture/renderer-resource-reuse.md)는 현재 frame마다 world-space geometry 변환·buffer 생성이 반복되는 실제 source 감사에 근거한다. 불변 CPU handle, transform/material instance 갱신, 공통 packet backend, 장치별 cache와 in-flight byte budget·변경 종류별 측정을 명세한다. 이 문서는 다음 구현안이며 실제 성능 결과는 아직 없다.
+
+## P02.1 통합 검사와 추가 회수 감사
+
+Luna xhigh의 source freeze 후 조정자는 pinned Rust의 workspace check/fmt·all-feature CPU 151건(기본 hardware ignored 2건)·strict Clippy를 독립 통과했다. 새 bridge/CLI window build, .NET 10.0.402 Release의 경고/오류 0·Rust-backed self-test·2 integration scenario도 통과했다. source-level 리뷰에서 try/drop의 blocking mutex 회귀, in-flight query/Step의 panic terminal 누락, duplicate ticket의 unique-command 종료 통계 오류를 수정하고 회귀 검사했다.
+
+같은 debug CLI로 기존 protocol-1 external project smoke 18개를 통과했다. 해당 binary SHA-256은 `8551bf54d0a2ef704a9d22e0289f7cf15a6f3dce78d1d93fe7b00ee8137f4340`다. 이번 smoke는 native window·managed 검사와 함께 실행됐으므로 이전 단일 warm smoke와 속도 배율을 비교하지 않는다.
+
+`view --seconds 3 --work-iterations 10000 --report dist/project-evidence/p02-legacy-window.json`은 실제 M3 Pro/Metal에서 time-limit 종료했다. 로딩 중 312 frame·authority tick 185, 실제 terrain job 1개 시작/취소·active job 0·termination stop_requested를 기록했다. 키/drag를 주입한 새 물리 입력 검증이나 external project window 검증이 아니다. frame interval은 CPU present 간격이며 이번 결과를 144fps/GPU latency 통과로 표시하지 않는다. 이 fixture 회귀는 공통 mailbox/stop 추출에 대한 좁은 근거다.
+
+후속 read-only 감사에서 기존 core snapshot의 내부 `entities` Arc만 보유하면 wrapper weak tracking을 우회하는 retention 결함과 service의 world dedup capacity 상한 누락을 확인했다. 다음 수정은 core의 wrapper/backing generation 이중 추적·service backing probe·producer 최소 2/frame 최소 1의 별도 예산·dedup 16,384 hard cap이다. 이 문단의 151건은 그 후속 수정 **이전** 통합 결과이며, 수정 후 재검사를 별도로 기록한다. audit issue를 열어둔 채 PR을 병합하지 않는다.
+
+DEV01의 실제 공통화는 native owned-ticket actor와 legacy mailbox/stop까지다. legacy count-only result guard/receiver와 CLI/window/MCP/managed attach는 남았으며 P02.1c·P02 전체·D1을 통과시키지 않는다. 다음 renderer API 명세는 동일 mesh hash/Arc와 stable instance 갱신을 고정했지만 아직 코드나 개선 수치가 아니다.
+
+## P02.1 회수 수정 후 최종 독립 검사
+
+core는 snapshot wrapper와 entity backing의 weak record를 함께 유지한다. service mailbox는 별도의 backing probe를 사용하며 성공한 weak upgrade 참조를 계수 중 유지해 baseline 경쟁을 피한다. wrapper와 backing을 함께 잡아도 generation은 한 번만 세고 둘 다 해제되면 회수한다. native service의 producer capacity는 2~64, frame capacity는 1~64로 독립 검증하며 config를 몰래 확대/축소하지 않는다. command dedup capacity는 1~16,384다. Luna xhigh의 수정 후 read-only source 재감사에서 해당 두 결함과 cap-one 진행 경로의 추가 finding은 없었다. 이 감사는 테스트 실행과 별도다.
+
+조정자는 수정 후 check/fmt·all-feature workspace **CPU 157건 통과, hardware 2건 기본 ignored**·all-target/all-feature strict Clippy·fresh bridge/window CLI build를 다시 통과했다. core 10건과 runtime 48건에는 backing-only/복제 snapshot 보유·lazy extraction 포화·해제 후 회복, frame cap 1과 producer cap 2의 반복 진행, dedup 설정 경계가 포함된다. pinned .NET의 실제 Rust self-test·integration 2 scenario도 새 bridge로 다시 통과했다. Python regression은 이번 branch의 변경 없는 script 기준 41건 통과이며 문서 link checker를 새 Markdown 편집 후 다시 통과했다.
+
+`dist/project-evidence/p02-final-cpu-smoke.json`은 동일 18개 검사를 통과했다. 최종 debug CLI SHA-256은 `b6100d7d4b4db7e435e53ee9eff4090c7806177960ec2dd295ea2a5654d31fa0`다. `p02-final-legacy-window.json`의 실제 M3 Pro/Metal 창은 같은 3초/10,000 work iterations 조건에서 loading frame 320·tick 186, terrain job 1개 시작/취소·active 0·time_limit/stop_requested 종료를 기록했다. 새 physical key/pointer 입력이나 external project window 검증은 아니다. concurrent native/managed smoke의 wall time을 과거 단독 실행과 비교하지 않는다.
+
+이 근거로 P02.1a/b의 좁은 native library 항목만 체크한다. P02.1c와 모든 frontend attach·live capture·실제 MCP·UI/asset/gameplay 통합·전체 D1/D2/D3는 계속 진행 중이다. 다음 package/PR은 clean source와 실제 required/native jobs를 확인한 뒤 별도 기록한다.
+
+## P02.1 로컬 CLI package
+
+구현 commit `e07dd8ebfd771d70ada023ed44a32a8d649e6e76`의 clean worktree에서 공유 release cache로 `python3 scripts/package_cli.py`를 실행했다. release/window build·notice/inventory·archive/hash·추출 binary의 version/inspect와 동일 external-project smoke 18개가 통과했다. manifest는 dirty=false, target aarch64-apple-darwin, binary SHA-256 `e0e124f70b556ac1a489b6fd950bfe0926fb5534a2c04c4d487727d1ae7ed6d4`다. 이 단일 cached build의 Cargo 관찰은 8.43초이며 개선 배율로 해석하지 않는다.
+
+ignored directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e07dd8ebfd77-clean-20261016T011157Z-428b00c662974964af1ed0fa88ff29c7/`다. 같은 staging binary의 실제 Metal `view --seconds 2 --work-iterations 10000`은 loading frame 224·tick 124, terrain job 1개 완료·active 0·time_limit/stop_requested 종료를 기록했다(`dist/project-evidence/p02-packaged-window.json`). debug 종료 때의 취소와 달리 이 release 실행에서는 job이 완료됐다. physical 입력이나 새 service frontend 지원을 의미하지 않는다. tag/public Release는 발행하지 않았다.
+
+package 뒤에는 test-only 정상 제출/frame polling을 bounded Busy retry로 통일했다. producer와 client의 합법적인 짧은 mutex 경합을 엔진 오류처럼 실패시키지 않기 위해서다. 의도한 오류 검사는 직접 응답을 대조하며 유지한다. 제출 helper 반영 후 root의 전체 157건·fmt·strict Clippy가 통과했고, 마지막 frame helper 편집 후 focused session-control 23건·fmt를 root가 다시 확인했다. production 동작은 바뀌지 않아 GPU/.NET/package를 다시 만들지 않았다. 위 manifest의 source는 계속 정확히 e07dd8e다. PR native jobs는 최종 head를 별도로 빌드한다.
+
+## PR #7 첫 Linux 검사에서 확인한 회수 순서
+
+[PR #7](https://github.com/sonan0721/Daedalus/pull/7)의 최초 head `1bd724109f7555140de3e5421270dd99f91b2073`에서 docs와 managed native integration은 통과했지만 [Rust run 38834232275](https://github.com/sonan0721/Daedalus/actions/runs/38834232275)은 `frame_capacity_one_counts_backing_only_retention_and_recovers`의 다음 Step admission이 ResultCapacity로 실패했다. 로컬 157건 통과가 다른 scheduling 순서의 안전성을 증명하지 못한 사례다.
+
+terminal을 통지한 뒤 actor의 in-flight bookkeeping/완료 함수가 별도 credit 참조를 잠시 보유하는 순서를 조사·수정한다. terminal payload reader의 정당한 lease는 유지하되 bookkeeping만으로 회수를 늦추지 않는다. actor를 terminal publication 직후 멈춘 controlled regression에서 ack/reader 해제 후 Step reserve 재사용을 확인한다. ResultCapacity를 무조건 retry하거나 실패한 CI를 단순 재실행해 통과로 대신하지 않는다. 수정 후 실제 검사 결과와 source는 이어서 기록하며 이 PR은 아직 병합하지 않았다.
+
+source 조사에서 ActiveRequest의 중복 credit Arc와 finish_cell의 terminal 통지 뒤 credit drop을 확인했다. Luna xhigh는 불필요한 actor lease를 제거하고 terminal 전의 bookkeeping 참조 반환으로 바꿨다. 실제 progress/reader lease는 유지한다. 2 MiB 예산과 유한 test-only actor pause로 terminal을 관찰한 직후 actor cleanup을 멈춘 상태에서 ack/마지막 reader 해제→다음 Step 수락을 검증했다. root의 수정 후 workspace **158건·check/fmt·strict Clippy**는 통과했다. 기존 ResultCapacity 오류 검사를 retry로 바꾸지 않았다. 이 시점은 로컬 검증이며 수정된 PR CI 통과나 병합 결과는 아니다.
+
+read-only credit 재감사에서는 실제 reader lease·pending/종료·panic correlation의 추가 finding이 없었다. abandoned payload가 폐기되는 동안 새 admission은 placeholder로만 존재하고 actor가 다음 결과를 병렬 생성하지 않는다는 aggregate-bound 근거를 source 계약에도 남겼다. 원래 failed head의 macOS/Linux package는 각각 3분4초/2분40초 통과했으나 이 결과를 수정된 head의 검증으로 대체하지 않는다.

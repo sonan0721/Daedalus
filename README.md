@@ -33,6 +33,8 @@ The project manifest references a versioned scene. Current runnable content is r
 
 This is the first project foundation: hierarchy/prefabs, general model/texture/sprite import, attached gameplay modules, live project reload, same-window control/capture, saving, MCP, and game export remain unfinished. The existing `view` window still runs its named validation fixture. See the [project contract](docs/03-architecture/project-lifecycle.md) and [verification commands](TESTING.md).
 
+The native Rust library also provides a bounded `SessionControlService` with multiple attached clients, owned request results, Manual/Realtime clocks, and snapshots from one real project engine. Its [control contract](docs/03-architecture/session-control-service.md) is the shared basis for upcoming window/CLI/MCP adapters; those adapters are not yet connected to it.
+
 ## Build a local CLI package
 
 With the pinned Rust toolchain and Python 3.11 or newer, run:

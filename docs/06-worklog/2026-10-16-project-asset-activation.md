@@ -157,3 +157,17 @@ CPU helper에는 protocol1/activation+audio 실제 사전 옵션 거부를 추�
 Busy 수정은 `project_preparation.rs`의 cfg(test) 모듈에만 적용했다. 공통 helper는 Busy만 yield/5초 deadline 안에 재시도하고 나머지 Result는 원래 assertion에 돌려준다. 해당 모듈의 기대 성공/typed error 호출을 함께 보완해 같은 비동기 가정을 반복 수정하지 않도록 했고, blocking startup bind와 production 구현은 그대로다. formerly failing focused1·default90+2·all-feature102+2·strict runtime all-target Clippy/fmt가 통과했다. source SHA-256은 `72a919aee255751cc8fddc10bfe0100d965804cd0b4e12510eeec91e7ceeeca2`다.
 
 고유/exclusive raw는 `p03-generation-portbusy-{focused,default,allfeatures,clippy}-luna-attempt01.log`다. all-feature SHA-256은 `4610583ac6b5a4105de91be0b3c552dc33e78764b8ab4261bc8f4ea060e20ba2`, Clippy는 `531f1679cab9e747a306c36395bf58dbef0cffff1017c9aacb2ec8575fdf2fbd`다. 다음 workspace test는 중간 실패로 실행되지 못한 나머지 crate까지 포함해 다시 수행한다. 앞서 통과한 workspace check/Clippy를 반복하는 대신 변경한 runtime test source의 strict Clippy와 최종 전체 test를 대조한다.
+
+## 9952b7f 최종 CPU·managed 통합
+
+test-only 수정/source review를 `9952b7fde8710b396a24ace45f3783dc45ff7678`에 commit/push하고 clean tree에서 재검증했다. 전체 workspace all-feature test는325 passed/0 failed/10 ignored로 통과했다. 장치 ignored10은 별도 실행 전이다. raw `p03-generation-integration-workspace-test-attempt01.log` SHA-256은 `a7e95c12ccc5944bfdda625fc75aa814bb2e786627132d1b6b9cc36e63aae7e1`다.
+
+fresh all-feature CLI build는3.83초였고 binary SHA-256은 `dc713f90e275ea44a5e87bd25ed92c889355c1657f28e95dfb4ec08636958064`다. 실제 `--assets --audio --asset-preparation --asset-activation` helper는62/62·1.882661초로 통과했고 report의 binary hash도 일치했다. 기존 preparation/offline audio와 headless activation은 서로 다른 지원 조합의 sub-smoke다. activation 안에서는 같은 session의 PNG/model/atlas/WAV commit 네 번·generation2~5·authority/live entity 보존과 추가 pre-I/O 옵션 거부2개를 확인했다. raw JSON `p03-generation-integration-smoke-attempt01.json` SHA-256은 `5b0168b00d9107c48f0d52cdf7276aa58205dcdfe6384832362c81c9f9f36e55`다.
+
+all-feature view의 실제 잘못된 옵션도 고유 nonexistent path에 실행했다. exit1·stdout0·예상 generation-consumer 오류·directory/cache 미생성을 확인했고 창/GPU는 만들지 않았다. 첫 verifier가 Rust Error/quote wrapper를 기대값에서 빼먹어 실패했으나 원래 product 출력은 정상이었다. 보존한 원래 stderr를 verifier attempt02로 재검사했으며 제품을 다시 실행하지 않았다. raw는 `p03-generation-integration-preio-attempt01.*`, `...preio-verify-attempt02.log`다.
+
+locked native bridge build 뒤 기본 PATH의 구 SDK6/7 선택으로 managed build가 시작되지 않았다(`final-managed-dotnet-build-attempt01.log`). 사용자에게 재설치를 요청하거나 global.json을 낮추지 않았다. root는 이미 설치된 `$HOME/.dotnet/sdk/10.0.402`와 executable을 확인했고 해당 DOTNET_ROOT/실행 경로로만 재시도했다. SDK10.0.402/Host10.0.13/osx-arm64의 Release build는3.16초·경고0/오류0, actual Rust self-test ABI1, native round-trip/module lifecycle2 scenario가 통과했다. 이는 기존 transform/module 교체 SDK의 회귀이며 project activation managed binding을 새로 지원한 것은 아니다.
+
+raw `p03-generation-managed-pinned-{build,selftest,integration}-attempt01.log` SHA-256은 각각 `b26c81706c24e74002ed3d79b029b523e9cb74c19c3618eabef04e4a1a275419`, `42f005ef0be582805f855df467f61b8c8502be01a8b60a94f69cea62a913e297`, `c8d3f1bf7cc40103b5de5fa7d5892d913c2825920e530d43fe66cbc52e9b776f`다. actual bridge dylib은 `619f81f8a80b326d4287722ac844a280a1e3e9d4359a93b360b13ceedc678b6f`다. C# 경로 재시도 때문에 이미 통과한 Rust/CLI 검사를 반복하지 않았다.
+
+이 근거 뒤에만 기존 CI staged step에 activation flag를 추가하도록 Luna에게 배정했다. YAML/문서 동결→clean local package→실제 Metal/추출 binary의 combined CPU/native 검사→두 staged CI/다섯 체크/main tree 인수는 아직 남아 있다. 기존 package backend·단일 helper를 재사용하고 새로운 job/tag/공개 Release는 만들지 않는다.

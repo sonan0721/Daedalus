@@ -9,11 +9,17 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::assets::{
+    AssetDependencySummary, AssetImportContext, AssetImportError, AssetImportErrorCode,
+    AssetImportReport, AssetKind, CpuCookCache, ImportCancellation, ImportLimits, ImportedAsset,
+    NativeProjectResolver, PreparedAssetCatalog, SourceBlob, SourceId, SourceResolver,
+};
 use crate::scene::{
     AssetDescriptor, SceneDocument, SceneEntity, StableId, ValidationIssue, validate_scene,
 };
@@ -340,7 +346,7 @@ impl fmt::Display for ProjectError {
 impl std::error::Error for ProjectError {}
 
 /// Fully owned, host-neutral project data ready for a runtime to consume.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PreparedProject {
     manifest: ProjectManifest,
     scene: SceneDocument,
@@ -349,6 +355,20 @@ pub struct PreparedProject {
     files: Vec<ProjectFileIdentity>,
     /// SHA-256 project identity over sorted relative source IDs and file hashes.
     digest: String,
+    asset_catalog: Option<PreparedAssetCatalog>,
+    asset_import_report: Option<AssetImportReport>,
+}
+
+impl PartialEq for PreparedProject {
+    fn eq(&self, other: &Self) -> bool {
+        self.manifest == other.manifest
+            && self.scene == other.scene
+            && self.entities == other.entities
+            && self.meshes == other.meshes
+            && self.files == other.files
+            && self.digest == other.digest
+            && self.asset_catalog == other.asset_catalog
+    }
 }
 
 impl PreparedProject {
@@ -374,6 +394,14 @@ impl PreparedProject {
 
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    pub fn asset_catalog(&self) -> Option<&PreparedAssetCatalog> {
+        self.asset_catalog.as_ref()
+    }
+
+    pub fn asset_import_report(&self) -> Option<&AssetImportReport> {
+        self.asset_import_report.as_ref()
     }
 
     /// Revalidates every public prepared value before runtime construction.
@@ -578,9 +606,417 @@ pub fn prepare_project_from_bytes(
         meshes,
         files,
         digest,
+        asset_catalog: None,
+        asset_import_report: None,
     };
     validate_prepared_project(&prepared, limits)?;
     Ok(prepared)
+}
+
+/// Prepares a complete project and its typed CPU asset catalog through a caller-owned source
+/// resolver and cache. Project paths remain root-relative; parser dependency URIs are resolved by
+/// the importer relative to their owning source.
+pub fn prepare_project_with_assets(
+    manifest_bytes: &[u8],
+    scene_bytes: &[u8],
+    resolver: &mut dyn SourceResolver,
+    cache: &mut dyn CpuCookCache,
+    limits: ImportLimits,
+    cancellation: &ImportCancellation,
+) -> Result<PreparedProject, AssetImportError> {
+    limits.validate()?;
+    cancellation_point(cancellation, PROJECT_MANIFEST_FILE, "manifest")?;
+    if manifest_bytes.is_empty()
+        || manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES
+        || manifest_bytes.len() as u64 > limits.max_source_bytes
+    {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::LimitExceeded,
+            crate::assets::ImportLocation::new(PROJECT_MANIFEST_FILE, "manifest"),
+            "manifest is empty or exceeds 64 KiB",
+        ));
+    }
+    if scene_bytes.is_empty()
+        || scene_bytes.len() as u64 > MAX_SCENE_BYTES
+        || scene_bytes.len() as u64 > limits.max_source_bytes
+    {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::LimitExceeded,
+            crate::assets::ImportLocation::new("scene", "scene"),
+            "scene is empty or exceeds 16 MiB",
+        ));
+    }
+
+    let manifest_id = SourceId::new(PROJECT_MANIFEST_FILE)?;
+    let manifest = parse_json(PROJECT_MANIFEST_FILE, manifest_bytes)?;
+    validate_manifest(&manifest)?;
+    let scene_id = SourceId::new(&manifest.scene)?;
+    if scene_id == manifest_id {
+        return Err(invalid(
+            PROJECT_MANIFEST_FILE,
+            "scene",
+            "scene cannot reference the project manifest itself",
+        )
+        .into());
+    }
+    prepare_project_with_asset_sources(
+        manifest,
+        SourceBlob::new(manifest_id, Arc::<[u8]>::from(manifest_bytes)),
+        SourceBlob::new(scene_id, Arc::<[u8]>::from(scene_bytes)),
+        resolver,
+        cache,
+        limits,
+        cancellation,
+    )
+}
+
+/// Shared preparation core for native and caller-provided source data. The native adapter passes
+/// its already-hashed blobs directly so identities are not rehashed and file bytes are not copied.
+fn prepare_project_with_asset_sources(
+    manifest: ProjectManifest,
+    manifest_source_blob: SourceBlob,
+    scene_source_blob: SourceBlob,
+    resolver: &mut dyn SourceResolver,
+    cache: &mut dyn CpuCookCache,
+    limits: ImportLimits,
+    cancellation: &ImportCancellation,
+) -> Result<PreparedProject, AssetImportError> {
+    let manifest_id = SourceId::new(PROJECT_MANIFEST_FILE)?;
+    let scene_id = SourceId::new(&manifest.scene)?;
+    if manifest_source_blob.source_id() != &manifest_id
+        || scene_source_blob.source_id() != &scene_id
+    {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::Invalid,
+            crate::assets::ImportLocation::new(PROJECT_MANIFEST_FILE, "sources"),
+            "provided source identities do not match the project manifest",
+        ));
+    }
+    if manifest_source_blob.byte_len() == 0
+        || manifest_source_blob.byte_len() > MAX_MANIFEST_BYTES.min(limits.max_source_bytes)
+    {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::LimitExceeded,
+            crate::assets::ImportLocation::new(PROJECT_MANIFEST_FILE, "manifest"),
+            "manifest is empty or exceeds 64 KiB",
+        ));
+    }
+    if scene_source_blob.byte_len() == 0
+        || scene_source_blob.byte_len() > MAX_SCENE_BYTES.min(limits.max_source_bytes)
+    {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::LimitExceeded,
+            crate::assets::ImportLocation::new(scene_id.to_string(), "scene"),
+            "scene is empty or exceeds 16 MiB",
+        ));
+    }
+    cancellation_point(cancellation, PROJECT_MANIFEST_FILE, "manifest")?;
+    let scene_source = scene_id.to_string();
+    let scene: SceneDocument = parse_json(&scene_source, scene_source_blob.bytes())?;
+    validate_scene_document(&scene_source, &scene, ProjectLimits::default())?;
+    if scene.assets.len() > limits.max_assets {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::LimitExceeded,
+            crate::assets::ImportLocation::new(&scene_source, "assets"),
+            format!(
+                "{} asset descriptors exceed configured limit {}",
+                scene.assets.len(),
+                limits.max_assets
+            ),
+        ));
+    }
+
+    let initial_sources = [manifest_source_blob, scene_source_blob];
+    let mut context =
+        AssetImportContext::new(resolver, cache, limits, cancellation, initial_sources)?;
+    let mut asset_order = (0..scene.assets.len()).collect::<Vec<_>>();
+    asset_order.sort_by_key(|index| match scene.assets[*index].kind.as_str() {
+        "daedalus.image" => (0, *index),
+        "daedalus.mesh" | "daedalus.model" | "daedalus.audio" => (1, *index),
+        "daedalus.sprite_atlas" => (2, *index),
+        _ => (3, *index),
+    });
+
+    let mut meshes = BTreeMap::<StableId, ProjectMesh>::new();
+    let mut imported_assets = BTreeMap::<StableId, ImportedAsset>::new();
+    let mut legacy_meshes = 0usize;
+    let mut legacy_vertices = 0usize;
+    let mut legacy_indices = 0usize;
+    for asset_index in asset_order {
+        cancellation_point(
+            cancellation,
+            &scene_source,
+            &format!("assets[{asset_index}]"),
+        )?;
+        let descriptor = &scene.assets[asset_index];
+        let path = format!("assets[{asset_index}]");
+        let source_id = SourceId::new(&descriptor.uri).map_err(|error| {
+            AssetImportError::new(
+                error.code(),
+                crate::assets::ImportLocation::new(&scene_source, format!("{path}.uri")),
+                error.message(),
+            )
+        })?;
+        if source_id == manifest_id || source_id == scene_id {
+            return Err(invalid(
+                &scene_source,
+                format!("{path}.uri"),
+                "asset source must be distinct from manifest and scene",
+            )
+            .into());
+        }
+        if let Some(hash) = &descriptor.content_hash {
+            parse_declared_hash(hash).map_err(|message| {
+                invalid(&scene_source, format!("{path}.content_hash"), message)
+            })?;
+        }
+        context.begin_asset(descriptor.id.clone(), source_id.clone());
+        let per_asset_limit = if descriptor.kind.as_str() == "daedalus.mesh" {
+            MAX_MESH_BYTES.min(limits.max_source_bytes)
+        } else {
+            limits.max_source_bytes
+        };
+        let source = context.resolve_uri(
+            &manifest_id,
+            &descriptor.uri,
+            per_asset_limit,
+            crate::assets::ImportLocation::new(&scene_source, format!("{path}.uri")),
+        )?;
+        if let Some(hash) = &descriptor.content_hash {
+            verify_declared_hash_digest(&scene_source, &path, descriptor, &source.sha256())
+                .map_err(AssetImportError::from)?;
+            debug_assert!(!hash.is_empty());
+        }
+        if descriptor.kind.as_str() == "daedalus.mesh" {
+            if !descriptor.metadata.is_empty() {
+                return Err(unsupported(
+                    &scene_source,
+                    format!("{path}.metadata"),
+                    "legacy mesh metadata is not supported",
+                )
+                .into());
+            }
+            legacy_meshes += 1;
+            if legacy_meshes > limits.max_assets {
+                return Err(AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    crate::assets::ImportLocation::new(&scene_source, "assets"),
+                    "legacy mesh count exceeds configured asset limit",
+                ));
+            }
+            let mesh: ProjectMesh = parse_json(source.source_id().as_str(), source.bytes())?;
+            validate_mesh(source.source_id().as_str(), &mesh, ProjectLimits::default())?;
+            context.account(
+                crate::assets::BudgetKind::GeometryVertices,
+                mesh.vertices.len() as u64,
+                crate::assets::ImportLocation::new(source.source_id().to_string(), "vertices"),
+            )?;
+            context.account(
+                crate::assets::BudgetKind::GeometryIndices,
+                mesh.indices.len() as u64,
+                crate::assets::ImportLocation::new(source.source_id().to_string(), "indices"),
+            )?;
+            let cooked_bytes = (mesh.vertices.len() as u64)
+                .checked_mul(std::mem::size_of::<ProjectVertex>() as u64)
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        (mesh.indices.len() as u64)
+                            .checked_mul(std::mem::size_of::<u32>() as u64)?,
+                    )
+                })
+                .ok_or_else(|| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        crate::assets::ImportLocation::new(
+                            source.source_id().to_string(),
+                            "geometry",
+                        ),
+                        "legacy cooked byte count overflow",
+                    )
+                })?;
+            context.account(
+                crate::assets::BudgetKind::CookedBytes,
+                cooked_bytes,
+                crate::assets::ImportLocation::new(source.source_id().to_string(), "geometry"),
+            )?;
+            legacy_vertices = legacy_vertices
+                .checked_add(mesh.vertices.len())
+                .ok_or_else(|| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        crate::assets::ImportLocation::new(
+                            source.source_id().to_string(),
+                            "vertices",
+                        ),
+                        "legacy geometry vertex count overflow",
+                    )
+                })?;
+            legacy_indices = legacy_indices
+                .checked_add(mesh.indices.len())
+                .ok_or_else(|| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        crate::assets::ImportLocation::new(
+                            source.source_id().to_string(),
+                            "indices",
+                        ),
+                        "legacy geometry index count overflow",
+                    )
+                })?;
+            if legacy_vertices > limits.max_geometry_vertices
+                || legacy_indices > limits.max_geometry_indices
+            {
+                return Err(AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    crate::assets::ImportLocation::new(source.source_id().to_string(), "geometry"),
+                    "legacy mesh totals exceed configured geometry limits",
+                ));
+            }
+            if meshes.insert(descriptor.id.clone(), mesh).is_some() {
+                return Err(invalid(
+                    &scene_source,
+                    format!("{path}.id"),
+                    "duplicate legacy mesh ID",
+                )
+                .into());
+            }
+            continue;
+        }
+
+        let imported = crate::assets::import_asset(descriptor, source, &mut context)?;
+        if !imported_kind_matches(descriptor.kind.as_str(), imported.kind()) {
+            return Err(AssetImportError::new(
+                AssetImportErrorCode::Internal,
+                crate::assets::ImportLocation::new(&scene_source, format!("{path}.kind")),
+                "asset importer returned a kind different from the descriptor",
+            ));
+        }
+        context.register_imported_asset(descriptor.id.clone(), imported.clone());
+        imported_assets.insert(descriptor.id.clone(), imported);
+    }
+
+    let mut sources = context.source_blobs();
+    sources.sort_by(|left, right| left.source_id().cmp(right.source_id()));
+    if sources.len() > limits.max_unique_sources {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::LimitExceeded,
+            crate::assets::ImportLocation::new(&scene_source, "sources"),
+            "unique source count exceeds configured limit",
+        ));
+    }
+    let source_by_id = sources
+        .iter()
+        .map(|source| (source.source_id().as_str(), source))
+        .collect::<BTreeMap<_, _>>();
+    let mut files = sources
+        .iter()
+        .map(project_file_identity_from_blob)
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let entities = decode_entities(&scene_source, &scene, &meshes)?;
+    let catalog_metadata_bytes = estimate_catalog_metadata_bytes(
+        &imported_assets,
+        &files,
+        &context,
+        context.cache_pin_count(),
+    )?;
+    context.account_catalog_metadata(
+        catalog_metadata_bytes,
+        crate::assets::ImportLocation::new(&scene_source, "catalog_metadata"),
+    )?;
+    let mut dependencies = BTreeMap::<StableId, Vec<AssetDependencySummary>>::new();
+    for id in imported_assets.keys() {
+        let mut entries = Vec::new();
+        for dependency_id in context.asset_dependency_ids(id) {
+            let dependency = source_by_id.get(dependency_id).ok_or_else(|| {
+                AssetImportError::new(
+                    AssetImportErrorCode::Internal,
+                    crate::assets::ImportLocation::new(&scene_source, "dependencies"),
+                    format!("dependency source '{dependency_id}' was not retained"),
+                )
+            })?;
+            entries.push(AssetDependencySummary::new(
+                dependency_id.to_owned(),
+                encode_hex(&dependency.sha256()),
+                dependency.byte_len(),
+            ));
+        }
+        dependencies.insert(id.clone(), entries);
+    }
+    let digest = project_digest(&files);
+    let catalog = PreparedAssetCatalog::new(
+        imported_assets,
+        files.clone(),
+        dependencies,
+        context.take_cache_leases(),
+    );
+    let report = AssetImportReport::new(&catalog, sources, context.metrics());
+    let prepared = PreparedProject {
+        manifest,
+        scene,
+        entities,
+        meshes,
+        files,
+        digest,
+        asset_catalog: Some(catalog),
+        asset_import_report: Some(report),
+    };
+    validate_prepared_project(&prepared, ProjectLimits::default())?;
+    Ok(prepared)
+}
+
+/// Bounded native filesystem adapter for the asset-aware project preparation path.
+pub fn load_project_with_assets(
+    root: impl AsRef<Path>,
+    cache: &mut dyn CpuCookCache,
+    limits: ImportLimits,
+    cancellation: &ImportCancellation,
+) -> Result<PreparedProject, AssetImportError> {
+    limits.validate()?;
+    cancellation_point(cancellation, PROJECT_MANIFEST_FILE, "manifest")?;
+    let mut resolver = NativeProjectResolver::open(root)?;
+    let manifest_id = SourceId::new(PROJECT_MANIFEST_FILE)?;
+    let manifest = resolver.read_source(&manifest_id, (64 * 1024).min(limits.max_source_bytes))?;
+    let manifest_doc: ProjectManifest = parse_json(PROJECT_MANIFEST_FILE, manifest.bytes())?;
+    validate_manifest(&manifest_doc)?;
+    let scene_id = SourceId::new(&manifest_doc.scene)?;
+    let scene_max = (16 * 1024 * 1024).min(limits.max_source_bytes);
+    let scene = resolver.read_source(&scene_id, scene_max)?;
+    prepare_project_with_asset_sources(
+        manifest_doc,
+        manifest,
+        scene,
+        &mut resolver,
+        cache,
+        limits,
+        cancellation,
+    )
+}
+
+fn cancellation_point(
+    cancellation: &ImportCancellation,
+    source_id: &str,
+    path: &str,
+) -> Result<(), AssetImportError> {
+    if cancellation.is_cancelled() {
+        Err(AssetImportError::new(
+            AssetImportErrorCode::Cancelled,
+            crate::assets::ImportLocation::new(source_id, path),
+            "asset import was cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn imported_kind_matches(kind: &str, imported: AssetKind) -> bool {
+    matches!(
+        (kind, imported),
+        ("daedalus.model", AssetKind::Model)
+            | ("daedalus.image", AssetKind::Image)
+            | ("daedalus.sprite_atlas", AssetKind::SpriteAtlas)
+            | ("daedalus.audio", AssetKind::Audio)
+    )
 }
 
 /// Loads a project from a native directory using the default limits.
@@ -868,6 +1304,34 @@ fn supported_mesh_assets<'a>(
     Ok(mesh_assets)
 }
 
+fn legacy_mesh_assets<'a>(
+    source_id: &str,
+    scene: &'a SceneDocument,
+) -> Result<Vec<(usize, &'a AssetDescriptor, String)>, ProjectError> {
+    let mut mesh_assets = Vec::new();
+    for (index, asset) in scene.assets.iter().enumerate() {
+        if asset.kind.as_str() != "daedalus.mesh" {
+            continue;
+        }
+        let path = format!("assets[{index}]");
+        if !asset.metadata.is_empty() {
+            return Err(unsupported(
+                source_id,
+                format!("{path}.metadata"),
+                "legacy mesh metadata is not supported",
+            ));
+        }
+        let source = normalize_relative_path(&asset.uri)
+            .map_err(|message| invalid(source_id, format!("{path}.uri"), message))?;
+        if let Some(hash) = &asset.content_hash {
+            parse_declared_hash(hash)
+                .map_err(|message| invalid(source_id, format!("{path}.content_hash"), message))?;
+        }
+        mesh_assets.push((index, asset, source));
+    }
+    Ok(mesh_assets)
+}
+
 fn decode_entities(
     source_id: &str,
     scene: &SceneDocument,
@@ -1114,6 +1578,9 @@ fn validate_prepared_project(
     let scene_source = normalize_relative_path(&project.manifest.scene)
         .map_err(|message| invalid(PROJECT_MANIFEST_FILE, "scene", message))?;
     validate_scene_document(&scene_source, &project.scene, limits)?;
+    if project.asset_catalog.is_some() {
+        return validate_prepared_asset_project(project, &scene_source);
+    }
     let mesh_assets = supported_mesh_assets(&scene_source, &project.scene)?;
     if mesh_assets.len() > limits.max_mesh_assets {
         return Err(limit_error(
@@ -1276,6 +1743,198 @@ fn validate_prepared_project(
     Ok(())
 }
 
+fn validate_prepared_asset_project(
+    project: &PreparedProject,
+    scene_source: &str,
+) -> Result<(), ProjectError> {
+    let catalog = project
+        .asset_catalog
+        .as_ref()
+        .ok_or_else(|| invalid(scene_source, "assets", "asset catalog is missing"))?;
+    let mesh_assets = legacy_mesh_assets(scene_source, &project.scene)?;
+    let expected_mesh_ids = mesh_assets
+        .iter()
+        .map(|(_, asset, _)| asset.id.clone())
+        .collect::<BTreeSet<_>>();
+    let actual_mesh_ids = project.meshes.keys().cloned().collect::<BTreeSet<_>>();
+    if expected_mesh_ids != actual_mesh_ids {
+        return Err(invalid(
+            scene_source,
+            "assets",
+            "prepared legacy mesh IDs do not match scene mesh descriptors",
+        ));
+    }
+    let expected_typed_ids = project
+        .scene
+        .assets
+        .iter()
+        .filter(|asset| asset.kind.as_str() != "daedalus.mesh")
+        .map(|asset| asset.id.clone())
+        .collect::<BTreeSet<_>>();
+    let actual_typed_ids = catalog
+        .assets()
+        .map(|(id, _)| id.clone())
+        .collect::<BTreeSet<_>>();
+    if expected_typed_ids != actual_typed_ids {
+        return Err(invalid(
+            scene_source,
+            "assets",
+            "prepared typed asset IDs do not match scene descriptors",
+        ));
+    }
+    let entities = decode_entities(scene_source, &project.scene, &project.meshes)?;
+    if entities != project.entities {
+        return Err(invalid(
+            scene_source,
+            "entities",
+            "prepared entity projection does not match the full authored scene",
+        ));
+    }
+    let mut total_bytes = 0u64;
+    let mut seen_sources = BTreeSet::new();
+    let import_limits = ImportLimits::default();
+    let mut source_limits = BTreeMap::<String, u64>::from([
+        (
+            PROJECT_MANIFEST_FILE.to_owned(),
+            (64 * 1024).min(import_limits.max_source_bytes),
+        ),
+        (
+            scene_source.to_owned(),
+            (16 * 1024 * 1024).min(import_limits.max_source_bytes),
+        ),
+    ]);
+    for descriptor in &project.scene.assets {
+        let source = normalize_relative_path(&descriptor.uri)
+            .map_err(|message| invalid(scene_source, "assets.uri", message))?;
+        let limit = if descriptor.kind.as_str() == "daedalus.mesh" {
+            MAX_MESH_BYTES
+        } else {
+            import_limits.max_source_bytes
+        };
+        source_limits
+            .entry(source)
+            .and_modify(|existing| *existing = (*existing).min(limit))
+            .or_insert(limit);
+    }
+    for file in &project.files {
+        let normalized = normalize_relative_path(&file.source_id)
+            .map_err(|message| invalid(&file.source_id, "files.source_id", message))?;
+        let per_file_limit = source_limits
+            .get(&file.source_id)
+            .copied()
+            .unwrap_or(import_limits.max_source_bytes);
+        if normalized != file.source_id
+            || !is_lowercase_sha256(&file.content_sha256)
+            || file.byte_len == 0
+            || file.byte_len > per_file_limit
+        {
+            return Err(invalid(
+                &file.source_id,
+                "files",
+                "source identity is malformed or outside hard limits",
+            ));
+        }
+        if !seen_sources.insert(file.source_id.clone()) {
+            return Err(invalid(
+                &file.source_id,
+                "files",
+                "duplicate source identity",
+            ));
+        }
+        total_bytes = total_bytes.checked_add(file.byte_len).ok_or_else(|| {
+            limit_error(
+                &file.source_id,
+                "files.byte_len",
+                "source byte count overflow",
+            )
+        })?;
+    }
+    if seen_sources.len() > import_limits.max_unique_sources
+        || total_bytes > import_limits.max_total_source_bytes
+    {
+        return Err(limit_error(
+            PROJECT_MANIFEST_FILE,
+            "files",
+            "prepared sources exceed hard asset-import bounds",
+        ));
+    }
+    for required in [PROJECT_MANIFEST_FILE.to_owned(), scene_source.to_owned()] {
+        if !seen_sources.contains(&required) {
+            return Err(invalid(
+                &required,
+                "files",
+                "manifest or scene source identity is missing",
+            ));
+        }
+    }
+    for (_, descriptor, source) in mesh_assets {
+        if !seen_sources.contains(&source) {
+            return Err(invalid(
+                scene_source,
+                "files",
+                format!("legacy mesh source '{source}' is missing"),
+            ));
+        }
+        if let Some(hash) = &descriptor.content_hash {
+            let declared = parse_declared_hash(hash)
+                .map_err(|message| invalid(scene_source, "assets.content_hash", message))?;
+            let identity = project
+                .files
+                .iter()
+                .find(|file| file.source_id == source)
+                .expect("source presence checked");
+            if declared != identity.content_sha256 {
+                return Err(invalid(
+                    scene_source,
+                    "assets.content_hash",
+                    "prepared source does not match its declared content hash",
+                ));
+            }
+        }
+    }
+    for descriptor in &project.scene.assets {
+        if descriptor.kind.as_str() == "daedalus.mesh" {
+            continue;
+        }
+        let source = normalize_relative_path(&descriptor.uri)
+            .map_err(|message| invalid(scene_source, "assets.uri", message))?;
+        if !seen_sources.contains(&source) {
+            return Err(invalid(
+                scene_source,
+                "files",
+                format!("asset source '{source}' is missing"),
+            ));
+        }
+        if let Some(hash) = &descriptor.content_hash {
+            let declared = parse_declared_hash(hash)
+                .map_err(|message| invalid(scene_source, "assets.content_hash", message))?;
+            let identity = project
+                .files
+                .iter()
+                .find(|file| file.source_id == source)
+                .expect("source presence checked");
+            if declared != identity.content_sha256 {
+                return Err(invalid(
+                    scene_source,
+                    "assets.content_hash",
+                    "prepared source does not match its declared content hash",
+                ));
+            }
+        }
+    }
+    if catalog.sources() != project.files || project_digest(&project.files) != project.digest {
+        return Err(invalid(
+            PROJECT_MANIFEST_FILE,
+            "files",
+            "prepared catalog sources or project digest do not match",
+        ));
+    }
+    for mesh in project.meshes.values() {
+        validate_mesh("<prepared mesh>", mesh, ProjectLimits::default())?;
+    }
+    Ok(())
+}
+
 fn parse_json<T: for<'de> Deserialize<'de>>(
     source_id: &str,
     bytes: &[u8],
@@ -1294,12 +1953,22 @@ fn verify_declared_hash(
     asset: &AssetDescriptor,
     bytes: &[u8],
 ) -> Result<(), ProjectError> {
+    let actual: [u8; 32] = Sha256::digest(bytes).into();
+    verify_declared_hash_digest(source_id, path, asset, &actual)
+}
+
+fn verify_declared_hash_digest(
+    source_id: &str,
+    path: &str,
+    asset: &AssetDescriptor,
+    actual_digest: &[u8; 32],
+) -> Result<(), ProjectError> {
     let Some(declared) = &asset.content_hash else {
         return Ok(());
     };
     let expected = parse_declared_hash(declared)
         .map_err(|message| invalid(source_id, format!("{path}.content_hash"), message))?;
-    let actual = sha256_hex(bytes);
+    let actual = encode_hex(actual_digest);
     if expected != actual {
         return Err(invalid(
             source_id,
@@ -1333,6 +2002,272 @@ fn file_identity(source_id: &str, bytes: &[u8]) -> ProjectFileIdentity {
         content_sha256: sha256_hex(bytes),
         byte_len: bytes.len() as u64,
     }
+}
+
+fn project_file_identity_from_blob(source: &SourceBlob) -> ProjectFileIdentity {
+    ProjectFileIdentity {
+        source_id: source.source_id().to_string(),
+        content_sha256: encode_hex(&source.sha256()),
+        byte_len: source.byte_len(),
+    }
+}
+
+fn estimate_catalog_metadata_bytes(
+    assets: &BTreeMap<StableId, ImportedAsset>,
+    files: &[ProjectFileIdentity],
+    context: &AssetImportContext<'_>,
+    cache_pin_count: usize,
+) -> Result<u64, AssetImportError> {
+    let location = crate::assets::ImportLocation::default();
+    let mut total = 0u64;
+    {
+        let mut add = |amount: u64| -> Result<(), AssetImportError> {
+            total = total.checked_add(amount).ok_or_else(|| {
+                AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    location.clone(),
+                    "retained catalog metadata byte count overflow",
+                )
+            })?;
+            Ok(())
+        };
+        let repeated = |count: usize, size: usize| -> Result<u64, AssetImportError> {
+            let count = u64::try_from(count).map_err(|_| {
+                AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    location.clone(),
+                    "retained catalog metadata count is not representable",
+                )
+            })?;
+            let size = u64::try_from(size).map_err(|_| {
+                AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    location.clone(),
+                    "retained catalog metadata element size is not representable",
+                )
+            })?;
+            count.checked_mul(size).ok_or_else(|| {
+                AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    location.clone(),
+                    "retained catalog metadata multiplication overflow",
+                )
+            })
+        };
+
+        (|| -> Result<(), AssetImportError> {
+            // PreparedProject files, catalog files, report source summaries, catalog digest, and the
+            // report's digest copy remain live after preparation.
+            add(repeated(
+                files.len(),
+                2 * std::mem::size_of::<ProjectFileIdentity>(),
+            )?)?;
+            for file in files {
+                add(
+                    u64::try_from(file.source_id.len().saturating_mul(3) + 64 * 3).map_err(
+                        |_| {
+                            AssetImportError::new(
+                                AssetImportErrorCode::LimitExceeded,
+                                location.clone(),
+                                "project source summary metadata is not representable",
+                            )
+                        },
+                    )?,
+                )?;
+                add(
+                    u64::try_from(std::mem::size_of::<crate::assets::AssetSourceSummary>())
+                        .unwrap_or(u64::MAX),
+                )?;
+            }
+            add(2 * std::mem::size_of::<PreparedAssetCatalog>() as u64)?;
+            add(2 * std::mem::size_of::<AssetImportReport>() as u64)?;
+            add(2 * 64)?;
+
+            // Each stable ID is retained as a catalog map key, dependency map key, catalog summary ID,
+            // and report summary ID. Include tree-node and vector slack conservatively per entry.
+            add(repeated(
+                assets.len(),
+                std::mem::size_of::<ImportedAsset>() + std::mem::size_of::<StableId>() + 96,
+            )?)?;
+            for (id, asset) in assets {
+                let id_bytes = u64::try_from(id.as_str().len()).map_err(|_| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        location.clone(),
+                        "asset identifier metadata is not representable",
+                    )
+                })?;
+                add(id_bytes.checked_mul(4).ok_or_else(|| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        location.clone(),
+                        "asset identifier metadata multiplication overflow",
+                    )
+                })?)?;
+                add(repeated(
+                    2,
+                    std::mem::size_of::<crate::assets::AssetSummary>(),
+                )?)?;
+                add(2 * 64)?; // AssetSummary primary-key strings in the catalog and report.
+
+                let resource_key_count = match asset {
+                    ImportedAsset::Model(model) => {
+                        let unique_geometry = model
+                            .primitives()
+                            .iter()
+                            .map(|primitive| primitive.geometry().key().digest())
+                            .collect::<BTreeSet<_>>()
+                            .len();
+                        let unique_images = model
+                            .owned_images()
+                            .iter()
+                            .map(|image| image.asset().key().digest())
+                            .collect::<BTreeSet<_>>()
+                            .len();
+                        let mut model_metadata =
+                            std::mem::size_of::<crate::assets::StaticModel>() as u64;
+                        for amount in [
+                            repeated(
+                                model.selected_scene_roots().len(),
+                                std::mem::size_of::<u32>(),
+                            )?,
+                            repeated(
+                                model.nodes().len(),
+                                std::mem::size_of::<crate::assets::ModelNode>() + 16,
+                            )?,
+                            repeated(
+                                model.primitives().len(),
+                                std::mem::size_of::<crate::assets::ModelPrimitive>(),
+                            )?,
+                            repeated(
+                                model.materials().len(),
+                                std::mem::size_of::<crate::assets::ModelMaterial>(),
+                            )?,
+                            repeated(
+                                model.owned_images().len(),
+                                std::mem::size_of::<crate::assets::ModelOwnedImage>(),
+                            )?,
+                        ] {
+                            model_metadata =
+                                model_metadata.checked_add(amount).ok_or_else(|| {
+                                    AssetImportError::new(
+                                        AssetImportErrorCode::LimitExceeded,
+                                        location.clone(),
+                                        "model metadata byte count overflow",
+                                    )
+                                })?;
+                        }
+                        for node in model.nodes() {
+                            model_metadata = model_metadata
+                                .checked_add(repeated(
+                                    node.primitive_indices().len(),
+                                    std::mem::size_of::<u32>(),
+                                )?)
+                                .ok_or_else(|| {
+                                    AssetImportError::new(
+                                        AssetImportErrorCode::LimitExceeded,
+                                        location.clone(),
+                                        "model node metadata byte count overflow",
+                                    )
+                                })?;
+                        }
+                        for image in model.owned_images() {
+                            for amount in [
+                                image.identity().owner().as_str().len() as u64,
+                                std::mem::size_of::<crate::assets::ImageAsset>() as u64,
+                                std::mem::size_of::<crate::assets::DecodedImage>() as u64 + 128,
+                                repeated(
+                                    image.asset().mips().len(),
+                                    std::mem::size_of::<crate::assets::ImageMip>(),
+                                )?,
+                            ] {
+                                model_metadata =
+                                    model_metadata.checked_add(amount).ok_or_else(|| {
+                                        AssetImportError::new(
+                                            AssetImportErrorCode::LimitExceeded,
+                                            location.clone(),
+                                            "model image metadata byte count overflow",
+                                        )
+                                    })?;
+                            }
+                        }
+                        add(model_metadata)?;
+                        1usize + unique_geometry + unique_images
+                    }
+                    ImportedAsset::Image(image) => {
+                        add(std::mem::size_of::<crate::assets::ImageAsset>() as u64)?;
+                        add(std::mem::size_of::<crate::assets::DecodedImage>() as u64 + 128)?;
+                        add(repeated(
+                            image.mips().len(),
+                            std::mem::size_of::<crate::assets::ImageMip>(),
+                        )?)?;
+                        1
+                    }
+                    ImportedAsset::Atlas(atlas) => {
+                        add(std::mem::size_of::<crate::assets::SpriteAtlas>() as u64)?;
+                        add(repeated(
+                            atlas.regions().len(),
+                            std::mem::size_of::<crate::assets::AtlasRegion>() + 16,
+                        )?)?;
+                        for region in atlas.regions() {
+                            add(region.id().as_str().len() as u64)?;
+                        }
+                        add(atlas.image_asset().as_str().len() as u64)?;
+                        1
+                    }
+                    ImportedAsset::Audio(_) => {
+                        add(std::mem::size_of::<crate::assets::AudioAsset>() as u64)?;
+                        1
+                    }
+                };
+                add(repeated(
+                    resource_key_count.saturating_mul(2),
+                    std::mem::size_of::<crate::assets::CookedResourceKeySummary>() + 64,
+                )?)?;
+            }
+
+            add(repeated(
+                assets.len(),
+                std::mem::size_of::<StableId>() + 64,
+            )?)?;
+            let mut dependency_count = 0usize;
+            for asset_id in assets.keys() {
+                for dependency_id in context.asset_dependency_ids(asset_id) {
+                    dependency_count = dependency_count.checked_add(1).ok_or_else(|| {
+                        AssetImportError::new(
+                            AssetImportErrorCode::LimitExceeded,
+                            location.clone(),
+                            "asset dependency count overflow",
+                        )
+                    })?;
+                    add((dependency_id.len() as u64).checked_mul(3).ok_or_else(|| {
+                        AssetImportError::new(
+                            AssetImportErrorCode::LimitExceeded,
+                            location.clone(),
+                            "dependency source identity metadata overflow",
+                        )
+                    })?)?;
+                }
+            }
+            let copied_dependencies = dependency_count.checked_mul(3).ok_or_else(|| {
+                AssetImportError::new(
+                    AssetImportErrorCode::LimitExceeded,
+                    location.clone(),
+                    "asset dependency summary count overflow",
+                )
+            })?;
+            add(repeated(
+                copied_dependencies,
+                std::mem::size_of::<AssetDependencySummary>() + 64,
+            )?)?;
+            add(repeated(
+                cache_pin_count,
+                std::mem::size_of::<crate::assets::CachePin>() + 64,
+            )?)?;
+            Ok(())
+        })()?;
+    }
+    Ok(total)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1936,6 +2871,104 @@ mod tests {
         project.write("scene.json", &edited_scene);
         let changed = load_project(project.path()).unwrap();
         assert_ne!(from_filesystem.digest(), changed.digest());
+    }
+
+    #[test]
+    fn asset_aware_byte_and_native_entrypoints_share_catalog_identity_and_accounting() {
+        let manifest_bytes = manifest("scene.json");
+        let scene_bytes = empty_scene();
+        let mut resolver = crate::assets::ByteMapSourceResolver::default();
+        let mut byte_cache = crate::assets::MemoryCookCache::default();
+        let cancellation = ImportCancellation::never();
+        let from_bytes = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut resolver,
+            &mut byte_cache,
+            ImportLimits::default(),
+            &cancellation,
+        )
+        .unwrap();
+
+        let project = TempProject::new();
+        project.write(PROJECT_MANIFEST_FILE, &manifest_bytes);
+        project.write("scene.json", &scene_bytes);
+        let mut native_cache = crate::assets::MemoryCookCache::default();
+        let from_native = load_project_with_assets(
+            project.path(),
+            &mut native_cache,
+            ImportLimits::default(),
+            &cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(from_bytes.digest(), from_native.digest());
+        assert_eq!(
+            from_bytes.asset_catalog().unwrap(),
+            from_native.asset_catalog().unwrap()
+        );
+        let byte_metrics = from_bytes.asset_import_report().unwrap().metrics();
+        let native_metrics = from_native.asset_import_report().unwrap().metrics();
+        assert_eq!(byte_metrics.source_reads, 2);
+        assert_eq!(native_metrics.source_reads, 2);
+        assert_eq!(byte_metrics.source_bytes, native_metrics.source_bytes);
+        from_bytes.validate().unwrap();
+        from_native.validate().unwrap();
+    }
+
+    #[test]
+    fn asset_aware_byte_and_native_adapters_enforce_the_same_lower_source_cap() {
+        let manifest_bytes = manifest("scene.json");
+        let scene_bytes = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "revision": 0,
+            "entities": [],
+            "assets": [{
+                "id": "asset:triangle",
+                "kind": "daedalus.mesh",
+                "uri": "assets/triangle.json",
+                "metadata": {}
+            }]
+        }))
+        .unwrap();
+        let mut oversized_mesh = triangle_mesh();
+        oversized_mesh.resize(512, b' ');
+        let limits = ImportLimits {
+            max_source_bytes: 256,
+            ..ImportLimits::default()
+        };
+        let cancellation = ImportCancellation::never();
+
+        let mut byte_resolver =
+            crate::assets::ByteMapSourceResolver::from_bytes(BTreeMap::from([(
+                "assets/triangle.json".to_owned(),
+                oversized_mesh.clone(),
+            )]))
+            .unwrap();
+        let mut byte_cache = crate::assets::MemoryCookCache::default();
+        let byte_error = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut byte_resolver,
+            &mut byte_cache,
+            limits,
+            &cancellation,
+        )
+        .unwrap_err();
+
+        let project = TempProject::new();
+        project.write(PROJECT_MANIFEST_FILE, &manifest_bytes);
+        project.write("scene.json", &scene_bytes);
+        project.write("assets/triangle.json", &oversized_mesh);
+        let mut native_cache = crate::assets::MemoryCookCache::default();
+        let native_error =
+            load_project_with_assets(project.path(), &mut native_cache, limits, &cancellation)
+                .unwrap_err();
+
+        assert_eq!(byte_error.code(), native_error.code());
+        assert_eq!(byte_error.code().as_str(), "limit_exceeded");
+        assert_eq!(byte_error.source_id(), native_error.source_id());
+        assert_eq!(byte_error.source_id(), Some("assets/triangle.json"));
     }
 
     #[cfg(unix)]

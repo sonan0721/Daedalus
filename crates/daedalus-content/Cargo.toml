@@ -11,6 +11,9 @@ description = "Host-neutral scene, terrain, tile simulation, and grid navigation
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "=0.10.9"
+png = "=0.18.1"
+gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
+hound = "=3.5.1"
 
 [lints]
 workspace = true

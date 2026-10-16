@@ -94,6 +94,8 @@ completed replay ledger는 기본 1024/hard 16,384 entries로 제한하고 pendi
 
 수치가 상한 안이라도 0/상호 모순인 config는 시작 전에 거부한다. 요청별 보수적 payload/metadata 예산을 실제 생성 전에 예약하며, source 문자열·StepReport/command 수·page 결과도 계산에 넣는다. query 처리 실패나 queue full은 모든 예약을 되돌린다. runtime-spawn entity 수도 기존 16,384 상한을 유지한다. 별도 frame/source/CPU pool 예산을 이 result budget 하나로 모두 제한했다고 주장하지 않는다.
 
+첫 구현은 요청 종류별 세분화 대신 ticket당 1 MiB 전체를 보수적으로 예약한다. 기본 32 MiB 중 Step 1 MiB를 남기므로 동시에 보존 가능한 normal ticket은 최대 31개이며, client별 기본은 normal 7개와 Step 1개다. `max_pending_total = 128`은 별도 count ceiling이며 이 byte 제한보다 우선하지 않는다. 작은 Status 결과도 이 초기 정책을 따른다. 추후 실제 payload 상한별 예약으로 개선할 때도 reader Arc의 수명과 Step reserve를 보존하고 포화 회귀를 통과해야 한다.
+
 result byte 계수는 engine-owned typed payload/metadata의 보수적 상한이다. allocator padding·사용자가 직접 clone한 데이터·프로세스 RSS 전체를 정확히 제한하는 값으로 보고하지 않는다. Arc 공유 수명·실제 예약/회수 수·peak를 진단해 잘못된 credit 반환을 검사한다.
 
 Manual 모드는 **Step 전용 ticket/byte reserve**를 total hard budget 안에 둔다. normal query/mutation이 client별/세션 전체 ticket 또는 result bytes를 모두 소진해 다음 Step을 제출하지 못하는 deadlock을 금지한다. 최초 기준은 client별 control slot 1개, 세션 control slot 1개와 최대 Step 결과를 담는 보수적 bytes이며 이 reserve는 normal admission이 소비하지 못한다. reserve를 만족하지 못하는 tiny config는 거부한다. 완료된 Step ticket/reader를 계속 보유한 경우의 backpressure는 ack/drop으로 회복하게 하며, pending write만 포화된 경우에는 Step→terminal 처리까지 반드시 진행할 수 있어야 한다. stop은 그와 별개의 out-of-band 신호다.
@@ -102,7 +104,7 @@ world 목록에 offset page가 필요하면 `daedalus-world`의 기존 bounded e
 
 Manual set은 AuthorityAccepted까지만 기다린 기존 wire 응답을 유지한다. Step은 실제 StepReport를 반환하고 pending mutation ticket도 같은 결과로 완료한다. realtime은 receipt의 terminal 상태를 읽을 수 있어야 하며 후속 adapter는 bounded CommandId→ticket map과 명시 result 조회/ack를 제공한다. core 단계에서 그 JSONL 기능까지 구현한 것으로 표시하지 않는다.
 
-종료 때 queue-only는 StoppedBeforeAuthority, authority accepted지만 아직 tick에 적용 안 된 명령은 StoppedNotApplied로 마감한다. 이미 적용/거부한 명령을 stopped로 덮지 않는다. report는 마지막 authority tick·실제 termination·미확인/abandoned 결과 수를 유한하게 기록한다. 공통 primitives는 credit/terminal cell/latest frame/stop처럼 작게 추출해 기존 LiveSession에도 사용하고, fixture actor와 입력 의미는 유지한다. migration 중 남긴 중복과 후속 제거를 명시한다.
+정상적인 협조 종료 때 queue-only는 StoppedBeforeAuthority, authority accepted지만 아직 tick에 적용 안 된 명령은 StoppedNotApplied로 마감한다. 이미 적용/거부한 명령을 stopped로 덮지 않는다. actor panic/engine failure 때는 처리 중이던 query/Step ticket도 terminal failure로 마감한다. tick 도중 실패해 실제 적용 여부를 복구할 수 없으면 ActorFailed/OutcomeUnknown을 반환하며 StoppedNotApplied로 단정하지 않는다. actor는 queue에서 꺼낸 요청을 unwind 경계 바깥에서도 추적해야 한다. report는 마지막으로 관찰 가능한 authority tick·실제 termination·미확인/abandoned 결과 수를 유한하게 기록한다. 공통 primitives는 credit/terminal cell/latest frame/stop처럼 작게 추출해 기존 LiveSession에도 사용하고, fixture actor와 입력 의미는 유지한다. migration 중 남긴 중복과 후속 제거를 명시한다.
 
 ## snapshot·source·표시 identity
 

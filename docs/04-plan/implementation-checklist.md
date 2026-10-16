@@ -86,9 +86,9 @@ C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-b
 
 전체 D1/P01은 미통과다. [project lifecycle 계약](../03-architecture/project-lifecycle.md)에 따라 다음 하위 작업을 진행한다. 이 목록을 모두 통과해도 game module·live edit/reload·hierarchy/prefab·정식 importer·MCP·저장/배포가 남아 있으면 P01/D1을 닫지 않는다.
 
-- [ ] P01.1a: 외부 project manifest·typed scene/mesh·bounded source/digest·semantic 검증.
-- [ ] P01.1b: prepared project를 실제 Engine에 적용하고 stable ID·handle·revision·snapshot으로 조작.
-- [ ] P01.1c: 공통 library로 CLI init/validate/inspect/run/serve/capture 연결, project 자료의 실제 GPU 출력.
+- [x] P01.1a: 외부 project manifest·typed scene/mesh·bounded source/digest·semantic 검증.
+- [x] P01.1b: prepared project를 실제 Engine에 적용하고 stable ID·handle·revision·snapshot으로 조작.
+- [x] P01.1c: 공통 library로 CLI init/validate/inspect/run/serve/capture 연결, project 자료의 실제 GPU 출력.
 - [ ] P01.2: 일반 asset import/cook·계층·prefab·scene lifecycle·last-good reload.
 - [ ] P01.3: C# project module·SDK build/watch·상태 보존·live session 제어/capture·MCP 연결.
 - [ ] P01 제품 인수: 외부 사용자의 project 생성→작성→실행→수정/검증→저장/재개→배포 경로를 인수표 전체와 대조.

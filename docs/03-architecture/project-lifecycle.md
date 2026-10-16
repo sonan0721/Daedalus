@@ -20,6 +20,8 @@
 
 `PreparedProject`는 원본 manifest/scene, typed entity 목록, StableId→CPU mesh, 읽은 file identity/digest 목록을 소유한다. native adapter를 쓰지 않는 byte-based 준비 진입점도 둬서 후속 web loader가 filesystem 계약을 가져가지 않게 한다. 이를 구현했다고 web 지원으로 표시하지 않는다.
 
+준비한 묶음은 private field와 읽기 전용 getter를 사용한다. source hash를 유지한 채 외부에서 mesh/scene을 가변 변경할 수 있게 두지 않는다. 콘텐츠를 편집하려면 새 byte 입력을 검증해 새 prepared generation/identity를 만들고, 런타임 entity transform의 변경은 별도의 authority revision과 snapshot에 기록한다.
+
 공통 public type 이름은 `ProjectManifest`, `ProjectPresentation`, `ProjectTransform`, `ProjectMesh`, `ProjectVertex`, `ProjectMaterial`, `PreparedEntity`, `PreparedProject`, `ProjectError`, `ProjectLimits`다. validation은 원본과 semantic/component 오류의 파일·JSON 위치를 진단한다. 준비 실패 뒤 부분 project를 사용하지 않는다.
 
 ## 첫 지원 component/asset
@@ -49,9 +51,13 @@ manifest/scene/asset 모두 프로젝트 root 기준 상대 경로로 처리한�
 
 ## CLI와 AI 사용
 
-명령은 `project init <directory>`, `project validate/inspect/run/serve/capture <directory>`를 사용한다. `run`은 명시적 bounded tick 수를 실행하고 실제 stable ID/handle/state를 JSON으로 반환한다. `serve`는 기존 bounded JSONL 동작과 같은 Engine을 유지하고 `project_info`로 authored ID map과 source revision을 조회하게 한다. 기존 bare `serve`는 project 없음 오류를 명시한다.
+명령은 `project init <directory>`, `project validate/inspect/run/serve/capture <directory>`를 사용한다. `run`은 명시적 bounded tick 수를 실행하고 실제 stable ID/handle/state를 JSON으로 반환한다. `serve`는 기존 bounded JSONL 동작과 같은 Engine을 유지하고 `project_info`로 authored ID map과 source revision을 조회하게 한다. 기존 bare `serve`는 그대로 사용할 수 있고, 그 세션의 `project_info` 요청에만 project 없음 오류를 명시한다.
 
 `capture`는 capture feature에서만 제공한다. 해당 project의 실제 mesh·material·snapshot을 renderer에 넘기고 tick·session·scene revision·source digest·adapter·출력 size를 report한다. renderer fixture를 호출하지 않는다. batch capture 명령은 새 session을 여는 것이므로 별도 실행 중인 `serve`의 frame이라고 표시하지 않는다. 같은 visible session의 input/wait/live capture·MCP는 후속 P02 인수 항목으로 남긴다.
+
+`project_info`는 authored ID binding과 source identity를 유한한 `offset/limit` page로 반환한다. 전체 entity JSON을 매 요청마다 복사한 뒤 잘라내지 않는다. source metadata를 현재 transform/tick처럼 보고하지 않으며, 현재 tick/state가 필요하면 동일 Engine에서 읽는다. renderer projection도 expanded instance의 vertex/index/byte 합계를 먼저 검사한 뒤 geometry를 복사한다. 원본 asset 한 개가 작아도 많은 instance가 제한을 우회하지 않게 한다.
+
+기존 top-level fixture `capture`는 진단용으로 보존하며 `project capture`와 구분한다. renderer는 core/content의 소유 데이터·session ID·stable binding map·snapshot을 받으며 runtime crate 자체를 의존하지 않는다.
 
 `init`은 비어 있는 data-only project를 만들며 대상 directory를 덮어쓰지 않는다. generated game code·asset pack·sample game을 엔진 repository에 넣지 않는다. init 자체가 C# 게임 작성/실행 기능을 완성한 것은 아니다.
 

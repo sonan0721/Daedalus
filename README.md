@@ -4,7 +4,7 @@
 
 Daedalus aims to combine a Rust core, responsive loading and streaming, modern GPU rendering, and authoritative dedicated servers. The selected gameplay and PC mod SDK baseline is C# 14 with .NET 10 LTS/CoreCLR. Rust gameplay can be compiled into a game build, and C++ libraries can be integrated through explicit native adapters. Development is driven through code, CLI, MCP, and a visible runtime window.
 
-**Status: engine foundation under construction.** The Rust workspace contains a parallel ECS runtime, bounded CPU tasks and snapshots, persistent JSON CLI control, a native window connected to live ECS and background terrain work, content algorithms, an independent wgpu renderer, Jolt/Rapier physics adapters, Kira audio, and a .NET gameplay host with tested module replacement. The managed SDK currently covers transforms. Advanced rendering, full gameplay integration, web support, and performance targets remain incomplete. Sample game development is outside the current scope.
+**Status: engine foundation under construction.** The Rust workspace contains a parallel ECS runtime, bounded CPU tasks and snapshots, persistent JSON CLI control, external data-only project loading, a native window connected to live ECS and background terrain work, content algorithms, an independent wgpu renderer, Jolt/Rapier physics adapters, Kira audio, and a .NET gameplay host with tested module replacement. The managed SDK currently covers transforms. Advanced rendering, full gameplay integration, web support, and performance targets remain incomplete. Game development follows engine product acceptance in separate repositories.
 
 **Delivery stage: D1 engine implementation; product acceptance is pending.** The full objective is a usable AI-driven engine, followed by separate Minecraft-quality 3D and Terraria-quality 2D games consuming it. Project lifecycle, asset production, UI/animation, multiplayer/persistence, and game export still need integration. Component tests, the native validation window, and packaged CLI do not close that objective. See the [product acceptance contract](docs/04-plan/product-delivery-and-acceptance.md) and [readiness audit](docs/06-worklog/2026-10-16-product-readiness-audit.md). Game projects follow the engine gate and stay outside this repository.
 
@@ -17,6 +17,21 @@ cargo run -p daedalus-cli --features window -- view
 ```
 
 Use WASD/QE and mouse controls for the camera, arrow keys to move the ECS entity, R to regenerate terrain, and Escape to close. The window connects one live simulation session to bounded background voxel generation and meshing; it is a small engine fixture. `view --help` lists the workload, automatic exit, and JSON report options. This does not yet implement an infinite world or a complete UI system. See the [live session contract](docs/03-architecture/native-live-session.md) for ownership and failure handling.
+
+## Work with an external project
+
+Create an empty data-only project in a new directory, then validate or run its real ECS session:
+
+```sh
+cargo run -p daedalus-cli -- project init /tmp/my-daedalus-project --name MyProject
+cargo run -p daedalus-cli -- project validate /tmp/my-daedalus-project
+cargo run -p daedalus-cli -- project run /tmp/my-daedalus-project --ticks 2
+cargo run -p daedalus-cli -- project serve /tmp/my-daedalus-project
+```
+
+The project manifest references a versioned scene. Current runnable content is root entities with transforms and indexed JSON meshes with scalar opaque materials. `project serve` retains one authority session; `project_info` exposes authored stable IDs and handles, and normal control operations query and change actual ECS state. `project capture` in a capture-enabled build renders the project's own geometry and snapshot to PNG. Initialization inserts no fixture objects.
+
+This is the first project foundation: hierarchy/prefabs, general model/texture/sprite import, attached gameplay modules, live project reload, same-window control/capture, saving, MCP, and game export remain unfinished. The existing `view` window still runs its named validation fixture. See the [project contract](docs/03-architecture/project-lifecycle.md) and [verification commands](TESTING.md).
 
 ## Build a local CLI package
 

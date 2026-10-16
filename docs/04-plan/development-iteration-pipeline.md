@@ -67,4 +67,6 @@ P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0
 
 실제 공통화는 native service와 legacy mailbox/stop까지다. legacy count-only result guard/receiver, JSONL·visible project·MCP·SDK attach는 남아 있다. 따라서 DEV01 전체 완료나 제작 속도 배율을 주장하지 않는다. 새 frontend는 이 kernel을 사용하고 adapter-specific envelope·동기/비동기 수명만 추가하는 것이 다음 검증 대상이다.
 
+같은 작업에서 테스트의 정상 admission/frame 조회가 합법적인 Busy를 곧바로 실패 처리하는 경로를 점검했다. 정상 성공 검사는 기존 bounded retry helper(제출 2초·frame 조회 3초)를 사용하고 의도한 Busy/ResultCapacity/권한/clock 오류 검사는 그대로 실패를 대조한다. 실제 flaky 발생률을 측정한 것은 아니며 무조건 retry로 오류를 숨기지 않는다. 마지막 helper 수정은 test-only라 focused 23건을 재검증하고 GPU/package 검사를 불필요하게 반복하지 않았다.
+
 별도 [renderer resource 재사용](../03-architecture/renderer-resource-reuse.md) 문서는 로컬 source 감사에서 확인한 per-frame flatten/buffer 생성과 project entity별 mesh 복제를 없애기 위한 다음 계약이다. CPU mesh handle/instance 갱신·GPU cache·in-flight retirement를 함께 다루고 upload count/bytes로 검증한다. 현재는 미구현이며 cache 속도 향상이나 전체 DEV08 완료를 뜻하지 않는다.

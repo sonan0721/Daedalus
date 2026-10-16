@@ -116,3 +116,11 @@ core는 snapshot wrapper와 entity backing의 weak record를 함께 유지한다
 `dist/project-evidence/p02-final-cpu-smoke.json`은 동일 18개 검사를 통과했다. 최종 debug CLI SHA-256은 `b6100d7d4b4db7e435e53ee9eff4090c7806177960ec2dd295ea2a5654d31fa0`다. `p02-final-legacy-window.json`의 실제 M3 Pro/Metal 창은 같은 3초/10,000 work iterations 조건에서 loading frame 320·tick 186, terrain job 1개 시작/취소·active 0·time_limit/stop_requested 종료를 기록했다. 새 physical key/pointer 입력이나 external project window 검증은 아니다. concurrent native/managed smoke의 wall time을 과거 단독 실행과 비교하지 않는다.
 
 이 근거로 P02.1a/b의 좁은 native library 항목만 체크한다. P02.1c와 모든 frontend attach·live capture·실제 MCP·UI/asset/gameplay 통합·전체 D1/D2/D3는 계속 진행 중이다. 다음 package/PR은 clean source와 실제 required/native jobs를 확인한 뒤 별도 기록한다.
+
+## P02.1 로컬 CLI package
+
+구현 commit `e07dd8ebfd771d70ada023ed44a32a8d649e6e76`의 clean worktree에서 공유 release cache로 `python3 scripts/package_cli.py`를 실행했다. release/window build·notice/inventory·archive/hash·추출 binary의 version/inspect와 동일 external-project smoke 18개가 통과했다. manifest는 dirty=false, target aarch64-apple-darwin, binary SHA-256 `e0e124f70b556ac1a489b6fd950bfe0926fb5534a2c04c4d487727d1ae7ed6d4`다. 이 단일 cached build의 Cargo 관찰은 8.43초이며 개선 배율로 해석하지 않는다.
+
+ignored directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e07dd8ebfd77-clean-20261016T011157Z-428b00c662974964af1ed0fa88ff29c7/`다. 같은 staging binary의 실제 Metal `view --seconds 2 --work-iterations 10000`은 loading frame 224·tick 124, terrain job 1개 완료·active 0·time_limit/stop_requested 종료를 기록했다(`dist/project-evidence/p02-packaged-window.json`). debug 종료 때의 취소와 달리 이 release 실행에서는 job이 완료됐다. physical 입력이나 새 service frontend 지원을 의미하지 않는다. tag/public Release는 발행하지 않았다.
+
+package 뒤에는 test-only 정상 제출/frame polling을 bounded Busy retry로 통일했다. producer와 client의 합법적인 짧은 mutex 경합을 엔진 오류처럼 실패시키지 않기 위해서다. 의도한 오류 검사는 직접 응답을 대조하며 유지한다. 제출 helper 반영 후 root의 전체 157건·fmt·strict Clippy가 통과했고, 마지막 frame helper 편집 후 focused session-control 23건·fmt를 root가 다시 확인했다. production 동작은 바뀌지 않아 GPU/.NET/package를 다시 만들지 않았다. 위 manifest의 source는 계속 정확히 e07dd8e다. PR native jobs는 최종 head를 별도로 빌드한다.

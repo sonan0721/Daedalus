@@ -2242,8 +2242,10 @@ mod tests {
     fn wait_for_frame(client: &super::SessionControlClient) -> std::sync::Arc<super::SessionFrame> {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if let Some(frame) = client.try_latest_frame().expect("frame mailbox available") {
-                return frame;
+            match client.try_latest_frame() {
+                Ok(Some(frame)) => return frame,
+                Ok(None) | Err(super::FrameReadError::Busy) => {}
+                Err(error) => panic!("frame mailbox failed: {error}"),
             }
             assert!(
                 Instant::now() < deadline,
@@ -2258,26 +2260,28 @@ mod tests {
         let service = start(default_config());
         let client = service.attach().unwrap();
         let target = SessionEntityTarget::StableId(stable_id("entity:hero"));
-        let mut set = client
-            .try_submit(SessionOperation::SetTransform {
+        let mut set = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
                 target: target.clone(),
                 command_id: None,
                 expected_revision: Revision(0),
                 apply_at: None,
                 transform: moved(8.0),
-            })
-            .unwrap();
+            },
+        );
         let accepted = set
             .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
         assert_eq!(accepted.phase(), RequestPhase::AuthorityAccepted);
         assert_eq!(accepted.authority().unwrap().apply_tick, Some(Tick(1)));
 
-        let mut before = client
-            .try_submit(SessionOperation::GetTransform {
+        let mut before = submit_after_busy(
+            &client,
+            SessionOperation::GetTransform {
                 target: target.clone(),
-            })
-            .unwrap();
+            },
+        );
         let before_state = wait_terminal(&before);
         let SessionRequestResult::Transform(before_transform) =
             before_state.terminal().unwrap().as_ref().unwrap()
@@ -2290,9 +2294,7 @@ mod tests {
             [2.0, 3.0, 4.0]
         );
 
-        let mut step = client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
         let step_state = wait_terminal(&step);
         let SessionRequestResult::Step(reports) = step_state.terminal().unwrap().as_ref().unwrap()
         else {
@@ -2315,9 +2317,7 @@ mod tests {
         let frame = wait_for_frame(&client);
         assert_eq!(frame.tick(), Tick(1));
         assert_eq!(frame.snapshot().entities[0].transform, moved(8.0));
-        let mut after = client
-            .try_submit(SessionOperation::GetTransform { target })
-            .unwrap();
+        let mut after = submit_after_busy(&client, SessionOperation::GetTransform { target });
         let after_state = wait_terminal(&after);
         let SessionRequestResult::Transform(after_transform) =
             after_state.terminal().unwrap().as_ref().unwrap()
@@ -2342,15 +2342,16 @@ mod tests {
         config.limits.max_result_bytes_total = 2 * 1024 * 1024;
         let service = start(config);
         let client = service.attach().unwrap();
-        let mut write = client
-            .try_submit(SessionOperation::SetTransform {
+        let mut write = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
                 target: SessionEntityTarget::StableId(stable_id("entity:hero")),
                 command_id: None,
                 expected_revision: Revision(0),
                 apply_at: None,
                 transform: moved(10.0),
-            })
-            .unwrap();
+            },
+        );
         write
             .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
@@ -2380,9 +2381,7 @@ mod tests {
         wait_terminal(&write);
         step.acknowledge().unwrap();
         write.acknowledge().unwrap();
-        let mut status = client
-            .try_submit(SessionOperation::Status)
-            .expect("acknowledgements release both client and session credits");
+        let mut status = submit_after_busy(&client, SessionOperation::Status);
         wait_terminal(&status);
         status.acknowledge().unwrap();
         let _ = service.shutdown();
@@ -2433,7 +2432,7 @@ mod tests {
         config.limits.max_result_bytes_total = 2 * 1024 * 1024;
         let service = start(config);
         let client = service.attach().unwrap();
-        let mut first = client.try_submit(SessionOperation::Status).unwrap();
+        let mut first = submit_after_busy(&client, SessionOperation::Status);
         let retained_progress = wait_terminal(&first);
         first.acknowledge().unwrap();
         assert_eq!(
@@ -2441,9 +2440,7 @@ mod tests {
             SessionSubmitError::ResultCapacity
         );
         drop(retained_progress);
-        let mut second = client
-            .try_submit(SessionOperation::Status)
-            .expect("last result reader releases the byte lease");
+        let mut second = submit_after_busy(&client, SessionOperation::Status);
         wait_terminal(&second);
         second.acknowledge().unwrap();
         let _ = service.shutdown();
@@ -2453,7 +2450,7 @@ mod tests {
     fn try_state_and_ticket_drop_do_not_wait_on_the_progress_mutex() {
         let service = start(default_config());
         let client = service.attach().unwrap();
-        let ticket = client.try_submit(SessionOperation::Status).unwrap();
+        let ticket = submit_after_busy(&client, SessionOperation::Status);
         let cell = std::sync::Arc::clone(&ticket.cell);
         let state_guard = cell.state.lock().unwrap();
         assert!(matches!(
@@ -2483,25 +2480,19 @@ mod tests {
         let service = start(config);
         let client = service.attach().unwrap();
 
-        let mut first_step = client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut first_step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
         wait_terminal(&first_step);
         first_step.acknowledge().unwrap();
         let first_frame = wait_for_frame(&client);
 
-        let mut second_step = client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut second_step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
         wait_terminal(&second_step);
         second_step.acknowledge().unwrap();
         let second_frame = wait_for_frame(&client);
         assert_eq!(first_frame.tick(), Tick(1));
         assert_eq!(second_frame.tick(), Tick(2));
 
-        let mut third_step = client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut third_step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
         let third_state = wait_terminal(&third_step);
         let Ok(SessionRequestResult::Step(reports)) = third_state.terminal().unwrap() else {
             panic!("third manual step should complete")
@@ -2514,9 +2505,7 @@ mod tests {
         drop(third_state);
 
         drop(first_frame);
-        let mut fourth_step = client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut fourth_step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
         wait_terminal(&fourth_step);
         fourth_step.acknowledge().unwrap();
         let recovered = wait_for_frame(&client);
@@ -2634,15 +2623,16 @@ mod tests {
         let first_client = service.attach().unwrap();
         let second_client = service.attach().unwrap();
         let target = SessionEntityTarget::StableId(stable_id("entity:hero"));
-        let mut first = first_client
-            .try_submit(SessionOperation::SetTransform {
+        let mut first = submit_after_busy(
+            &first_client,
+            SessionOperation::SetTransform {
                 target: target.clone(),
                 command_id: Some(CommandId::from_raw(7)),
                 expected_revision: Revision(0),
                 apply_at: None,
                 transform: moved(7.0),
-            })
-            .unwrap();
+            },
+        );
         let first_admission = first
             .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
@@ -2650,15 +2640,16 @@ mod tests {
             first_admission.authority().unwrap().apply_tick,
             Some(Tick(1))
         );
-        let mut duplicate_pending = second_client
-            .try_submit(SessionOperation::SetTransform {
+        let mut duplicate_pending = submit_after_busy(
+            &second_client,
+            SessionOperation::SetTransform {
                 target: target.clone(),
                 command_id: Some(CommandId::from_raw(7)),
                 expected_revision: Revision(0),
                 apply_at: None,
                 transform: moved(99.0),
-            })
-            .unwrap();
+            },
+        );
         let duplicate_admission = duplicate_pending
             .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
@@ -2671,9 +2662,7 @@ mod tests {
             Some(Tick(1))
         );
 
-        let mut step = first_client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut step = submit_after_busy(&first_client, SessionOperation::Step { count: 1 });
         wait_terminal(&step);
         let first_result = wait_terminal(&first).terminal().unwrap().clone();
         let pending_duplicate_result = wait_terminal(&duplicate_pending)
@@ -2685,15 +2674,16 @@ mod tests {
         duplicate_pending.acknowledge().unwrap();
         step.acknowledge().unwrap();
 
-        let mut duplicate_completed = second_client
-            .try_submit(SessionOperation::SetTransform {
+        let mut duplicate_completed = submit_after_busy(
+            &second_client,
+            SessionOperation::SetTransform {
                 target: target.clone(),
                 command_id: Some(CommandId::from_raw(7)),
                 expected_revision: Revision(0),
                 apply_at: None,
                 transform: moved(-99.0),
-            })
-            .unwrap();
+            },
+        );
         let completed = duplicate_completed
             .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
@@ -2708,32 +2698,32 @@ mod tests {
         );
         duplicate_completed.acknowledge().unwrap();
 
-        let mut next = first_client
-            .try_submit(SessionOperation::SetTransform {
+        let mut next = submit_after_busy(
+            &first_client,
+            SessionOperation::SetTransform {
                 target,
                 command_id: Some(CommandId::from_raw(8)),
                 expected_revision: Revision(1),
                 apply_at: None,
                 transform: moved(8.0),
-            })
-            .unwrap();
-        let mut second_step = first_client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+            },
+        );
+        let mut second_step = submit_after_busy(&first_client, SessionOperation::Step { count: 1 });
         wait_terminal(&second_step);
         wait_terminal(&next);
         next.acknowledge().unwrap();
         second_step.acknowledge().unwrap();
 
-        let mut expired = second_client
-            .try_submit(SessionOperation::SetTransform {
+        let mut expired = submit_after_busy(
+            &second_client,
+            SessionOperation::SetTransform {
                 target: SessionEntityTarget::StableId(stable_id("entity:hero")),
                 command_id: Some(CommandId::from_raw(7)),
                 expected_revision: Revision(2),
                 apply_at: None,
                 transform: moved(70.0),
-            })
-            .unwrap();
+            },
+        );
         let expired_state = wait_terminal(&expired);
         assert_eq!(
             expired_state.terminal().unwrap(),
@@ -2760,12 +2750,13 @@ mod tests {
         )
         .unwrap();
         let client = service.attach().unwrap();
-        let mut page_one = client
-            .try_submit(SessionOperation::ProjectInfo {
+        let mut page_one = submit_after_busy(
+            &client,
+            SessionOperation::ProjectInfo {
                 offset: 0,
                 limit: Some(2),
-            })
-            .unwrap();
+            },
+        );
         let first_state = wait_terminal(&page_one);
         let Ok(SessionRequestResult::ProjectInfo(first)) = first_state.terminal().unwrap() else {
             panic!("project info should return a source page")
@@ -2773,12 +2764,13 @@ mod tests {
         assert_eq!(first.entity_count, 5);
         assert_eq!(first.entities.len(), 2);
         assert_eq!(first.next_offset, Some(2));
-        let mut page_three = client
-            .try_submit(SessionOperation::ProjectInfo {
+        let mut page_three = submit_after_busy(
+            &client,
+            SessionOperation::ProjectInfo {
                 offset: 4,
                 limit: Some(1),
-            })
-            .unwrap();
+            },
+        );
         let last_state = wait_terminal(&page_three);
         let Ok(SessionRequestResult::ProjectInfo(last)) = last_state.terminal().unwrap() else {
             panic!("project info should return a source page")
@@ -2910,13 +2902,14 @@ mod tests {
         let service = start(default_config());
         let first_client = service.attach().unwrap();
         let second_client = service.attach().unwrap();
-        let mut status = first_client.try_submit(SessionOperation::Status).unwrap();
-        let mut page = second_client
-            .try_submit(SessionOperation::ProjectInfo {
+        let mut status = submit_after_busy(&first_client, SessionOperation::Status);
+        let mut page = submit_after_busy(
+            &second_client,
+            SessionOperation::ProjectInfo {
                 offset: 0,
                 limit: Some(1),
-            })
-            .unwrap();
+            },
+        );
         let status_state = wait_terminal(&status);
         let _ = wait_terminal(&page);
         let page_state = page
@@ -2987,11 +2980,12 @@ mod tests {
             index: 0,
             generation: 0,
         });
-        let mut read = trusted
-            .try_submit(SessionOperation::GetTransform {
+        let mut read = submit_after_busy(
+            &trusted,
+            SessionOperation::GetTransform {
                 target: wrong_session,
-            })
-            .unwrap();
+            },
+        );
         assert_eq!(
             wait_terminal(&read).terminal().unwrap(),
             &Err(SessionRequestError::WorldRead(
@@ -3006,15 +3000,16 @@ mod tests {
     fn shutdown_reports_unapplied_authority_and_keeps_the_ticket_terminal() {
         let service = start(default_config());
         let client = service.attach().unwrap();
-        let mut set = client
-            .try_submit(SessionOperation::SetTransform {
+        let mut set = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
                 target: SessionEntityTarget::StableId(stable_id("entity:hero")),
                 command_id: None,
                 expected_revision: Revision(0),
                 apply_at: Some(Tick(9)),
                 transform: moved(18.0),
-            })
-            .unwrap();
+            },
+        );
         set.wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
         let report = service.shutdown();
@@ -3036,27 +3031,29 @@ mod tests {
         let second_client = service.attach().unwrap();
         let target = SessionEntityTarget::StableId(stable_id("entity:hero"));
         let command_id = CommandId::from_raw(23);
-        let mut original = first_client
-            .try_submit(SessionOperation::SetTransform {
+        let mut original = submit_after_busy(
+            &first_client,
+            SessionOperation::SetTransform {
                 target: target.clone(),
                 command_id: Some(command_id),
                 expected_revision: Revision(0),
                 apply_at: Some(Tick(9)),
                 transform: moved(23.0),
-            })
-            .unwrap();
+            },
+        );
         original
             .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
-        let mut duplicate = second_client
-            .try_submit(SessionOperation::SetTransform {
+        let mut duplicate = submit_after_busy(
+            &second_client,
+            SessionOperation::SetTransform {
                 target,
                 command_id: Some(command_id),
                 expected_revision: Revision(0),
                 apply_at: Some(Tick(9)),
                 transform: moved(99.0),
-            })
-            .unwrap();
+            },
+        );
         assert_eq!(
             duplicate
                 .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
@@ -3084,7 +3081,7 @@ mod tests {
             .shared
             .panic_before_next_request
             .store(true, std::sync::atomic::Ordering::Release);
-        let mut query = client.try_submit(SessionOperation::Status).unwrap();
+        let mut query = submit_after_busy(&client, SessionOperation::Status);
         assert!(matches!(
             wait_terminal(&query).terminal().unwrap(),
             Err(SessionRequestError::ActorFailed(_))
@@ -3101,15 +3098,16 @@ mod tests {
     fn actor_panic_after_engine_step_terminalizes_step_and_does_not_claim_write_unapplied() {
         let service = start(default_config());
         let client = service.attach().unwrap();
-        let mut set = client
-            .try_submit(SessionOperation::SetTransform {
+        let mut set = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
                 target: SessionEntityTarget::StableId(stable_id("entity:hero")),
                 command_id: Some(CommandId::from_raw(11)),
                 expected_revision: Revision(0),
                 apply_at: Some(Tick(1)),
                 transform: moved(11.0),
-            })
-            .unwrap();
+            },
+        );
         let admission = set
             .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
@@ -3119,9 +3117,7 @@ mod tests {
             .shared
             .panic_after_next_engine_step
             .store(true, std::sync::atomic::Ordering::Release);
-        let mut step = client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
         assert!(matches!(
             wait_terminal(&step).terminal().unwrap(),
             Err(SessionRequestError::ActorFailed(_))
@@ -3148,8 +3144,9 @@ mod tests {
     fn wrong_session_handle_reaches_real_world_command_result() {
         let service = start(default_config());
         let client = service.attach().unwrap();
-        let mut set = client
-            .try_submit(SessionOperation::SetTransform {
+        let mut set = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
                 target: SessionEntityTarget::Handle(EntityHandle {
                     session: SessionId::fresh(),
                     index: 0,
@@ -3159,13 +3156,11 @@ mod tests {
                 expected_revision: Revision(9),
                 apply_at: Some(Tick(1)),
                 transform: moved(22.0),
-            })
-            .unwrap();
+            },
+        );
         set.wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
             .unwrap();
-        let mut step = client
-            .try_submit(SessionOperation::Step { count: 1 })
-            .unwrap();
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
         wait_terminal(&step);
         let terminal = wait_terminal(&set);
         let SessionRequestResult::Command(command) = terminal.terminal().unwrap().as_ref().unwrap()

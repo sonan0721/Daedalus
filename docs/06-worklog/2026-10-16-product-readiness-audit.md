@@ -130,3 +130,7 @@ package 뒤에는 test-only 정상 제출/frame polling을 bounded Busy retry로
 [PR #7](https://github.com/sonan0721/Daedalus/pull/7)의 최초 head `1bd724109f7555140de3e5421270dd99f91b2073`에서 docs와 managed native integration은 통과했지만 [Rust run 38834232275](https://github.com/sonan0721/Daedalus/actions/runs/38834232275)은 `frame_capacity_one_counts_backing_only_retention_and_recovers`의 다음 Step admission이 ResultCapacity로 실패했다. 로컬 157건 통과가 다른 scheduling 순서의 안전성을 증명하지 못한 사례다.
 
 terminal을 통지한 뒤 actor의 in-flight bookkeeping/완료 함수가 별도 credit 참조를 잠시 보유하는 순서를 조사·수정한다. terminal payload reader의 정당한 lease는 유지하되 bookkeeping만으로 회수를 늦추지 않는다. actor를 terminal publication 직후 멈춘 controlled regression에서 ack/reader 해제 후 Step reserve 재사용을 확인한다. ResultCapacity를 무조건 retry하거나 실패한 CI를 단순 재실행해 통과로 대신하지 않는다. 수정 후 실제 검사 결과와 source는 이어서 기록하며 이 PR은 아직 병합하지 않았다.
+
+source 조사에서 ActiveRequest의 중복 credit Arc와 finish_cell의 terminal 통지 뒤 credit drop을 확인했다. Luna xhigh는 불필요한 actor lease를 제거하고 terminal 전의 bookkeeping 참조 반환으로 바꿨다. 실제 progress/reader lease는 유지한다. 2 MiB 예산과 유한 test-only actor pause로 terminal을 관찰한 직후 actor cleanup을 멈춘 상태에서 ack/마지막 reader 해제→다음 Step 수락을 검증했다. root의 수정 후 workspace **158건·check/fmt·strict Clippy**는 통과했다. 기존 ResultCapacity 오류 검사를 retry로 바꾸지 않았다. 이 시점은 로컬 검증이며 수정된 PR CI 통과나 병합 결과는 아니다.
+
+read-only credit 재감사에서는 실제 reader lease·pending/종료·panic correlation의 추가 finding이 없었다. abandoned payload가 폐기되는 동안 새 admission은 placeholder로만 존재하고 actor가 다음 결과를 병렬 생성하지 않는다는 aggregate-bound 근거를 source 계약에도 남겼다. 원래 failed head의 macOS/Linux package는 각각 3분4초/2분40초 통과했으나 이 결과를 수정된 head의 검증으로 대체하지 않는다.

@@ -77,6 +77,8 @@ ticket drop은 결과를 포기하는 의미이며 이미 authority가 수락한
 
 terminal publication 이후에는 실제 progress/payload reader와 무관한 actor bookkeeping이 별도 credit 참조를 붙잡지 않는다. 처리 중 panic을 위한 correlation은 cell/command identity로 유지하고, terminal을 관찰한 caller가 ack 및 마지막 reader를 해제하면 그 ticket의 credit을 다시 사용할 수 있어야 한다. terminal 통지 직후 actor가 잠시 스케줄되지 않은 상황도 이 계약에 포함한다. 새로운 mutation을 먼저 적용하거나 ResultCapacity 오류를 무조건 retry하는 방식으로 회수 결함을 숨기지 않는다.
 
+현재 query/terminal payload 생성은 actor 한 곳에서 순차 실행된다. abandoned 결과의 마지막 bookkeeping credit 반환 후 payload 폐기까지 새로 수락한 요청은 queue placeholder로만 존재하며, 다음 payload 생성은 폐기 뒤에 시작한다. 이 순서를 통해 aggregate result byte 상한을 지킨다. 결과 생성을 병렬 worker로 옮긴다면 discard/terminal 설치까지 개별 lease를 유지하도록 handoff를 다시 검증해야 한다.
+
 completed replay ledger는 기본 1024/hard 16,384 entries로 제한하고 pending ticket map과 별도로 계수한다. 새 service의 caller-provided lower-half CommandId는 session 전역에서 **새 ID가 단조 증가**해야 한다. pending/보존 ledger에 있는 ID는 실제 결과를 replay한다. ledger에 없고 caller high-water 이하인 ID는 ReplayWindowExpired/OutOfOrderCallerId로 거부하며 fresh 명령으로 재적용하지 않는다. 새 ID가 authority에 접수됐을 때 high-water를 갱신한다. 복수 attachment가 caller ID 공간을 공유하므로 일반 SDK/AI는 auto ID를 사용하고, 별도 retry가 필요하면 이 명시적 범위 안의 receipt를 보존한다. upper-half auto ID는 session 전역 단조 allocator만 발급하고 외부 지정은 계속 거부한다.
 
 이는 새 service의 명시적인 replay 정책이다. 기존 bare JSONL/bridge/world의 bounded dedup API를 이 단계에서 몰래 변경하지 않는다. 후속 adapter migration 때 이 강화된 caller ID 정책과 expired 오류를 공개하고 wire 회귀를 검증한다. 프로세스 재시작을 넘는 exactly-once를 약속하지 않으며 durable/network replay는 P10/P11에서 별도 다룬다.
@@ -175,6 +177,6 @@ attachment는 inspect/input/mutate/manual-step/capture/shutdown capability를 �
 
 `daedalus-runtime/src/session_control.rs`가 실제 ProjectSession 한 개를 소유하고, `session_primitives.rs`가 atomic credit lease·bounded latest-value mailbox·stop signal을 제공한다. `daedalus-world`의 transform page는 ECS iterator에서 skip/take 후 작은 Vec만 만든다. source metadata는 result size를 계산한 뒤 복사한다. query/Step의 처리 중 panic도 ticket을 terminal로 만들고, 적용 여부가 불명확한 command는 OutcomeUnknown으로 남긴다.
 
-조정자의 수정 후 all-feature workspace 검사는 CPU 157건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 별도 회귀로 확인한다. 세부 입력·binary identity·각 실행 시점과 한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
+조정자의 최신 로컬 all-feature workspace 검사는 CPU 158건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 첫 Linux PR 검사의 terminal/credit 회수 경쟁과 수정 후 CI는 별도로 추적한다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 별도 회귀로 확인한다. 세부 입력·binary identity·각 실행 시점과 한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
 
 legacy `LiveSession`은 같은 mailbox/stop primitive를 사용하지만 count-only AtomicUsize result credit와 기존 단일 result receiver는 유지한다. owned ticket 서비스와 accounting 의미가 달라 강제로 통합하지 않았다. 이 남은 migration은 P02.1c/DEV01 미완료이며 두 path의 테스트를 유지한다. CLI protocol 2·실제 project window·MCP·SDK attach는 아직 이 service의 adapter로 구현되지 않았다.

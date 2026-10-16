@@ -611,7 +611,6 @@ struct ControlCounters {
 
 struct ActiveRequest {
     cell: Arc<RequestCell>,
-    _credit: Arc<CreditBundle>,
     possible_command_id: Option<CommandId>,
 }
 
@@ -969,6 +968,12 @@ struct ControlShared {
     panic_before_next_request: AtomicBool,
     #[cfg(test)]
     panic_after_next_engine_step: AtomicBool,
+    #[cfg(test)]
+    pause_after_next_request_before_cleanup: AtomicBool,
+    #[cfg(test)]
+    request_cleanup_paused: AtomicBool,
+    #[cfg(test)]
+    release_paused_request_cleanup: AtomicBool,
 }
 
 impl ControlShared {
@@ -1039,6 +1044,12 @@ impl SessionControlService {
             panic_before_next_request: AtomicBool::new(false),
             #[cfg(test)]
             panic_after_next_engine_step: AtomicBool::new(false),
+            #[cfg(test)]
+            pause_after_next_request_before_cleanup: AtomicBool::new(false),
+            #[cfg(test)]
+            request_cleanup_paused: AtomicBool::new(false),
+            #[cfg(test)]
+            release_paused_request_cleanup: AtomicBool::new(false),
         });
         let (startup_sender, startup_receiver) = std::sync::mpsc::sync_channel(1);
         let actor_shared = Arc::clone(&shared);
@@ -1408,6 +1419,7 @@ fn run_control_actor(
             .counters
             .queued_stopped
             .fetch_add(1, Ordering::AcqRel);
+        drop(request.credit);
         request
             .cell
             .set_terminal(Err(SessionRequestError::StoppedBeforeAuthority));
@@ -1436,6 +1448,7 @@ fn run_control_actor(
             } else {
                 SessionRequestError::StoppedNotApplied { command_id }
             };
+            drop(ticket.credit);
             ticket.cell.set_terminal(Err(error));
         }
     }
@@ -1465,7 +1478,6 @@ impl ControlActor {
             if let Some(request) = self.shared.queue.pop(ACTOR_POLL_INTERVAL) {
                 self.active_request = Some(ActiveRequest {
                     cell: Arc::clone(&request.cell),
-                    _credit: Arc::clone(&request.credit),
                     possible_command_id: None,
                 });
                 #[cfg(test)]
@@ -1477,6 +1489,8 @@ impl ControlActor {
                     panic!("injected actor request failure");
                 }
                 self.process_request(request);
+                #[cfg(test)]
+                self.pause_after_request_before_cleanup_for_test();
                 self.active_request = None;
             }
             if self.shared.stop.is_requested() {
@@ -1976,16 +1990,46 @@ impl ControlActor {
         credit: Arc<CreditBundle>,
         terminal: Result<SessionRequestResult, SessionRequestError>,
     ) {
-        if terminal
+        let terminal = if terminal
             .as_ref()
             .ok()
             .is_some_and(|result| estimate_result_bytes(result) > MAX_RESULT_BYTES_PER_TICKET)
         {
-            cell.set_terminal(Err(SessionRequestError::ResultTooLarge));
+            Err(SessionRequestError::ResultTooLarge)
         } else {
-            cell.set_terminal(terminal);
-        }
+            terminal
+        };
+        // The request progress owns the result lease through terminal acknowledgement and
+        // any reader Arc. Drop this bookkeeping reference before publishing terminal state,
+        // so a woken caller can immediately reuse its credit after releasing those owners.
         drop(credit);
+        cell.set_terminal(terminal);
+    }
+
+    #[cfg(test)]
+    fn pause_after_request_before_cleanup_for_test(&self) {
+        if !self
+            .shared
+            .pause_after_next_request_before_cleanup
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        self.shared
+            .request_cleanup_paused
+            .store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !self
+            .shared
+            .release_paused_request_cleanup
+            .load(Ordering::Acquire)
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        self.shared
+            .request_cleanup_paused
+            .store(false, Ordering::Release);
     }
 
     fn publish_latest_frame(&mut self) {
@@ -2137,6 +2181,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -2444,6 +2489,51 @@ mod tests {
         wait_terminal(&second);
         second.acknowledge().unwrap();
         let _ = service.shutdown();
+    }
+
+    #[test]
+    fn terminal_ack_releases_step_credit_before_actor_request_cleanup() {
+        let mut config = default_config();
+        config.limits.max_result_bytes_total = 2 * 1024 * 1024;
+        let service = start(config);
+        let client = service.attach().unwrap();
+        service
+            .shared
+            .pause_after_next_request_before_cleanup
+            .store(true, Ordering::Release);
+
+        let mut first = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        let first_state = wait_terminal(&first);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !service
+            .shared
+            .request_cleanup_paused
+            .load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "actor did not pause after publishing the Step terminal"
+            );
+            thread::yield_now();
+        }
+        assert!(first_state.terminal().unwrap().is_ok());
+        first.acknowledge().unwrap();
+        drop(first_state);
+
+        // The actor is deliberately paused with its ActiveRequest still installed. The Step
+        // reserve must already be free once terminal readers release their progress Arc.
+        let second_admission = client.try_submit(SessionOperation::Step { count: 1 });
+        service
+            .shared
+            .release_paused_request_cleanup
+            .store(true, Ordering::Release);
+        let mut second = second_admission
+            .expect("acknowledged terminal Step credit is available before actor cleanup");
+        let second_state = wait_terminal(&second);
+        assert!(second_state.terminal().unwrap().is_ok());
+        second.acknowledge().unwrap();
+        drop(second_state);
+        assert_eq!(service.shutdown().final_tick, Tick(2));
     }
 
     #[test]

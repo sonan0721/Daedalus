@@ -1,6 +1,6 @@
 # 1차 자료 등록부
 
-확인일: 2026-10-15 · R01~R02 · 상태: 문서 조사. 빌드·통합·성능 검증은 수행하지 않음.
+확인일: 2026-10-15~16 · R01~R02 및 P03 후속 · 상태: 이 등록부는 문서 조사이며 실제 빌드·통합·성능 근거는 별도 worklog 참조.
 
 ## 자료 사용 규칙
 
@@ -74,6 +74,12 @@
 | S64 | [Bevy ComputeTaskPool0.18.1](https://docs.rs/bevy_tasks/0.18.1/bevy_tasks/struct.ComputeTaskPool.html) | global pool 초기화·유효 thread 수 | process 예산 불일치를 숨기지 않는 병렬 ECS 계약 |
 | S65 | [oxijolt](https://docs.rs/oxijolt/latest/oxijolt/) / [native build](https://github.com/pockerhead/oxijolt/blob/main/docs/building.md) | 배포 source1.1.0+jolt-5.6.0의 초기화·CMake·prebuilt 경계와 대조 | Jolt native 통합. 기능 소개는 엔진 검증 완료가 아님 |
 | S66 | [Kira Panning](https://docs.rs/kira/latest/kira/struct.Panning.html) | 0.12.5에서 pan -1..1 의미 확인 | 엔진 volume/pan·실제 PCM 검증 계약 |
+| S67 | [glTF 2.0 규격](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) | 2026-10-16: GLB·외부 buffer/image·URI·image type·material/accessor 규격 | bounded engine resolver와 명시적인 import subset 설계. 아직 importer 구현/전체 conformance 아님 |
+| S68 | [gltf 1.4.1 manifest](https://docs.rs/crate/gltf/1.4.1/source/Cargo.toml), [reader](https://docs.rs/gltf/1.4.1/gltf/mesh/struct.Reader.html) | 2026-10-16: utils reader·default import의 image/base64/urlencoding 의존·라이선스/MSRV 선언 | defaults-off parser 후보. 실제 lock/타깃 검증 전 미채택 |
+| S69 | [png 0.18.1 Decoder](https://docs.rs/png/0.18.1/png/struct.Decoder.html) | 2026-10-16: decoder limits·caller buffer API와 제한 경계 | 기존 encoder 의존성의 bounded decoder 재사용안. image pipeline은 미구현 |
+| S70 | [hound 3.5.1 manifest](https://docs.rs/crate/hound/3.5.1/source/Cargo.toml), [API](https://docs.rs/hound/3.5.1/hound/) | 2026-10-16: PCM/float WAV·runtime dependency 없음·Apache-2.0 | bounded WAV importer 후보. 미채택·재생/streaming 완료 아님 |
+
+S67~S70의 확인 결과와 CPU cook/GPU resource identity 적용안은 [에셋 상세 계약](../03-architecture/asset-import-cook-and-residency.md)에 둔다. 해당 추가는 포맷 조사이며 새 dependency를 Cargo에 설치한 결과가 아니다.
 
 ## 조사 실패·부족 기록
 

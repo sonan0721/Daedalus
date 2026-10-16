@@ -1,6 +1,8 @@
 # 엔진 구현 체크리스트
 
-상태: 사용자 구현 착수 승인 · 2026-10-15 · 모든 코딩 Luna xhigh
+상태: D1 엔진 구현 중·제품 인수 미통과 · 2026-10-16 · 모든 코딩 Luna xhigh
+
+**전체 목표는 진행 중이다.** [제품 인수 계약](product-delivery-and-acceptance.md)의 D1/P01~P16을 통과한 뒤 별도 D2 3D 게임·D3 2D 게임으로 검증한다. 아래 E작업과 live checkpoint 통과는 엔진 제품 인수가 아니다. 현재 gap은 [실제 코드 감사](../06-worklog/2026-10-16-product-readiness-audit.md)에 기록한다.
 
 ## 착수와 검증 원칙
 
@@ -79,3 +81,16 @@ C# 연결은 [managed host·bridge](../03-architecture/managed-host-and-native-b
 - [x] 포화·취소·종료·frame interval·회귀 검사 및 window 포함 local package 검증.
 
 통과 근거와 실제 수치는 [작업 기록](../06-worklog/2026-10-16-native-live-session.md)에 둔다. 이는 한 청크 native 통합 체크포인트이며 전체 E01~E08 품질 게이트의 완료가 아니다.
+
+## P01 제품 제작 경로의 선행 작업
+
+전체 D1/P01은 미통과다. [project lifecycle 계약](../03-architecture/project-lifecycle.md)에 따라 다음 하위 작업을 진행한다. 이 목록을 모두 통과해도 game module·live edit/reload·hierarchy/prefab·정식 importer·MCP·저장/배포가 남아 있으면 P01/D1을 닫지 않는다.
+
+- [x] P01.1a: 외부 project manifest·typed scene/mesh·bounded source/digest·semantic 검증.
+- [x] P01.1b: prepared project를 실제 Engine에 적용하고 stable ID·handle·revision·snapshot으로 조작.
+- [x] P01.1c: 공통 library로 CLI init/validate/inspect/run/serve/capture 연결, project 자료의 실제 GPU 출력.
+- [ ] P01.2: 일반 asset import/cook·계층·prefab·scene lifecycle·last-good reload.
+- [ ] P01.3: C# project module·SDK build/watch·상태 보존·live session 제어/capture·MCP 연결.
+- [ ] P01 제품 인수: 외부 사용자의 project 생성→작성→실행→수정/검증→저장/재개→배포 경로를 인수표 전체와 대조.
+
+P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 CLI 담당자 한 명이 수정한다. 코드 생성 전 공개 API를 공유하며 root는 실제 외부 directory로 독립 검증한다. DEV01/DEV05의 공통화가 실제 명령 경로에 사용되는지도 확인한다.

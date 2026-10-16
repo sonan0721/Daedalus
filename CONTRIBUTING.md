@@ -4,6 +4,8 @@ Thanks for helping shape Daedalus. Engine implementation has started from the do
 
 The repository is engine-only. Do not add sample game projects, game demos, or cloned games. Small fixtures and test scenes are welcome later when they exercise a specific engine behavior and remain part of the engine's test suite; they should not grow into playable sample projects.
 
+The full delivery plan includes separate 3D and 2D validation games after usable-engine acceptance. They consume the public engine/SDK outside this repository. A passing fixture or PR does not satisfy that product gate; see [ADR-0005](docs/05-decisions/0005-engine-product-and-game-validation.md).
+
 ## Issues and proposals
 
 Use a bug report for a reproducible problem in the repository or its documented behavior. Use a design proposal to discuss a goal, requirement, architecture choice, or tradeoff before implementing a larger change. Small corrections can go straight to a pull request. Tie larger pull requests to an agreed issue, requirement, goal, or architecture decision record (ADR), and keep each change focused enough to review on its own.

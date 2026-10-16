@@ -10,6 +10,7 @@ description = "Host-neutral scene, terrain, tile simulation, and grid navigation
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "=0.10.9"
 
 [lints]
 workspace = true

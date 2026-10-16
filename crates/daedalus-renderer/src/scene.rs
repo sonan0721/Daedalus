@@ -329,9 +329,17 @@ impl RenderScene {
                 ));
             }
             let linear = Mat3::from_mat4(object.transform);
-            if linear.determinant().abs() < 1.0e-8 {
+            let determinant = linear.determinant();
+            let inverse = linear.inverse();
+            if !determinant.is_finite()
+                || determinant == 0.0
+                || !inverse
+                    .to_cols_array()
+                    .iter()
+                    .all(|value| value.is_finite())
+            {
                 return Err(RendererError::InvalidScene(
-                    "object transform must be invertible to transform mesh normals".into(),
+                    "object transform must have a finite inverse to transform mesh normals".into(),
                 ));
             }
             let columns = object.transform.to_cols_array();
@@ -398,6 +406,28 @@ mod tests {
         scene.objects.push(RenderObject::new(
             triangle(),
             Mat4::from_scale(glam::Vec3::new(1.0, 0.0, 1.0)),
+            Material::default(),
+        ));
+        assert!(scene.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_tiny_but_invertible_object_transform() {
+        let mut scene = RenderScene::default();
+        scene.objects.push(RenderObject::new(
+            triangle(),
+            Mat4::from_scale(glam::Vec3::splat(0.001)),
+            Material::default(),
+        ));
+        assert!(scene.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_object_transform_with_non_finite_inverse() {
+        let mut scene = RenderScene::default();
+        scene.objects.push(RenderObject::new(
+            triangle(),
+            Mat4::from_scale(glam::Vec3::new(1.0e-39, 1.0e20, 1.0e20)),
             Material::default(),
         ));
         assert!(scene.validate().is_err());

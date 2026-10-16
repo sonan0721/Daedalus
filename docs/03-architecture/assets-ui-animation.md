@@ -10,6 +10,8 @@
 
 개별 파일만 감시하지 않고 의존성을 추적한다. 재질·texture·skeleton·shader가 바뀌면 영향받는 asset generation을 새로 준비한다. 새 자원이 준비되기 전에 이전 자원을 파괴하지 않는다. 오류 시 마지막 정상 자원과 진단을 유지하는 안이다.
 
+실제 project 기반과 다음 P03 구현을 위한 포맷·resolver·IR·증분 cache·last-good·residency 상세는 [에셋 import/cook 계약](asset-import-cook-and-residency.md)에 둔다. 공식 조사와 제안이며 일반 importer가 현재 구현된 것은 아니다.
+
 ## 공개 에셋 사용
 
 사용자는 공개 에셋 활용을 허용했다. 다만 공개 다운로드 가능 여부와 저장소에 재배포할 권리는 다를 수 있으므로 에셋별 원출처·작성자·라이선스·버전/hash·수정·재배포 범위를 manifest에 남긴다. 원본 엔진의 MIT OR Apache-2.0을 외부 에셋에 자동 적용하지 않는다.

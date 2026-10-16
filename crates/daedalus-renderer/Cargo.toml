@@ -14,8 +14,11 @@ test-fixtures = []
 
 [dependencies]
 bytemuck = { version = "=1.25.2", features = ["derive"] }
+daedalus-content = { path = "../daedalus-content" }
+daedalus-core = { path = "../daedalus-core" }
 glam = "=0.30.9"
 png = "=0.18.1"
+thiserror.workspace = true
 wgpu = { version = "=27.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "gles", "metal", "vulkan", "wgsl"] }
 winit = { version = "=0.30.12", optional = true }
 pollster = "=1.0.1"

@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::json;
 
 mod control;
+mod project;
 #[cfg(feature = "window")]
 mod view;
 
@@ -41,7 +42,8 @@ enum Commands {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=MAX_CLI_TICKS as i64))]
         ticks: u32,
     },
-    /// Keep one headless engine alive and exchange bounded JSON Lines requests over stdio.
+    /// Keep one bare headless engine alive and exchange bounded JSON Lines requests over stdio.
+    /// Project metadata requests are available from `project serve <directory>`.
     Serve,
     /// Print this binary's package version or machine-readable capabilities.
     Version {
@@ -54,7 +56,12 @@ enum Commands {
         #[command(subcommand)]
         command: SceneCommands,
     },
-    /// Capture the renderer's explicit material test fixture (requires `--features capture`).
+    /// Initialize, inspect, run, serve, or capture an external project.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
+    /// Capture the renderer's material test fixture (GPU-only diagnostic).
     #[cfg(feature = "capture")]
     Capture {
         #[arg(long, default_value = "capture.png")]
@@ -67,6 +74,41 @@ enum Commands {
     /// Open a native window over one live runtime session (requires `--features window`).
     #[cfg(feature = "window")]
     View(view::ViewArgs),
+}
+
+#[derive(Subcommand)]
+enum ProjectCommands {
+    /// Create an empty data-only project in a new external directory.
+    Init {
+        directory: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Load and validate a project using the shared content loader.
+    Validate { directory: PathBuf },
+    /// Inspect the project session's authored stable IDs and live entity state.
+    Inspect { directory: PathBuf },
+    /// Run an external project for an explicit bounded number of fixed ticks.
+    Run {
+        directory: PathBuf,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=MAX_CLI_TICKS as i64))]
+        ticks: u32,
+    },
+    /// Serve the project session through the bounded JSON Lines control protocol.
+    Serve { directory: PathBuf },
+    /// Render the external project's actual mesh and snapshot to PNG (requires `--features capture`).
+    #[cfg(feature = "capture")]
+    Capture {
+        directory: PathBuf,
+        #[arg(long, default_value = "capture.png")]
+        output: PathBuf,
+        #[arg(long, default_value_t = 640, value_parser = clap::value_parser!(u32).range(16..=4096))]
+        width: u32,
+        #[arg(long, default_value_t = 360, value_parser = clap::value_parser!(u32).range(16..=4096))]
+        height: u32,
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=MAX_CLI_TICKS as i64))]
+        ticks: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +213,33 @@ fn main() -> Result<(), Box<dyn Error>> {
                 control::ControlLimits::default(),
             )?;
         }
+        Commands::Project { command } => project::run(command)?,
+        #[cfg(feature = "capture")]
+        Commands::Capture {
+            output,
+            width,
+            height,
+        } => {
+            let renderer = daedalus_renderer::Renderer::new_offscreen_blocking()?;
+            let scene = daedalus_renderer::test_fixtures::metal_roughness_scene();
+            let artifact = renderer.render_png(
+                &scene,
+                &daedalus_renderer::CaptureOptions::new(width, height, &output),
+            )?;
+            print_json(&json!({
+                "fixture": "metal_roughness",
+                "path": artifact.path,
+                "width": artifact.width,
+                "height": artifact.height,
+                "rgba8_bytes": artifact.rgba8_bytes,
+                "object_count": scene.objects.len(),
+                "renderer": {
+                    "adapter_name": artifact.renderer.adapter_name,
+                    "backend": artifact.renderer.backend,
+                    "device_type": artifact.renderer.device_type,
+                },
+            }))?;
+        }
         Commands::Version { json: as_json } => {
             let capabilities = cli_capabilities();
             if as_json {
@@ -222,32 +291,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         #[cfg(feature = "window")]
         Commands::View(options) => view::run(options)?,
-        #[cfg(feature = "capture")]
-        Commands::Capture {
-            output,
-            width,
-            height,
-        } => {
-            let renderer = daedalus_renderer::Renderer::new_offscreen_blocking()?;
-            let scene = daedalus_renderer::test_fixtures::metal_roughness_scene();
-            let artifact = renderer.render_png(
-                &scene,
-                &daedalus_renderer::CaptureOptions::new(width, height, &output),
-            )?;
-            print_json(&json!({
-                "fixture": "metal_roughness",
-                "path": artifact.path,
-                "width": artifact.width,
-                "height": artifact.height,
-                "rgba8_bytes": artifact.rgba8_bytes,
-                "object_count": scene.objects.len(),
-                "renderer": {
-                    "adapter_name": artifact.renderer.adapter_name,
-                    "backend": artifact.renderer.backend,
-                    "device_type": artifact.renderer.device_type,
-                },
-            }))?;
-        }
     }
     Ok(())
 }
@@ -258,6 +301,7 @@ fn cli_capabilities() -> serde_json::Value {
         "serve": true,
         "scene_validate": true,
         "scene_patch": true,
+        "project": true,
         "capture": cfg!(feature = "capture"),
         "window": cfg!(feature = "window"),
         "renderer_window_compiled": cfg!(feature = "window"),
@@ -323,11 +367,10 @@ fn make_output(
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
     use daedalus_core::{Revision, Tick, Transform};
     use daedalus_world::{CommandOutcome, CommandSubmission, WorldCommand, WorldCommandKind};
 
-    use super::{Args, MAX_CLI_ENTITIES, cli_capabilities, run_engine_config};
+    use super::{MAX_CLI_ENTITIES, cli_capabilities, run_engine_config};
     use daedalus_runtime::{EngineBuilder, EngineConfig};
 
     #[test]
@@ -380,6 +423,8 @@ mod tests {
     #[cfg(feature = "window")]
     #[test]
     fn view_parser_accepts_bounded_configuration_and_rejects_out_of_range_work() {
+        use super::Args;
+        use clap::Parser;
         assert!(
             Args::try_parse_from([
                 "daedalus",

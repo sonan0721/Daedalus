@@ -33,6 +33,8 @@
 
 ## 첫 asset-only 호환성 규칙
 
+이 경계의 상세 field·revision/order·오류·index 한도·Rust API는 [P03.3b.1 호환성 계약](asset-replacement-compatibility.md)으로 먼저 동결했다. 아래 표의 초기 방향보다 상세 계약을 우선한다. 이 CPU 선행 구현의 완료가 뒤의 lease/commit/presentation/audio 계약을 동결하거나 구현한 뜻은 아니다.
+
 초기 activation은 보수적인 semantic 비교를 사용한다. 비교·정렬/해시는 off-actor에서 수행하고, actor commit은 검증된 identity·현재 generation·작은 handle 정보를 확인한다. fingerprint만으로 소유권·현재 state 검증을 대체하지 않는다.
 
 | 입력 변경 | 첫 경로의 방향 |
@@ -129,7 +131,7 @@ old bank/frame charge를 해제하려면 tracked voice 종료뿐 아니라 backe
 
 ## 구현 착수 전 동결 목록
 
-- [ ] semantic topology 비교의 정확한 허용 field·revision/order 규칙과 불일치 진단.
+- [x] semantic topology 비교의 정확한 허용 field·revision/order 규칙과 불일치 진단: P03.3b.1 상세 계약 동결. 구현/검증은 별도.
 - [ ] worker-private candidate handoff·CPU cleanup owner·lease/release·정지/실패 시 소유권.
 - [ ] headless/native/audio 조합의 consumer 등록·ready/commit/presentation handshake와 dependency 방향.
 - [ ] prepared CPU geometry/metadata·모든 retired backing의 aggregate 수치/회계와 observer 수명.

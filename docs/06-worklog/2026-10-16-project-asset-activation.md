@@ -10,7 +10,7 @@
 
 [PR14](https://github.com/sonan0721/Daedalus/pull/14)의 head `d766d0dc8abc1bd97b7f7d32ffdc38f86ebd9bff`, CI synthetic merge `ebc93efd8afefa40fec387f79f1602fc8c2f33c7`, 실제 main `275ea360fb53dde3713aca84910781a4c895a8e4`의 tree `8bac52ca92d2df237246a59d554a50a3e318717e`가 같았다. 다섯 CI/두 packaged50·local Rust298/Python61/Metal9/managed·debug/clean package CPU50/native60을 확인해 P03.3a만 인수했다. [준비 작업 기록](2026-10-16-project-asset-preparation.md)이 근거다.
 
-현재 branch는 `feat/project-asset-activation`이다. engine repository에 게임을 추가하지 않으며 D1→별도 D2→별도 D3의 전체 목표는 진행 중이다.
+초기 설계/cache branch `feat/project-asset-activation`은 PR15로 인수했다. 후속 구현 branch는 `feat/project-asset-generation`이며 기준 main은 `c2283cb686ff7eb5589d6e38f66d5e357993531e`다. engine repository에 게임을 추가하지 않으며 D1→별도 D2→별도 D3의 전체 목표는 진행 중이다.
 
 ## 확인한 구현 gap
 
@@ -35,3 +35,13 @@ Luna에게는 `.github/workflows/release.yml` 한 파일의 main push trigger �
 Luna의 read-only 리뷰는 source상 세 가지 선행 gap을 확인했다. runtime worker는 renderer에 의존하지 않아 renderer CPU prepare를 직접 맡길 수 없고, renderer 쪽 staging owner가 필요하다. service/port/CLI의 초기 project Arc가 남아 actor 교체만으로 첫 세대를 회수하지 못한다. worker의 active cooked bytes도 현재 startup 값으로 고정돼 commit/retire의 generation-wide 장부 갱신이 필요하다.
 
 move-only opaque project lease·single handoff slot·off-actor retirement owner를 후보로 제안받았다. candidate의 폐기 요청과 실제 backing release/charge 반환을 구분하고 retirement slot 포화의 pre-commit 처리를 동결해야 한다. 제안한 source getter·crate-private take API는 cross-crate visibility/Clone 노출 문제를 검토한 뒤 확정한다. prepared CPU128MiB/16MiB·audio aggregate256MiB/4MiB도 수치 제안이며 실행 검증/채택 완료가 아니다. actor/consumer handshake와 audio backing 리뷰는 진행 중이다.
+
+추가 renderer source 리뷰는 asset-only commit이 같은 Engine snapshot을 사용할 때의 순서 충돌을 확인했다. 현재 extract는 snapshot.sequence를 packet sequence로 복사하고 renderer transition은 다음 packet의 sequence가 엄격히 증가해야 한다. tick/transform을 유지한 채 asset generation만 바꾸려면 authority snapshot identity와 별도 presentation 순번을 명시하거나 동등한 엄격한 ordering 규칙을 설계해야 한다. generation 검사만 풀어 같은 snapshot을 다시 보내는 수정은 허용하지 않는다.
+
+PR15의 실제 cache restore·compile 구간·기존 packaged50·다섯 CI/main 동일 tree까지 확인했다. [개발 반복 기록](../04-plan/development-iteration-pipeline.md)에 exact identity와 raw log를 둔다. 새 main push 실행은 진행 중이며 activation code가 추가된 것으로 계산하지 않는다.
+
+## P03.3b.1 공통 비교기부터 구현
+
+소비자마다 중복 비교를 만들지 않도록 [호환성 상세 계약](../03-architecture/asset-replacement-compatibility.md)을 먼저 동결했다. manifest/asset metadata·entity/component 관계와 authored data는 보존하고, source payload/URI/hash·scene revision/배열 순서의 허용 범위를 명시했다. 큰 JSON을 복사하지 않는4MiB logical reference-index 상한과 deterministic bounded 오류를 둔다. 아직 구현 통과로 체크하지 않는다.
+
+Luna project 담당에게 content 새 module·lib re-export·필요한 기존 project test 최소 변경만 배정했다. 단독 Cargo/shared-target lease와 고유 `p03-compatibility-*-luna-attemptNN.log`를 사용해 focused→content 전체→strict Clippy→content Wasm/fmt를 검사한다. 다른 Luna 두 명은 additive consuming native owner/retirement, 실제 audio Frame backing 회수 seam을 각각 read-only로 조사한다. renderer/runtime/audio의 dependent source는 API를 동결하기 전 수정하지 않는다.

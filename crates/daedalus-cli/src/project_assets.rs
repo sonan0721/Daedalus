@@ -87,6 +87,33 @@ pub(super) fn packet_resource_stats_json(stats: &daedalus_renderer::PacketResour
     })
 }
 
+/// Serializes the immutable camera/projection pair that a capture or window actually used.
+#[cfg(any(feature = "capture", feature = "window"))]
+pub(super) fn render_view_json(view: &daedalus_renderer::RenderView) -> Value {
+    let projection = match view.projection() {
+        daedalus_renderer::RenderProjection::Perspective => json!({"kind":"perspective"}),
+        daedalus_renderer::RenderProjection::Orthographic { vertical_size } => {
+            json!({"kind":"orthographic","vertical_size":vertical_size})
+        }
+    };
+    json!({
+        "camera":camera_json(view.camera()),
+        "projection":projection,
+    })
+}
+
+#[cfg(any(feature = "capture", feature = "window"))]
+pub(super) fn camera_json(camera: &daedalus_renderer::Camera) -> Value {
+    json!({
+        "position":camera.position,
+        "target":camera.target,
+        "up":camera.up,
+        "vertical_fov_radians":camera.vertical_fov_radians,
+        "near":camera.near,
+        "far":camera.far,
+    })
+}
+
 /// The shared asset-aware loader seam used by lifecycle commands and `project cook`.
 /// Callers choose the cache lifetime explicitly; all project parsing/importing stays in content.
 pub(super) fn load_project_with_cache(

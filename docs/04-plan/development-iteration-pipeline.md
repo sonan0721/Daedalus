@@ -16,7 +16,7 @@
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
 | DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1 CPU/실제 원본·clean package/PR10 CI 인수. warm decode/leaf cook0, read/parse는 남음. 실제 consumer/reload 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
-| DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | legacy project와 additive asset-aware CPU loader의 공통 resolver/catalog 검증. 실제 model/sprite/audio 실행·실행 중 patch 후속 |
+| DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model 실제 소비 인수. sprite 통합 검증 중, audio·실행 중 patch 후속 |
 | DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
 | DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh handle·native GPU cache·dirty instance/material 검증, cook/reload·texture/skin 후속 |
@@ -89,7 +89,7 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 
 ## P03.2a의 반복 제거와 로컬 근거
 
-[모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)은 다음 중복과 실패를 source 감사로 확인해 구현 대상으로 고정했다. 공통 loader·packet·stats 변환·cache pin 해제·기존 opt-in smoke로 구현했고 로컬 CPU/GPU/native를 검증했다. clean package/extracted 검사도 통과했고 PR CI는 대기다.
+[모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)은 다음 중복과 실패를 source 감사로 확인해 구현 대상으로 고정했다. 공통 loader·packet·stats 변환·cache pin 해제·기존 opt-in smoke로 구현했고 로컬 CPU/GPU/native를 검증했다. clean package/extracted 검사와 PR11 다섯 CI/main 동일 tree까지 인수했다.
 
 | 현재 반복 또는 장애 | 이번 공통 책임 | 효과를 확인할 근거 |
 | --- | --- | --- |
@@ -104,3 +104,15 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 실제 반복 GPU 검사에서 같은 packet 재표시는 geometry/texture/sampler/pair/instance/material 증가0이었다. authority transform만 변경한10draw는 instance write10회만 증가했고 geometry/texture/material과 장치 resource 생성은 증가하지 않았다. 공개 Cube 두 entity도 geometry upload1회/1296 bytes와 texture upload1회/1,398,100 bytes를 공유했고12초 native redraw1409회 동안 geometry/texture/instance/material upload 수가 더 증가하지 않았다.
 
 같은 smoke helper의 `--view --models`는24건/11.015236초로 통과했다. viewer ready 뒤 별도 capture를 실행하고 viewer 생존 확인→authority set/step/query→실제 presented packet 대조까지 자동화해 cache 잠금 회귀를 검사한다. GPU frame capture와 별도 batch process의 의미를 섞지 않는다. 기존 실패/timeout/cleanup 회귀를 포함한 Python54건도 통과했다. 이 값은 현재 검사 실행의 관찰이며 이전 작업 대비 개발 시간 개선율은 측정하지 않았다. 실제 source/binary와 command는 [작업 기록](../06-worklog/2026-10-16-model-texture-runtime.md)에 둔다.
+
+## P03.2b 착수 시 반복 제거 계약
+
+[스프라이트·정사영 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)은 model의 texture/cache/submission 경로와 기존 authority native helper를 재사용한다. slot당16-byte UV row와88-byte unit quad1개를 선택해 region마다 geometry key/upload/entry를 늘리지 않는다. 실제표시 RenderView/PacketViewSubmission은 창·capture·후속 AI 관찰이 camera/projection을 다시 추측하는 중복을 줄인다. 입력 없는 local override가 authority camera를 가리는 source 문제도 함께 다룬다. 이는 구현 대상으로 고정한 내용이고 actual sprite counter/제작시간 효과는 아직 검증하지 않았다.
+
+구현 리뷰에서 정적인 binding map/StableId 복사와 painter sort를 tick마다 반복하는 경로를 찾아, 준비된 generation의 Arc backing을 extract/validation이 공유하도록 바꿨다. 공통 camera JSON 변환과 model/sprite batch-capture 검증 helper도 각각 한곳에서 사용한다. GPU pixel reference와 실제 native smoke는 목적이 달라 하나로 대체하지 않는다. 첫 workspace CPU259건은 통과했으며 최종 GPU/native/package 결과는 후속이다.
+
+PNG alpha 감사는 같은 readback/row-unpadding/encoder에 private 표현 policy와 in-place 변환을 추가하도록 계약했다. 별도 sprite PNG writer·추가 RGBA 배열·GPU intermediate를 만들지 않는다. 불변 데이터 공유의 retained CPU metadata도 별도8 MiB 사전 한도로 제한한다. 공통화 때문에 수명/메모리 비용을 숨기거나 잘못된 결과를 재사용하지 않도록 해당 오류·GPU regression을 추가한다. 새 native `--sprites` opt-in은 기존 임시 project/권한 제어/timeout/cleanup을 사용하며, 코드 공통화가 확인됐다는 이유만으로 개발 시간 개선율을 만들지 않는다.
+
+실제 후속 결과는 CPU264·Metal9·debug 통합 smoke39/14.288578초와 clean archive의 같은 smoke39/14.522841초다. 공개 원본의 네 sprite도 unit geometry1개/88 bytes·image1회/135,168 bytes를 공유했고8초 native939 present 동안 추가 geometry/texture/instance/material 업로드가 없었다. alpha255는 기존 byte를 보존하고 부분 alpha만 공통 backing 안에서 변환한다. 서로 다른 범위·profile의 단1회 관찰로 speedup을 주장하지 않는다. 실제 실패·수정·source/binary identity는 [작업 기록](../06-worklog/2026-10-16-sprite-runtime.md)을 따른다.
+
+이번 smoke의 float64 literal과 f32 wire 기대값 불일치도 DEV02의 후속 conformance 대상으로 기록한다. SDK/schema 생성 시 float의 실제 표현·정밀도와 JSON round-trip을 명시해 각 adapter가 잘못된 exact 비교를 반복하지 않도록 한다. 현재는 작은 fixture 기대값을 고쳤으며 범용 SDK 생성기를 구현한 것은 아니다.

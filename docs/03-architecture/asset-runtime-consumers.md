@@ -1,6 +1,6 @@
 # P03.2 실제 model·texture·sprite·audio 소비
 
-상태: a 로컬 구현·검증 통과/PR 대기, b·c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
+상태: a 인수 통과, b 로컬/clean package 확인·최종 CI 대기, c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
 
 ## 목적과 선행 조건
 
@@ -29,7 +29,7 @@ AudioService는 이미 PCM·voice·offline/native backend를 가진다. importer
 schema 1의 generic component envelope 안에 additive component를 정의한다. 기존 loader의 지원 component 목록과 asset-aware loader의 목록을 구분하고, 미지원 실행 경로는 위치 있는 Unsupported를 반환한다.
 
 - `daedalus.model_renderer`: 단일 model asset 참조. `asset_refs`와 `data.model`의 일치·중복·catalog kind를 검증한다. glTF scene 선택은 model import settings를 따른다. 첫 경로는 imported primitive material을 그대로 쓰고 entity-level material override를 받지 않는다.
-- `daedalus.sprite_renderer`: atlas asset와 stable region ID를 참조한다. image asset를 다시 이름으로 추측하거나 atlas source를 재파싱하지 않는다. tint/transform/layer의 정확한 JSON·기준 좌표는 P03.2b 착수 전 확정한다.
+- `daedalus.sprite_renderer`: atlas asset와 stable region ID를 참조한다. image asset를 다시 이름으로 추측하거나 atlas source를 재파싱하지 않는다. tint/transform/layer의 정확한 JSON·기준 좌표·정사영/actual view는 [P03.2b 상세 계약](sprite-runtime-and-orthographic-view.md)에 확정했다.
 - audio: 명시적 asset 참조와 play/stop 제어를 사용한다. load만으로 소리를 자동 재생하지 않는다. command·volume·loop·voice 조회·실패 의미는 P03.2c 착수 전 확정한다.
 
 새 binding은 private PreparedProject의 별도 validated collection/accessor로 제공하는 방향이다. PreparedEntity를 공개 필드 추가로 깨거나 model 참조를 legacy mesh ID에 숨기지 않는다. 같은 entity에 서로 충돌하는 renderer component를 달았을 때의 오류와 source/JSON path를 명시한다. 현재 root entity 제약과 glTF 내부 node hierarchy는 다른 계층이며, model node 지원을 일반 scene hierarchy 지원으로 홍보하지 않는다.
@@ -71,3 +71,13 @@ project view와 batch capture는 같은 prepared resources/packet/shader를 사�
 CPU 검사는 selected roots·공유 mesh의 여러 node·여러 primitive·matrix·stable draw ID·asset-kind 오류·합산 한도·수명을 다룬다. GPU 검사는 실제 texture/UV/sRGB·sampler·mip·정상 픽셀과 resource upload 수를 확인한다. 2D/audio는 각각의 실제 출력 증거를 별도로 남긴다. 원본 provenance는 [기록](../02-research/asset-validation-provenance.md)을 재사용하고 테스트에 외부 다운로드를 추가하지 않는다.
 
 기존 `scripts/smoke_project.py`의 process/timeout/hash/cleanup을 확장하는 것을 우선한다. GPU/device가 필요한 mode는 opt-in으로 두고 CPU/package 기본 의미를 몰래 바꾸지 않는다. 구현 전 각 하위 계약에서 JSON schema·public API·한도·파일 소유자·명령·성공/실패 기준을 확정한다. 이 초안만으로 착수 조건이나 P03.2 체크박스를 통과시키지 않는다.
+
+## P03.2c 착수 전 source 감사
+
+2026-10-16 Luna xhigh read-only 감사로 imported AudioAsset은 immutable `Arc<[f32]>`, 현재 PcmClip은 `Arc<[kira::Frame]>`를 보관함을 확인했다. 현재 `from_interleaved`는 Vec를 받아 stereo frame으로 변환하므로 borrowed-slice 진입점을 추가하면 임시 `samples.to_vec()` 한 번을 피할 수 있다. mono→stereo와 Frame layout 변환 자체는 필요하며 Vec→Arc 최종화의 임시 peak도 예산에 포함해야 한다. 재생 voice는 StaticSoundData의 Frame Arc를 공유하므로 전체 PCM을 voice마다 다시 변환할 필요가 없다. 같은 AudioAsset cook key의 alias는 한 번 변환하는 bounded project bank 후보로 둔다. 현재 project bank/adapter는 구현하지 않았다.
+
+공통 SessionControlService actor가 project/catalog와 같은 권한·owned ticket을 갖고 있으므로 별도 CLI WAV player보다 이 actor의 명시적 opt-in audio sidecar를 검토한다. 기존 SessionControlConfig literal과 device-free 기본 경로를 보존해야 한다. stop은 Kira command 요청이고 mixer가 종료를 관찰한 것과 다르다. 현재 service에 per-voice 상태 조회가 없어 stale handle·stop requested·actual ended·회수와 유한 wire ID 수명은 상세 계약에서 확정해야 한다. CPU 검증은 실제 imported WAV→bank→실제 offline Kira PCM을 사용하고 native device 출력은 별도 opt-in이다. 이 감사만으로 audio consumer나 headless/SDK 연결을 통과시키지 않는다.
+
+추가 read-only 감사에서 protocol2 request ID의 중복 방지는 ticket 보유 중에만 유효하고 ack/forget 뒤 mapping이 지워짐을 확인했다. 현재 authority replay는 SetTransform의 CommandId에만 있다. 따라서 재시도하는 Play를 request correlation만으로 idempotent라 부르면 안 된다. 상세 계약에서 audio mutation의 replay identity/유한 보유/expiry와 permission을 정한 뒤 구현한다. actor의 offline PCM 진행도 명시적 audio 연산으로 설계해야 하며 현재 Engine Manual Step이 audio까지 진행한다고 간주하지 않는다. 결과 ticket/JSON에 긴 PCM 배열을 싣지 않고 bounded state/요약과 실제 내부 PCM 검사를 구분한다.
+
+native Kira/CPAL은 stream 생성과 finite voice의 실제 mixer 종료 관찰로 callback 진행을 확인할 수 있다. 현재 API에는 callback counter/loopback capture가 없어 사람이 들은 소리나 출력 장치의 실제 음압을 자동 검증했다고 보고하지 않는다. 기본 startup은 계속 장치가 필요 없어야 하며 선택한 native backend의 실패를 offline 성공으로 바꾸지 않는다. 현재 CLI package는 window feature만 빌드하므로 audio를 추가할 때 feature/manifest/notices와 Linux ALSA build/runtime 의존성을 명시적으로 점검한다. 이 항목들은 P03.2c 선행 조사이며 b 인수 전에 audio 구현을 착수하지 않는다.

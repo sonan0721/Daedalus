@@ -53,6 +53,20 @@ struct PacketModelVertexInput {
     @location(10) uv0: vec2<f32>,
 };
 
+struct SpriteVertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) local_uv: vec2<f32>,
+    @location(2) model_0: vec4<f32>,
+    @location(3) model_1: vec4<f32>,
+    @location(4) model_2: vec4<f32>,
+    @location(5) model_3: vec4<f32>,
+    @location(6) normal_0: vec4<f32>,
+    @location(7) normal_1: vec4<f32>,
+    @location(8) normal_2: vec4<f32>,
+    @location(9) material_index: u32,
+    @location(10) uv_rect: vec4<f32>,
+};
+
 struct MeshVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -66,6 +80,12 @@ struct PacketModelVertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) @interpolate(flat) material_index: u32,
     @location(3) uv0: vec2<f32>,
+};
+
+struct SpriteVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) material_index: u32,
 };
 
 @vertex
@@ -102,6 +122,17 @@ fn vs_packet_model(input: PacketModelVertexInput) -> PacketModelVertexOutput {
     output.clip_position = globals.view_projection * world_position;
     output.material_index = input.material_index;
     output.uv0 = input.uv0;
+    return output;
+}
+
+@vertex
+fn vs_sprite(input: SpriteVertexInput) -> SpriteVertexOutput {
+    var output: SpriteVertexOutput;
+    let model = mat4x4<f32>(input.model_0, input.model_1, input.model_2, input.model_3);
+    let world_position = model * vec4<f32>(input.position, 0.0, 1.0);
+    output.clip_position = globals.view_projection * world_position;
+    output.uv = input.uv_rect.xy + input.local_uv * input.uv_rect.zw;
+    output.material_index = input.material_index;
     return output;
 }
 
@@ -200,4 +231,15 @@ fn fs_model(input: PacketModelVertexOutput) -> @location(0) vec4<f32> {
     let linear_color = tone_map_aces(direct + ambient + material.emissive.rgb);
     let output_color = select(linear_color, linear_to_srgb(linear_color), globals.ambient_and_manual_srgb.w > 0.5);
     return vec4<f32>(output_color, 1.0);
+}
+
+@fragment
+fn fs_sprite(input: SpriteVertexOutput) -> @location(0) vec4<f32> {
+    let material = materials.values[input.material_index];
+    let sample_color = textureSample(
+        model_base_color_texture,
+        model_base_color_sampler,
+        input.uv
+    );
+    return sample_color * material.base_color;
 }

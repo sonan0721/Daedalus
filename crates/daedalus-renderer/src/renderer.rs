@@ -15,6 +15,86 @@ use crate::{PacketRenderError, PacketRenderer, PacketRendererLimits, RenderScene
 const PNG_ROW_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 const MAP_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClearAlphaPolicy {
+    Preserve,
+    Opaque,
+    Premultiplied,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PngAlphaRepresentation {
+    Straight,
+    SrgbPremultiplied,
+}
+
+pub(crate) fn target_clear_color(
+    source: [f32; 4],
+    manual_srgb: bool,
+    alpha_policy: ClearAlphaPolicy,
+) -> wgpu::Color {
+    let mut target = source;
+    match alpha_policy {
+        ClearAlphaPolicy::Preserve => {}
+        ClearAlphaPolicy::Opaque => target[3] = 1.0,
+        ClearAlphaPolicy::Premultiplied => {
+            target[0] *= target[3];
+            target[1] *= target[3];
+            target[2] *= target[3];
+        }
+    }
+    if manual_srgb {
+        for channel in &mut target[..3] {
+            *channel = linear_to_srgb(*channel);
+        }
+    }
+    wgpu::Color {
+        r: f64::from(target[0]),
+        g: f64::from(target[1]),
+        b: f64::from(target[2]),
+        a: f64::from(target[3]),
+    }
+}
+
+fn linear_to_srgb(linear: f32) -> f32 {
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn srgb_to_linear(encoded: f32) -> f32 {
+    if encoded <= 0.040_45 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn unpremultiply_srgb_rgba_in_place(rgba: &mut [u8]) {
+    debug_assert!(rgba.len().is_multiple_of(4));
+    for pixel in rgba.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha == 0 {
+            pixel[..3].fill(0);
+        } else if alpha != u8::MAX {
+            let alpha = f32::from(alpha) / f32::from(u8::MAX);
+            for channel in &mut pixel[..3] {
+                let premultiplied = f32::from(*channel) / f32::from(u8::MAX);
+                let straight = (srgb_to_linear(premultiplied) / alpha).clamp(0.0, 1.0);
+                *channel = (linear_to_srgb(straight) * f32::from(u8::MAX)).round() as u8;
+            }
+        }
+    }
+}
+
+fn apply_png_alpha_representation(rgba: &mut [u8], representation: PngAlphaRepresentation) {
+    if representation == PngAlphaRepresentation::SrgbPremultiplied {
+        unpremultiply_srgb_rgba_in_place(rgba);
+    }
+}
+
 #[derive(Debug)]
 pub enum RendererError {
     NoAdapter(String),
@@ -141,6 +221,7 @@ pub struct Renderer {
     pub(crate) mesh_pipeline: wgpu::RenderPipeline,
     pub(crate) packet_mesh_pipeline: wgpu::RenderPipeline,
     pub(crate) model_packet_mesh_pipeline: Option<wgpu::RenderPipeline>,
+    pub(crate) sprite_packet_pipeline: Option<wgpu::RenderPipeline>,
     pub(crate) model_textures_layout: Option<wgpu::BindGroupLayout>,
     pub(crate) overlay_pipeline: wgpu::RenderPipeline,
     pub(crate) overlay_globals: wgpu::Buffer,
@@ -194,59 +275,73 @@ impl Renderer {
         PacketRenderer::new(self, limits, asset_limits)
     }
 
-    pub(crate) fn ensure_model_packet_pipeline(&mut self) -> Result<(), PacketRenderError> {
-        if self.model_packet_mesh_pipeline.is_some() {
+    fn ensure_shared_texture_layout(&mut self) -> Result<(), PacketRenderError> {
+        if self.model_textures_layout.is_some() {
             return Ok(());
         }
         let limits = self.device.limits();
-        if limits.max_vertex_attributes < 11
-            || limits.max_vertex_buffer_array_stride < std::mem::size_of::<GpuModelVertex>() as u32
-            || limits.max_bind_groups < 3
+        if limits.max_bind_groups < 3
             || limits.max_sampled_textures_per_shader_stage < 1
             || limits.max_samplers_per_shader_stage < 1
         {
             return Err(PacketRenderError::DeviceLimit(format!(
-                "textured model packets require 11 vertex attributes, a {} byte vertex stride, three bind groups, one sampled texture and one sampler; device exposes {} attributes, {} stride, {} groups, {} textures and {} samplers",
-                std::mem::size_of::<GpuModelVertex>(),
-                limits.max_vertex_attributes,
-                limits.max_vertex_buffer_array_stride,
+                "textured packet draws require three bind groups, one sampled texture and one sampler; device exposes {} groups, {} textures and {} samplers",
                 limits.max_bind_groups,
                 limits.max_sampled_textures_per_shader_stage,
                 limits.max_samplers_per_shader_stage,
             )));
         }
-        let texture_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("Daedalus packet model texture layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
+        self.model_textures_layout = Some(self.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Daedalus packet shared texture layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                });
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            },
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn ensure_model_packet_pipeline(&mut self) -> Result<(), PacketRenderError> {
+        if self.model_packet_mesh_pipeline.is_some() {
+            return Ok(());
+        }
+        self.ensure_shared_texture_layout()?;
+        let limits = self.device.limits();
+        if limits.max_vertex_attributes < 11
+            || limits.max_vertex_buffer_array_stride < std::mem::size_of::<GpuModelVertex>() as u32
+        {
+            return Err(PacketRenderError::DeviceLimit(format!(
+                "textured model packets require 11 vertex attributes and a {} byte vertex stride; device exposes {} attributes and {} stride",
+                std::mem::size_of::<GpuModelVertex>(),
+                limits.max_vertex_attributes,
+                limits.max_vertex_buffer_array_stride,
+            )));
+        }
+        let texture_layout = self
+            .model_textures_layout
+            .as_ref()
+            .expect("shared texture layout created");
         let pipeline_layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Daedalus packet model pipeline layout"),
-                bind_group_layouts: &[
-                    &self.globals_layout,
-                    &self.materials_layout,
-                    &texture_layout,
-                ],
+                bind_group_layouts: &[&self.globals_layout, &self.materials_layout, texture_layout],
                 push_constant_ranges: &[],
             });
         let shader = self
@@ -364,7 +459,6 @@ impl Renderer {
                 multiview: None,
                 cache: None,
             });
-        self.model_textures_layout = Some(texture_layout);
         self.model_packet_mesh_pipeline = Some(pipeline);
         Ok(())
     }
@@ -375,6 +469,163 @@ impl Renderer {
 
     pub(crate) fn model_packet_mesh_pipeline(&self) -> Option<&wgpu::RenderPipeline> {
         self.model_packet_mesh_pipeline.as_ref()
+    }
+
+    pub(crate) fn ensure_sprite_packet_pipeline(&mut self) -> Result<(), PacketRenderError> {
+        if self.sprite_packet_pipeline.is_some() {
+            return Ok(());
+        }
+        self.ensure_shared_texture_layout()?;
+        let texture_layout = self
+            .model_textures_layout
+            .as_ref()
+            .expect("shared texture layout was created with model packet pipeline");
+        let limits = self.device.limits();
+        if limits.max_vertex_attributes < 11
+            || limits.max_vertex_buffer_array_stride < 128
+            || limits.max_bind_groups < 3
+        {
+            return Err(PacketRenderError::DeviceLimit(
+                "sprite packets require 11 vertex attributes, a 128-byte instance stride and three bind groups".into(),
+            ));
+        }
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Daedalus sprite packet pipeline layout"),
+                bind_group_layouts: &[&self.globals_layout, &self.materials_layout, texture_layout],
+                push_constant_ranges: &[],
+            });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Daedalus sprite packet shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Daedalus sprite packet pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_sprite"),
+                    compilation_options: Default::default(),
+                    buffers: &[
+                        wgpu::VertexBufferLayout {
+                            array_stride: 16,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 0,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 8,
+                                    shader_location: 1,
+                                },
+                            ],
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: 128,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 0,
+                                    shader_location: 2,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 16,
+                                    shader_location: 3,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 32,
+                                    shader_location: 4,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 48,
+                                    shader_location: 5,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 64,
+                                    shader_location: 6,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 80,
+                                    shader_location: 7,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 96,
+                                    shader_location: 8,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Uint32,
+                                    offset: 112,
+                                    shader_location: 9,
+                                },
+                            ],
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: 16,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &[wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 0,
+                                shader_location: 10,
+                            }],
+                        },
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_sprite"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        self.sprite_packet_pipeline = Some(pipeline);
+        Ok(())
+    }
+
+    pub(crate) fn sprite_packet_pipeline(&self) -> Option<&wgpu::RenderPipeline> {
+        self.sprite_packet_pipeline.as_ref()
     }
 
     pub(crate) async fn from_adapter(
@@ -678,6 +929,7 @@ impl Renderer {
             mesh_pipeline,
             packet_mesh_pipeline,
             model_packet_mesh_pipeline: None,
+            sprite_packet_pipeline: None,
             model_textures_layout: None,
             overlay_pipeline,
             overlay_globals,
@@ -732,6 +984,7 @@ impl Renderer {
                 scene,
                 prepared: &prepared,
                 loading_elapsed: None,
+                clear_alpha_policy: ClearAlphaPolicy::Preserve,
             },
         );
 
@@ -740,6 +993,7 @@ impl Renderer {
             encoder,
             options,
             "Daedalus capture readback buffer",
+            PngAlphaRepresentation::Straight,
         )
     }
 
@@ -753,6 +1007,7 @@ impl Renderer {
         mut encoder: wgpu::CommandEncoder,
         options: &CaptureOptions,
         readback_label: &'static str,
+        alpha_representation: PngAlphaRepresentation,
     ) -> Result<CaptureArtifact, RendererError> {
         self.validate_dimensions(options.width, options.height)?;
         let unpadded_bytes_per_row = options
@@ -823,6 +1078,7 @@ impl Renderer {
         }
         drop(mapped);
         readback.unmap();
+        apply_png_alpha_representation(&mut rgba, alpha_representation);
         write_png(&options.output, options.width, options.height, &rgba)?;
         Ok(CaptureArtifact {
             path: options.output.clone(),
@@ -875,6 +1131,7 @@ impl Renderer {
                 scene,
                 prepared: &prepared,
                 loading_elapsed,
+                clear_alpha_policy: ClearAlphaPolicy::Opaque,
             },
         );
         self.queue.submit([encoder.finish()]);
@@ -929,7 +1186,10 @@ impl Renderer {
             scene,
             prepared,
             loading_elapsed,
+            clear_alpha_policy,
         } = input;
+        let clear_color =
+            target_clear_color(scene.clear_color, self.manual_srgb, clear_alpha_policy);
         let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Daedalus scene depth buffer"),
             size: wgpu::Extent3d {
@@ -1006,12 +1266,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(scene.clear_color[0]),
-                            g: f64::from(scene.clear_color[1]),
-                            b: f64::from(scene.clear_color[2]),
-                            a: f64::from(scene.clear_color[3]),
-                        }),
+                        load: wgpu::LoadOp::Clear(clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1175,6 +1430,7 @@ struct RenderPassInput<'a> {
     scene: &'a RenderScene,
     prepared: &'a PreparedScene,
     loading_elapsed: Option<f32>,
+    clear_alpha_policy: ClearAlphaPolicy,
 }
 
 impl PreparedScene {
@@ -1283,12 +1539,146 @@ fn transform_vertex(vertex: &Vertex, transform: glam::Mat4, normal_matrix: Mat3)
 
 #[cfg(test)]
 mod tests {
-    use super::align_to;
+    use super::{
+        ClearAlphaPolicy, PngAlphaRepresentation, align_to, apply_png_alpha_representation,
+        linear_to_srgb, target_clear_color,
+    };
+
+    #[cfg(feature = "window")]
+    #[test]
+    #[ignore = "requires a native wgpu adapter; checks scene-view clear alpha by readback"]
+    fn scene_view_forces_clear_alpha_opaque_without_changing_rgb() {
+        use std::{fs::File, io::BufReader};
+
+        use crate::scene::RenderScene;
+
+        let renderer = super::Renderer::new_offscreen_blocking().unwrap();
+        let scene = RenderScene {
+            clear_color: [0.2, 0.4, 0.6, 0.25],
+            ..RenderScene::default()
+        };
+        let texture = renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Daedalus scene opaque clear-alpha target"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        renderer.render_to_view(&view, 8, 8, &scene, None).unwrap();
+
+        let output = std::env::temp_dir().join(format!(
+            "daedalus-scene-view-opaque-alpha-{}.png",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&output);
+        let options = super::CaptureOptions::new(8, 8, &output);
+        let encoder = renderer
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Daedalus scene opaque clear-alpha readback"),
+            });
+        renderer
+            .capture_texture_png(
+                &texture,
+                encoder,
+                &options,
+                "Daedalus scene opaque clear-alpha readback",
+                PngAlphaRepresentation::Straight,
+            )
+            .unwrap();
+
+        let decoder = png::Decoder::new(BufReader::new(File::open(&output).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().expect("small test image")];
+        let frame = reader.next_frame(&mut pixels).unwrap();
+        pixels.truncate(frame.buffer_size());
+        assert_eq!(pixels.len(), 8 * 8 * 4);
+        for pixel in pixels.chunks_exact(4) {
+            assert_eq!(pixel[3], u8::MAX);
+            assert!((pixel[0] as i16 - 124).abs() <= 1);
+            assert!((pixel[1] as i16 - 170).abs() <= 1);
+            assert!((pixel[2] as i16 - 203).abs() <= 1);
+        }
+        let _ = std::fs::remove_file(output);
+    }
 
     #[test]
     fn capture_rows_are_aligned_for_gpu_copy() {
         assert_eq!(align_to(256, 256), Some(256));
         assert_eq!(align_to(257, 256), Some(512));
         assert_eq!(align_to(u32::MAX, 256), None);
+    }
+
+    #[test]
+    fn packet_png_unpremultiplies_srgb_in_place_and_preserves_alpha_boundaries() {
+        let mut straight = [17, 31, 63, 0, 128, 64, 32, 255];
+        let original = straight;
+        apply_png_alpha_representation(&mut straight, PngAlphaRepresentation::Straight);
+        assert_eq!(straight, original);
+
+        let mut target = [
+            188, 0, 0, 128, 66, 66, 66, 64, 99, 80, 60, 0, 12, 34, 56, 255,
+        ];
+        apply_png_alpha_representation(&mut target, PngAlphaRepresentation::SrgbPremultiplied);
+        assert_eq!(&target[..4], &[255, 0, 0, 128]);
+        assert!(
+            target[4..7]
+                .iter()
+                .all(|channel| (126..=130).contains(channel))
+        );
+        assert_eq!(target[7], 64);
+        assert_eq!(&target[8..12], &[0, 0, 0, 0]);
+        assert_eq!(&target[12..], &[12, 34, 56, 255]);
+    }
+
+    #[test]
+    fn render_target_clear_policy_keeps_encoding_and_alpha_semantics_aligned() {
+        let source = [0.8, 0.4, 0.2, 0.25];
+        let preserved = target_clear_color(source, false, ClearAlphaPolicy::Preserve);
+        assert_eq!(
+            [
+                preserved.r as f32,
+                preserved.g as f32,
+                preserved.b as f32,
+                preserved.a as f32,
+            ],
+            source
+        );
+
+        let premultiplied = target_clear_color(source, false, ClearAlphaPolicy::Premultiplied);
+        assert_eq!(
+            [
+                premultiplied.r as f32,
+                premultiplied.g as f32,
+                premultiplied.b as f32,
+                premultiplied.a as f32,
+            ],
+            [0.2_f32, 0.1, 0.05, 0.25]
+        );
+
+        let opaque = target_clear_color(source, false, ClearAlphaPolicy::Opaque);
+        assert_eq!(
+            [
+                opaque.r as f32,
+                opaque.g as f32,
+                opaque.b as f32,
+                opaque.a as f32,
+            ],
+            [0.8_f32, 0.4, 0.2, 1.0]
+        );
+
+        let fallback = target_clear_color(source, true, ClearAlphaPolicy::Premultiplied);
+        assert!((fallback.r as f32 - linear_to_srgb(0.2)).abs() <= f32::EPSILON);
+        assert!((fallback.g as f32 - linear_to_srgb(0.1)).abs() <= f32::EPSILON);
+        assert!((fallback.b as f32 - linear_to_srgb(0.05)).abs() <= f32::EPSILON);
+        assert_eq!(fallback.a, 0.25);
     }
 }

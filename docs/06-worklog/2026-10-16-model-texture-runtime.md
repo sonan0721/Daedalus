@@ -1,6 +1,6 @@
 # P03.2a 모델·텍스처 실행 작업 기록
 
-상태: 로컬 통합 검증 통과·clean package/PR CI 대기·인수 미통과 · 2026-10-16
+상태: P03.2a 로컬/package/PR CI/main 인수 통과·상위 P03/D1 미완료 · 2026-10-16
 
 ## 이번 파일과 선행 문서를 만든 이유
 
@@ -123,3 +123,14 @@ renderer source를 `1d901f1`, CLI/자동화/검증 문서를 `96fe951ad66467ae01
 archive를 ignored `dist/qa-assets/p03-model-release-extracted/`에 별도 압축 해제하고 그 binary에서 `--assets`31건/0.620610초, `--view --models`24건/11.063168초를 통과했다. 두 report의 binary hash는 위 release hash와 같다. 보고서는 `p03-model-release-assets-smoke.json`, `p03-model-release-native-smoke.json`이고 build log는 `p03-model-local-package.log`다. 이 검사는 실제 archive의 모델 창/동시 capture/authority 및 기존 CPU importer 경로를 확인하며, C# SDK/.NET/game export를 archive에 포함했다는 뜻은 아니다.
 
 로컬 package 조건은 충족했다. 다음은 최종 PR 다섯 CI·두 packaged-assets step과 main 동일 tree 확인이다. P03.2a와 전체 제품 체크는 아직 열려 있다.
+
+## PR11과 P03.2a 하위 gate 종료
+
+[PR11](https://github.com/sonan0721/Daedalus/pull/11)의 최종 head는 `770bc7119cdb480667317d7b50183382a3576bd0`다. docs·rust·managed native integration·macOS arm64 package·Linux x64 package 다섯 job이 성공했고, 두 package의 `Verify packaged CLI asset cook smoke`도 각각 success였다. 공개 Release job은 tag가 없어 skipped이며 tag/Release를 생성하지 않았다.
+
+- [docs](https://github.com/sonan0721/Daedalus/actions/runs/38855184390)
+- [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38855184392)
+- [managed/native](https://github.com/sonan0721/Daedalus/actions/runs/38855184400)
+- [두 native package](https://github.com/sonan0721/Daedalus/actions/runs/38855184357)
+
+strict 보호 contexts3개와 squash-only 설정을 API로 다시 확인하고 검증 head를 `--match-head-commit`으로 고정해 병합했다. main `6d1711faf306bf644bf21235c86c9a31d7208fff`와 해당 head의 `git diff --exit-code`가0이었다. 이로써 static model/base-color texture 소비인 **P03.2a만** 인수한다. P03.2의 sprite/audio, source generation/reload, 실제 전체 제작 루프와 D1 엔진·D2 3D 게임·D3 2D 게임은 계속 열려 있다. 다음 작업은 sprite/2D 상세 계약을 먼저 정하고 Luna xhigh에 구현을 위임하는 것이다.

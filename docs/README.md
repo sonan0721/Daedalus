@@ -53,6 +53,7 @@
 | [에셋 import·cook·resource](03-architecture/asset-import-cook-and-residency.md) | 공식 포맷 조사와 모델/PNG/sprite/WAV·증분 cache·generation·장치 자원 수명의 상세 계약 |
 | [공통 에셋 import 구현](03-architecture/asset-import-foundation.md) | 네 CPU 포맷·불변 IR·native/byte resolver·유한 cache·CLI의 실제 구현/검증 계약 |
 | [에셋 실제 실행 소비](03-architecture/asset-runtime-consumers.md) | 다음 model/texture·sprite·audio 연결의 공통 packet·authority·자원 공유·검증 초안 |
+| [스프라이트·정사영 계약](03-architecture/sprite-runtime-and-orthographic-view.md) | P03.2b의 실제 atlas/alpha·공통 unit quad·authority camera·실제 표시 view와 반복 검증 경계 |
 | [모델·텍스처 실행 계약](03-architecture/model-texture-runtime.md) | P03.2a의 실제 project binding·공통 창/capture·cache pin 해제·GPU 한도/색/수명·회귀 기준 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |
@@ -93,7 +94,8 @@
 | [Native live session 검증](06-worklog/2026-10-16-native-live-session.md) | 실제 창·ECS·background terrain 통합과 입력·종료·파이프라인 검증 근거 |
 | [엔진 제품 준비도 감사](06-worklog/2026-10-16-product-readiness-audit.md) | 기반 부품과 실제 제작 기능의 차이·미완료·첫 의존성 기록 |
 | [공통 에셋 import 작업 기록](06-worklog/2026-10-16-asset-import.md) | P03.1의 API 분담·실제 공개 자료 확인·검증 상태를 추적 |
-| [모델·텍스처 실행 작업 기록](06-worklog/2026-10-16-model-texture-runtime.md) | P03.2a의 사전 계약·소유권·반복 경로 공통화·미통과 검증을 추적 |
+| [모델·텍스처 실행 작업 기록](06-worklog/2026-10-16-model-texture-runtime.md) | P03.2a의 사전 계약·소유권·공통화·로컬/package/PR11 인수 근거를 추적 |
+| [스프라이트 실행 작업 기록](06-worklog/2026-10-16-sprite-runtime.md) | P03.2b의 source/API 감사·반복 제거 선택·Luna 분담과 후속 실측을 구분 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

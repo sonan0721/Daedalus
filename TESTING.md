@@ -38,7 +38,7 @@ cargo test -p daedalus-runtime session_primitives::tests --locked
 cargo test -p daedalus-world --lib --locked
 ```
 
-The latest local all-feature coordinator run passes 158 CPU tests with two hardware tests ignored by default. Service tests cover real authority admission versus application, multiple clients, wrong-session/stale revisions, bounded pages, reserved Step capacity under saturation, reader-held result/frame lifetimes, duplicate replay and eviction, nonwaiting contention, timeouts, shutdown, and injected actor failures. Core retention also counts an independently retained entity-array Arc or cloned snapshot value. Frame-cap-one progress and pin/release recovery use a separate producer budget; native service producer capacity must be 2–64. A controlled actor pause verifies that ACK and last-reader release free Step credit before actor bookkeeping cleanup. The first Linux PR run exposed that race; subsequent CI is recorded separately in the worklog. Unknown post-failure command outcomes are reported explicitly. This is a native Rust API; no new CLI/MCP endpoint or managed attach is implied. The legacy window shares mailbox/stop primitives but retains its old count-only result guard. See the [service contract](docs/03-architecture/session-control-service.md) for exact limits and remaining migration.
+The latest local all-feature coordinator run passes 187 CPU tests with three hardware tests ignored by default. Service tests cover real authority admission versus application, multiple clients, wrong-session/stale revisions, bounded pages, reserved Step capacity under saturation, reader-held result/frame lifetimes, duplicate replay and eviction, nonwaiting contention, timeouts, shutdown, and injected actor failures. Core retention also counts an independently retained entity-array Arc or cloned snapshot value. Frame-cap-one progress and pin/release recovery use a separate producer budget; native service producer capacity must be 2–64. A controlled actor pause verifies that ACK and last-reader release free Step credit before actor bookkeeping cleanup. The first Linux PR run exposed that race; subsequent CI is recorded separately in the worklog. Unknown post-failure command outcomes are reported explicitly. The native project viewer and protocol-2 adapter now use this service; MCP and managed attach are still pending. The legacy window shares mailbox/stop primitives but retains its old count-only result guard. See the [service contract](docs/03-architecture/session-control-service.md) for exact limits and remaining migration.
 
 ## Current CLI smoke
 
@@ -103,6 +103,16 @@ cargo run -p daedalus-cli --features capture -- capture --output /tmp/daedalus-c
 This captures the renderer's named material validation fixture, not a game or a general scene importer. The coordinator's recorded GPU adapter is Apple M3 Pro/Metal; no-adapter is an error.
 
 ## Real GPU smoke
+
+The external project viewer uses the same authority service as its optional protocol-2 adapter:
+
+```sh
+cargo test -p daedalus-cli --features window project_view_control::tests --locked
+cargo run -p daedalus-cli --features window -- project view /path/to/project --stdio-control --clock manual --report /tmp/project-view.json
+python3 scripts/smoke_project.py --cli target/debug/daedalus --view
+```
+
+The first command runs CPU protocol tests without opening a window. The last command requires an already-built window-enabled CLI, a real GPU, and a desktop. It reuses the default 18 CPU checks, then verifies a native manual-clock edit/Step/query against the report's actually presented packet and a separate graceful Close with stdin still open. The coordinator's 2026-10-16 run passed all 20 checks on Apple M3 Pro/Metal. It does not certify live capture, MCP, loading UI, blocked OS stdout, or the P02 product gate. Default smoke and package verification remain CPU-only. The [viewer contract](docs/03-architecture/project-view-control.md) describes string-encoded IDs, owned submit/poll/ack/forget tickets, bounded I/O, and best-effort Close receipts.
 
 The GPU test is ignored in the default suite so CPU CI does not silently depend on a graphics adapter. Run it explicitly:
 

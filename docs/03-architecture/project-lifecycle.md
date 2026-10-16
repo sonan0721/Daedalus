@@ -43,6 +43,8 @@ manifest/scene/asset 모두 프로젝트 root 기준 상대 경로로 처리한�
 
 ## runtime과 snapshot
 
+후속 P02.2는 source를 `Arc<PreparedProject>`로 공유하고 service startup에서 실제 tick-0 frame을 게시한다. `project view`와 protocol 2는 같은 actor를 쓰며 기존 protocol-1 `project serve`와 batch capture는 보존한다. 자세한 현재 구현·제한은 [project 실행 창](project-view-control.md)에 둔다. root mesh 형식·hierarchy/importer/reload의 미지원 범위를 이 연결만으로 확장하지 않는다.
+
 `ProjectSession::new(prepared, EngineConfig)`는 준비 내용을 재검증한 뒤 Engine을 만들고 entity를 실제 spawn한다. stable authored ID→session EntityHandle map을 보존한다. source scene revision과 authority entity revision을 혼용하지 않는다. command는 기존 WorldCommand/expected revision/apply tick 경로를 사용한다.
 
 공개 `engine()/engine_mut()`, `project()`, `entity_handle(stable_id)`, `entities()/report()` 경로를 제공하고 map/report에 현재 transform·revision을 포함한다. renderer는 같은 Engine이 게시한 RenderSnapshot만 사용한다. projection 때 session/handle 누락·다른 session·stale entity를 임의 identity로 바꾸지 않는다.

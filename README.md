@@ -33,9 +33,16 @@ The project manifest references a versioned scene. Current runnable content is r
 
 This is the first project foundation: hierarchy/prefabs, general model/texture/sprite import, attached gameplay modules, live project reload, same-window control/capture, saving, MCP, and game export remain unfinished. The existing `view` window still runs its named validation fixture. See the [project contract](docs/03-architecture/project-lifecycle.md) and [verification commands](TESTING.md).
 
-The native Rust library also provides a bounded `SessionControlService` with multiple attached clients, owned request results, Manual/Realtime clocks, and snapshots from one real project engine. Its [control contract](docs/03-architecture/session-control-service.md) is the shared basis for upcoming window/CLI/MCP adapters; those adapters are not yet connected to it.
+The native Rust library provides a bounded `SessionControlService` with multiple clients, owned request results, Manual/Realtime clocks, and snapshots from one real project engine. A window-enabled build opens the same project session for native viewing and optional protocol-2 JSONL control:
 
-The renderer's additive [packet API](docs/03-architecture/renderer-resource-reuse.md) shares immutable geometry, retains device-local buffers, and updates changed instance/material rows. Small native GPU tests verify reuse and pixel parity with the original capture path. The external project viewer/control adapter and broader rendering quality gates remain in progress.
+```sh
+cargo run -p daedalus-cli --features window -- project view /path/to/project
+cargo run -p daedalus-cli --features window -- project view /path/to/project --clock manual --stdio-control --report /tmp/daedalus-project-view.json
+```
+
+The [viewer contract](docs/03-architecture/project-view-control.md) describes tickets, explicit Step, bounded I/O, and shutdown. Camera controls work without a selected entity; `--controlled-entity <stable-id>` enables diagnostic arrow movement, and manual mode uses F10 for one tick. Protocol 1 remains available through `project serve`. Live image capture, MCP, and managed attach to this viewer are still pending.
+
+The renderer's additive [packet API](docs/03-architecture/renderer-resource-reuse.md) shares immutable geometry, retains device-local buffers, and updates changed instance/material rows. Small native GPU tests verify reuse and pixel parity with the original capture path. Broader rendering quality, live project reload, and complete P02/D1 acceptance remain open.
 
 ## Build a local CLI package
 

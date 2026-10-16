@@ -6,7 +6,7 @@
 
 AI edit→관찰/capture 루프와 지속 실행 창이 매번 같은 mesh를 변환/업로드하면 CPU 작업·GPU allocation·frame 비용이 함께 반복된다. Luna xhigh의 로컬 source 감사는 현재 `PreparedScene::from_scene`의 world-space vertex 변환/flatten, `record_scene`의 vertex/index/material/global/depth resource 생성, project projection의 entity별 mesh 복제를 확인했다. window와 offscreen은 이 경로를 쓴다. CPU mesh 변환 cache만으로 이 반복이 모두 해결되지는 않는다.
 
-이 문서는 [같은 session service](session-control-service.md)의 표시 경로와 [asset cook/residency](asset-import-cook-and-residency.md) 사이에서 CPU geometry와 장치 자원 수명을 구체화한다. 코드 채택/계측 전이며 새 renderer나 성능 개선을 이미 구현한 것으로 표시하지 않는다. 고급 재질·texture/skin·2D·post/VFX·P05 품질 gate를 축소하지 않는다.
+이 문서는 [같은 session service](session-control-service.md)의 표시 경로와 [asset cook/residency](asset-import-cook-and-residency.md) 사이에서 CPU geometry와 장치 자원 수명을 구체화한다. 먼저 구현 계약을 고정한 뒤 native library와 작은 GPU 계측을 추가했다. 실제 검증 범위는 하단과 worklog에 구분한다. 고급 재질·texture/skin·2D·post/VFX·P05 품질 gate를 축소하지 않는다.
 
 ## 소유와 additive API
 
@@ -18,9 +18,9 @@ project resource registry는 한 prepared generation에서 필요한 renderer me
 
 renderer는 core/content의 owned 자료만 의존하고 runtime crate에 의존하지 않는다. runtime/session snapshot→packet mapping은 presentation bridge가 맡는다. offscreen/window는 같은 packet prepare/encode를 사용하며 다른 device 사이에서는 CPU handle/key만 공유한다. GPU buffer를 다른 Renderer/device에 가져다 쓰지 않는다.
 
-## 다음 구현에 고정할 API 경계
+## 첫 구현의 API 경계
 
-Luna xhigh의 read-only API 제안을 바탕으로 다음 경계를 채택한다. 아직 이 API를 구현하거나 검사한 결과는 아니다.
+Luna xhigh의 read-only API 제안을 바탕으로 다음 경계를 채택·구현했다. native library 검사와 실제 외부 window 연결 검사를 구분한다.
 
 | API | 입력·소유·출력 |
 | --- | --- |
@@ -52,11 +52,13 @@ window 내부는 하나의 ApplicationHandler와 private legacy/packet source/ba
 
 outcome의 present 정보는 함수가 종료한 뒤의 근거다. 실행 중 실제 presented 상태/capture를 AI가 조회하는 bounded mailbox·readback API는 후속 P02.3 계약이며 이 함수만 추가해 live capture를 지원한다고 표시하지 않는다.
 
-## 첫 GPU layout 후보
+## 첫 GPU layout
 
 packet window는 같은 session의 sequence/tick/project generation 역행과 동일 generation의 source digest 변경을 거부한다. 같은 sequence 재전송은 같은 packet의 idempotent 재전송만 허용하며 충돌하는 내용/identity를 새 화면으로 채택하지 않는다. local camera는 packet identity를 고쳐 쓰지 않는 view override다. model 값과 determinant가 유한해도 inverse 결과가 overflow할 수 있으므로 normal matrix 결과의 finite 검증까지 새 candidate의 cache/slot 변경 전에 수행한다.
 
 geometry는 local-space position/normal indexed buffer로 보존한다. instance record는 model mat4, padded inverse-transpose mat3, material index와 padding으로 128 bytes다. normal은 nonuniform scale에서도 올바르게 변환하며 finite inverse 검증을 유지한다. CPU는 instance가 바뀔 때만 해당 record를 준비한다. vertex마다 world transform을 다시 계산하지 않는다.
+
+content/legacy가 허용하는 작은 invertible scale도 같은 의미로 받아들인다. 예를 들어 uniform scale 0.001의 determinant는 약 1e-9지만 정상 finite inverse가 있다. 임의 determinant epsilon으로 이를 singular라 거부하지 않으며 실제 0/nonfinite determinant와 nonfinite inverse를 검사한다. 같은 normal-transform 검증 규칙을 private helper로 재사용할 수 있다.
 
 첫 instance-step vertex layout은 mesh attribute 2개와 instance attribute 8개를 사용한다. material index는 명시적 attribute이며 `instance_index == material array index`라는 결합을 없앤다. 첫 구현은 mesh별 indexed draw와 안정적인 instance slot을 사용하고, draw batching/indirect/meshlet은 실제 부하를 본 뒤 추가한다.
 

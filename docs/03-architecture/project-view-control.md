@@ -1,6 +1,6 @@
 # 외부 project 실행 창과 JSONL protocol 2
 
-상태: P02.2a 구현 계약·미구현 · 2026-10-16
+상태: P02.2a native 창·protocol 2 연결 검증, process I/O 극단 사례 추가 검증 대기 · 2026-10-16
 
 ## 목적과 범위
 
@@ -24,6 +24,8 @@ window와 packet backend는 기존 ApplicationHandler의 event/input/resize/came
 
 ## Protocol 2 envelope와 결과
 
+최신 frame의 존재를 actor 생존 확인으로 사용하지 않는다. actor가 멈춘 뒤에도 마지막 frame은 남을 수 있다. client의 nonblocking stop/admission 상태로 coordinator가 종료를 감지하고 window를 실패로 마감한다. 예상한 local window 종료와 engine failure를 구분하며, 최종 shutdown termination이 정상 StopRequested가 아니면 report를 남겨도 CLI exit는 nonzero다. 데이터 queue가 차도 producer disconnect의 fatal 처리로 실패를 숨기지 않는다.
+
 `--stdio-control`에서만 stdout은 UTF-8 JSONL 응답이다. 요청은 `protocol: 2`, ASCII 비제어 문자 1~128 byte `request_id`, 명시적 operation을 가진다. 알 수 없는 version/field/operation·잘못된 target·비유한 숫자는 구조화한 오류다. tick/revision/session/client/sequence/command ID와 handle의 정수 필드는 decimal string으로 encode/decode해 JavaScript 정밀도를 잃지 않는다. offset/limit/count/크기는 고정 상한 내 JSON number다. native와 wire DTO를 검증하되 protocol 1의 DTO를 바꾸지 않는다.
 
 envelope는 `{"protocol":2,"request_id":"q1","request":{"op":"submit","operation":{"op":"get_transform","target":{"stable_id":"entity.hero"}}}}` 형태다. handle target은 `{"handle":{"session":"1","index":"0","generation":"1"}}`이며 실제 조회한 값만 사용한다. poll/ack/forget은 `request`에 `op`와 `ticket`을 넣는다. 응답은 protocol/request_id/ok와 result 또는 code/message/details 오류를 가지며 startup 안내·diagnostics를 stdout에 섞지 않는다. 최종 schema는 CLI 구현과 conformance 시험으로 대조한다.
@@ -40,6 +42,8 @@ envelope는 `{"protocol":2,"request_id":"q1","request":{"op":"submit","operation
 
 Close receipt는 queued/best-effort다. window 종료가 async stdout flush보다 빠르거나 stdout이 막히면 응답 line이 전달되기 전에 process가 끝날 수 있다. UI를 flush 대기로 붙잡지 않으며 실제 CloseRequested report와 정상 exit를 종료 확인으로 사용한다. 자동 검증도 close 응답 도착을 필수로 가정하지 않는다.
 
+첫 실제 realtime 창 시험에서 presentation queue가 차면 Close까지 QueueFull이 되는 경쟁을 확인했다. adapter는 Close를 하나의 bounded pending flag로 수락하고 새 submit을 거부한다. coordinator는 이 flag가 있으면 새 Present 생산을 멈추고 Close를 우선 try-send한다. 이미 찬 한 packet을 window가 drain하면 종료가 진행되며 protocol EOF/detach가 그 pending Close를 지우지 않는다. caller가 frame traffic과 경쟁하며 Close JSON을 반복 조립하지 않게 한다. window callback은 여전히 대기하지 않으며 native 결과/command queue의 capacity 실패를 숨겨 재시도하는 정책과 구분한다.
+
 target은 stable ID 또는 session/index/generation handle 중 정확히 하나다. command_id는 request_id와 별개이며 native replay/high-water 규칙을 그대로 적용한다. manual mutation은 AuthorityAccepted 후 Step이 있어야 적용되고 submit/poll이 Step을 숨겨 실행하지 않는다. Step은 reserved admission을 유지하며 realtime에서 거부한다. Busy는 finite retry가 가능하지만 QueueFull/ResultCapacity를 숨겨 반복하지 않는다.
 
 ticket token은 session/client/sequence를 포함하는 opaque string이며 이 coordinator의 book과 정확히 대조한다. 다른 client/session token은 거부한다. book은 native client 기본 최대 8개(일반 최대 7개+reserved Step 1개) 이내이며 일반 요청으로 Step 여유를 점유하지 않는다. ack/forget 때 receipt도 제거한다. retained submit request_id의 같은 payload 재전송은 같은 ticket을 반환하고 다른 payload는 collision 오류다. ack/forget 후 transport replay 보장은 끝나며 재실행 방지가 필요한 mutation은 명시 command_id를 사용한다. poll 등의 correlation ID를 무제한 ledger에 쌓지 않는다.
@@ -53,6 +57,8 @@ EOF·oversize·request/output queue 포화·broken stdout은 protocol만 detach�
 blocking reader/writer는 사용자 pipe가 닫히지 않으면 portable std API만으로 취소할 수 없다. 창 종료 시 두 thread를 join하지 않으며 service owner/Engine/packet/frame/result lease를 이들 thread에 넣지 않는다. thread는 bounded raw line/encoded response·I/O handle만 소유하고 CLI process return 때 종료된다. 이는 CLI process에 한정한 수명 계약이며 embedded library·서버의 cancellable transport로 재사용하지 않는다. actor/coordinator/presentation 등 엔진 worker는 함께 detached 처리하지 않는다. fully cancellable native transport는 후속 adapter다.
 
 ## 입력 경계
+
+packet 창 title은 camera/Escape처럼 실제 공통 조작만 안내하고 fixture 전용 R regeneration이나 내부 bridge 용어를 노출하지 않는다. 최종 report는 key/pointer/wheel/focus/resize event·카메라·bounded frame interval과 packet resource의 count/bytes·depth 재생성을 남겨 반복 physical QA 때 별도 임시 계측을 추가하지 않게 한다. counter는 실제 사건을 센 값이며 screenshot이나 OS event 전달 전체를 대신하지 않는다.
 
 WASDQE·pointer camera와 Escape/resize/focus는 공통 window 경로다. controlled entity가 없으면 camera-only이며 첫 entity를 임의 선택하지 않는다. 지정 ID가 없으면 startup 오류다. 첫 entity 조작은 arrow press별 작은 translation 명령을 정상 query→expected revision→SetTransform으로 보낸다. bounded observer가 press/release를 drop할 수 있어 held movement의 권한 상태로 사용하지 않는다. 누락·충돌·포화는 진단하고 continuous action system 지원이라 표시하지 않는다. UI callback에서 재시도 대기하지 않는다.
 

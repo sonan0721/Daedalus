@@ -504,20 +504,11 @@ impl RenderPacket {
 }
 
 fn inverse_transpose(transform: Mat4) -> Result<Mat3, PacketRenderError> {
-    let upper = Mat3::from_mat4(transform);
-    let determinant = upper.determinant();
-    if !determinant.is_finite() || determinant.abs() < 1.0e-8 {
-        return Err(PacketRenderError::InvalidPacket(
-            "instance transform has a singular normal matrix".into(),
-        ));
-    }
-    let normal = upper.inverse().transpose();
-    if !normal.is_finite() {
-        return Err(PacketRenderError::InvalidPacket(
-            "instance transform has a non-finite inverse-transpose normal matrix".into(),
-        ));
-    }
-    Ok(normal)
+    crate::scene::inverse_transpose_normal_matrix(transform).ok_or_else(|| {
+        PacketRenderError::InvalidPacket(
+            "instance transform must have a finite inverse-transpose normal matrix".into(),
+        )
+    })
 }
 
 fn valid_source_digest(digest: &str) -> bool {
@@ -984,6 +975,34 @@ mod tests {
         );
         assert_eq!(packet.instances()[1].transform.x_axis.x, 2.0);
         assert_eq!(packet.camera(), &override_camera);
+    }
+
+    #[test]
+    fn prepared_project_packet_accepts_tiny_scale_with_finite_inverse() {
+        let project = prepared_two_instances();
+        let session = SessionId::from_raw(19);
+        let bindings = project_bindings(&project, session);
+        let resources = ProjectRenderResources::prepare(
+            &project,
+            1,
+            session,
+            &bindings,
+            PacketRendererLimits::default(),
+        )
+        .unwrap();
+        let snapshot = project_snapshot(
+            &bindings,
+            &[
+                Transform {
+                    scale: [0.001; 3],
+                    ..Transform::IDENTITY
+                },
+                Transform::IDENTITY,
+            ],
+        );
+        let packet = resources.extract(&snapshot, None).unwrap();
+        let validation = packet.validate(PacketRendererLimits::default()).unwrap();
+        assert_eq!(validation.normal_matrices.len(), 2);
     }
 
     #[test]

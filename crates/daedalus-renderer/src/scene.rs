@@ -328,16 +328,7 @@ impl RenderScene {
                     "object transform must contain finite values".into(),
                 ));
             }
-            let linear = Mat3::from_mat4(object.transform);
-            let determinant = linear.determinant();
-            let inverse = linear.inverse();
-            if !determinant.is_finite()
-                || determinant == 0.0
-                || !inverse
-                    .to_cols_array()
-                    .iter()
-                    .all(|value| value.is_finite())
-            {
+            if inverse_transpose_normal_matrix(object.transform).is_none() {
                 return Err(RendererError::InvalidScene(
                     "object transform must have a finite inverse to transform mesh normals".into(),
                 ));
@@ -370,6 +361,25 @@ impl RenderScene {
         }
         Ok(())
     }
+}
+
+/// Returns the inverse-transpose of an object's linear transform if it is
+/// nonsingular and finite. Legacy and packet paths share this exact rule.
+pub(crate) fn inverse_transpose_normal_matrix(transform: Mat4) -> Option<Mat3> {
+    let linear = Mat3::from_mat4(transform);
+    let determinant = linear.determinant();
+    if !determinant.is_finite() || determinant == 0.0 {
+        return None;
+    }
+    let inverse = linear.inverse();
+    if !inverse
+        .to_cols_array()
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return None;
+    }
+    Some(inverse.transpose())
 }
 
 #[cfg(test)]

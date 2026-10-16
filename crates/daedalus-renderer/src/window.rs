@@ -748,9 +748,10 @@ impl WindowApp {
         } else {
             "Ready"
         };
+        let controls = window_controls_hint(self.packet.is_some());
         self.window_title = format!(
-            "{} | {tick_and_generation} · {loading} | WASD/QE + drag/wheel · arrows/R via bridge · Esc close",
-            self.options.title
+            "{} | {tick_and_generation} · {loading} | {controls}",
+            self.options.title,
         );
         if let Some(window) = &self.window {
             window.set_title(&self.window_title);
@@ -1408,6 +1409,14 @@ fn bounded_message(mut message: String) -> String {
     message
 }
 
+fn window_controls_hint(packet_mode: bool) -> &'static str {
+    if packet_mode {
+        "WASD/QE + drag/wheel · Esc close"
+    } else {
+        "WASD/QE + drag/wheel · Arrows move · R regenerate · Esc close"
+    }
+}
+
 fn is_camera_key(code: KeyCode) -> bool {
     matches!(
         code,
@@ -1445,8 +1454,21 @@ mod tests {
         FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, PacketTransition, PresentationMetadata,
         WindowApp, WindowInput, WindowOptions, apply_presentation, max_frames_reached,
         max_run_time_reached, presentation_disconnect_error, validate_options,
-        validate_packet_transition, validate_window_scene, window_input_channel,
+        validate_packet_transition, validate_window_scene, window_controls_hint,
+        window_input_channel,
     };
+
+    #[test]
+    fn control_hint_describes_only_controls_available_in_each_source_mode() {
+        assert_eq!(
+            window_controls_hint(true),
+            "WASD/QE + drag/wheel · Esc close"
+        );
+        assert_eq!(
+            window_controls_hint(false),
+            "WASD/QE + drag/wheel · Arrows move · R regenerate · Esc close"
+        );
+    }
 
     fn packet(tick: u64, sequence: u64, generation: u64, digest: &str) -> Arc<RenderPacket> {
         Arc::new(RenderPacket::new(

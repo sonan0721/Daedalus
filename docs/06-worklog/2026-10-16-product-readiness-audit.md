@@ -80,3 +80,9 @@ P01.1a~c의 좁은 기반만 체크했다. P01 전체·D1, 이후 별도 D2/D3�
 ignored artifact directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e4a172b015a5-clean-20261016T002407Z-a337222d37f449238d24e36df9585d31/`다. manifest의 `dirty`는 false, features는 `window`, binary SHA-256은 `e203bbaebed0836047b0844cf90e0e8ec6ca9efd307e05b5bb726f8a7a12ed1b`다. 원본 소스·SDK를 다시 찾아야 init이 동작하는 경로는 제거했고, 추출 검사는 외부 임시 directory에서 수행한다.
 
 같은 package staging executable로 외부 project를 513×289 Metal PNG로 출력하는 것도 통과했다(`dist/project-evidence/packaged-project.png`). 새 interactive GUI 입력을 다시 시험한 결과는 아니며, 기존 fixture 창의 실제 입력 근거와 구분한다. tag/public Release는 만들지 않았다. PR의 native Linux/macOS 결과는 확인 후 별도 기록한다.
+
+## PR #6 검증과 다음 미통과
+
+[PR #6](https://github.com/sonan0721/Daedalus/pull/6)은 head `9035efab9ed397e459ee23612f8fd83ebdd91636`의 필수 docs/rust/managed native integration 및 두 native package job이 모두 통과한 뒤 `cd2c2ec9ce20b0e3ee7a624f2f74dc529e8263d6`로 squash 병합됐다. docs 7초·managed 54초·Rust 1분34초, package macOS 2분36초·Linux 2분39초다. 서로 다른 역할/환경의 job 시간을 성능 향상률로 비교하지 않는다. 두 package job은 실제 추출 binary의 공통 project smoke까지 실행했고, publish는 PR이므로 skipped다.
+
+이 병합은 P01.1과 DEV06 하위 결과이며 P01/P02/P03 및 D1 전체를 통과시킨 것이 아니다. 다음 작업은 fixture window와 동기 project control 사이의 간극이다. 새 [session service 문서](../03-architecture/session-control-service.md)는 하나의 project actor·client별 결과·manual/realtime·visible/CLI/MCP·resource reuse·live capture·종료 계약을 먼저 정리하기 위해 만들었다. typed API와 legacy migration 방법을 Luna xhigh가 read-only로 구체화한 뒤 관련 구현을 시작한다.

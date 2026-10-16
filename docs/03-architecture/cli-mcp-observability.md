@@ -2,11 +2,13 @@
 
 상태: 전체 AI 제어 계약 초안 + 초기 CLI 일부 구현. MCP 미구현 · 2026-10-15
 
-현재 실제 CLI에는 bounded inspect/run/step, 지속 JSONL `serve`, version/capability 조회, scene validate/patch, 선택 feature의 실제 GPU fixture capture가 있다. 실행 명령은 루트 [TESTING](../../TESTING.md)과 [실행 통합 계약](runtime-control-and-presentation.md)을 따른다. 아래 전체 명령군 중 구현하지 않은 기능까지 지원한다고 해석하지 않는다. JSONL 로컬 제어는 MCP protocol 구현과 구분한다.
+현재 실제 CLI에는 bounded inspect/run/step, 지속 JSONL `serve`, version/capability 조회, scene validate/patch, 외부 data-only project init/validate/inspect/run/serve/capture와 선택 feature의 실제 GPU fixture capture가 있다. 실행 명령은 루트 [TESTING](../../TESTING.md)과 [실행 통합 계약](runtime-control-and-presentation.md)을 따른다. 아래 전체 명령군 중 구현하지 않은 기능까지 지원한다고 해석하지 않는다. JSONL 로컬 제어는 MCP protocol 구현과 구분한다.
 
 ## 공통 제어 서비스
 
 CLI와 MCP가 각각 ECS를 직접 만지는 별도 구현이 되지 않게, engine control service를 공통 경계로 둔다. 실행 창도 같은 상태·명령·진단 의미를 사용한다. UI·네트워크·저장과 일치하는 권한 command를 적용한다.
+
+외부 project의 첫 동기 실행 이후 generic actor·여러 attachment·manual/realtime·reliable outcome·live frame/capture를 연결하는 다음 세부 계약은 [session control service](session-control-service.md)에 둔다. 현재 visible/MCP/managed가 한 project service에 모두 attach한 구현은 아니다.
 
 도구는 코드·자산·API 버전·현재 상태를 먼저 관찰하고, 명령을 제출하고, request ID로 완료·실패를 확인한 뒤 이미지·수치·진단으로 검증한다. 문자열 로그를 읽는 것만으로 성공을 추정하지 않는다.
 

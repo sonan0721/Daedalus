@@ -18,6 +18,28 @@ project resource registry는 한 prepared generation에서 필요한 renderer me
 
 renderer는 core/content의 owned 자료만 의존하고 runtime crate에 의존하지 않는다. runtime/session snapshot→packet mapping은 presentation bridge가 맡는다. offscreen/window는 같은 packet prepare/encode를 사용하며 다른 device 사이에서는 CPU handle/key만 공유한다. GPU buffer를 다른 Renderer/device에 가져다 쓰지 않는다.
 
+## 다음 구현에 고정할 API 경계
+
+Luna xhigh의 read-only API 제안을 바탕으로 다음 경계를 채택한다. 아직 이 API를 구현하거나 검사한 결과는 아니다.
+
+| API | 입력·소유·출력 |
+| --- | --- |
+| `MeshHandle::new(asset_id, generation, Mesh, MeshResourceLimits)` | 소유한 CPU mesh를 검증·canonical payload hash 계산 후 private Arc data로 이동. 외부에서 임의 hash를 넣지 못함 |
+| `RenderInstanceId { entity: EntityHandle, primitive: u32 }` | session/index/generation과 primitive로 안정적 instance slot 식별 |
+| `RenderInstance` | ID·MeshHandle·Mat4 transform·scalar Material |
+| `RenderPacket` | session/tick/sequence·project generation/source digest·camera/light/ambient/clear·유한 instances |
+| `ProjectRenderResources::prepare(project, generation, expected_session, authored_handles, limits)` | source/binding/unique geometry를 한 번 검증·변환하고 불변 resource registry 생성 |
+| `ProjectRenderResources::extract(snapshot, camera_override)` | 같은 session/handle generation을 검사하고 snapshot transform의 작은 instance 목록 생성. mesh arrays 복제 없음 |
+| `Renderer::into_packet_renderer(limits)` | 기존 Renderer/device를 소비해 persistent cache를 소유하는 PacketRenderer로 전환 |
+| `PacketRenderer::render_packet_png(&mut self, packet, options)` | 같은 device/cache로 반복 offscreen 출력. live async capture를 뜻하지 않음 |
+| `PacketRenderer::resource_stats()` | 누적 upload/write/cache/retirement 계측 조회 |
+
+CPU source file hash를 사용할 수도 있지만 공개 Rust procedural mesh와 다음 voxel generation은 source file 없이 자원을 만든다. 그러므로 `MeshHandle::new`는 layout version·vertices의 canonical little-endian float bit patterns·indices를 자체 SHA-256으로 한 번 계산한다. `sha2 = "=0.10.9"`는 이미 content에서 lock된 package이며 renderer direct dependency 추가 시 lock package graph만 갱신하고 버전 해석은 바꾸지 않는다. parser source digest와 cooked geometry digest를 같은 값으로 표시하지 않는다. 생성 후 mutable vertex/index 접근을 제공하지 않는다.
+
+초기 설정은 preferred unique geometry 64 MiB·hard resident/retired total 128 MiB, cache entries 최대 256·instances 최대 16,384다. 단일 CPU mesh와 준비한 project unique geometry는 기존 64 MiB 상한을 유지한다. 한 packet의 expanded draw vertices 1,000,000·indices 3,000,000도 별도로 검사한다. instancing으로 unique memory가 줄었다고 draw workload 제한까지 없애지 않는다. tight configuration은 이 상한을 낮출 수 있고 0/모순/상향 초과는 실패다. device buffer/binding/vertex attribute 상한도 별도로 확인한다.
+
+기존 public `WindowMessage` variant 추가는 외부 exhaustive match를 깨뜨릴 수 있으므로 별도 packet message/entrypoint를 사용한다. window 내부 event·input·resize·overlay·종료 처리는 공통으로 유지한다. 기존 `WindowOutcome.final_scene`를 packet→대용량 scene 복사로 frame마다 채우지 않는다. 새 packet outcome과 legacy outcome의 종료 자료를 구분한다. 이 window 연결은 cache library 구현 후 public 서명을 고정하고 실제 project/JSONL adapter와 함께 검증한다.
+
 ## 첫 GPU layout 후보
 
 geometry는 local-space position/normal indexed buffer로 보존한다. instance record는 model mat4, padded inverse-transpose mat3, material index와 padding으로 128 bytes다. normal은 nonuniform scale에서도 올바르게 변환하며 finite inverse 검증을 유지한다. CPU는 instance가 바뀔 때만 해당 record를 준비한다. vertex마다 world transform을 다시 계산하지 않는다.

@@ -112,7 +112,9 @@ Manual set은 AuthorityAccepted까지만 기다린 기존 wire 응답을 유지�
 
 공통 frame은 session ID·tick·frame sequence·active project generation/source digest/revision과 `Arc<RenderSnapshot>`를 가진다. 한 fixture의 terrain 통계는 공통 필수 payload로 넣지 않는다. source metadata와 entity revision/state를 복사해 오래된 현재값으로 표시하지 않는다. inspect 결과의 읽은 tick과 presentation frame의 snapshot tick을 구분한다.
 
-frame의 값 자체에는 Clone을 제공하지 않고 바깥 Arc를 공유한다. 내부 snapshot의 `entities: Arc<[RenderEntitySnapshot]>`만 보존한 경우도 core producer의 generation 보존에 계수한다. core는 wrapper와 backing allocation의 weak reference를 함께 추적하고 둘 다 해제돼야 보존 기록을 제거한다. 같은 generation의 두 참조를 두 번 세지 않는다. service가 실제 사용하는 snapshot capacity는 `min(요청한 EngineConfig.snapshot_capacity, max_retained_frames)`로 제한해 내부 배열 참조만 남아도 service 한도를 우회하지 못하게 한다. 포화 시 새 추출/게시를 건너뛰며 authority tick·결과 처리는 계속된다.
+frame의 값 자체에는 Clone을 제공하지 않고 바깥 Arc를 공유한다. 내부 snapshot의 `entities: Arc<[RenderEntitySnapshot]>`만 보존한 경우도 core producer와 service frame generation의 보존에 각각 계수한다. core는 wrapper와 backing allocation의 weak reference를 함께 추적하고 둘 다 해제돼야 보존 기록을 제거한다. service mailbox도 내부 backing만 남은 consumer를 놓치지 않는 nonwaiting retention probe를 둔다. 같은 generation의 두 참조를 두 번 세지 않는다.
+
+producer의 snapshot cap과 consumer frame cap은 별도 예산이다. 마지막 정상 frame을 mailbox가 계속 보유하므로 snapshot cap을 frame cap에 단순히 맞춰 줄이면 cap 1에서 다음 게시가 영원히 막힐 수 있다. native service는 producer capacity 2~64를 요구하고 frame capacity는 1~64를 허용한다. publisher/current와 mailbox last-good의 내부 참조를 고려한 최소값이며 snapshot cap을 몰래 확대하지 않는다. 낮은 producer cap은 더 먼저 snapshot publication을 제한할 수 있다. 포화 시 새 추출/게시를 건너뛰며 authority tick·결과 처리는 계속된다. frame cap 1의 client 없는 반복 게시·backing만 보유한 포화·해제 후 회복을 모두 검증한다.
 
 service의 `EngineConfig.command_dedup_capacity`도 1~16,384 entries로 검증한다. service replay ledger와 world dedup cache는 별도 유한 cache다. 한쪽만 제한하고 다른 쪽에 무제한 설정을 전달하지 않는다.
 

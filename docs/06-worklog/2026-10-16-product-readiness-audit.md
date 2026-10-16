@@ -94,3 +94,15 @@ ignored artifact directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e4
 Luna xhigh 한 명이 runtime의 typed service·공통 primitive·기존 LiveSession 재사용 및 필요한 world의 bounded page helper를 단독 소유한다. root는 코드·테스트를 작성하지 않고 계약·리뷰·독립 검증·Git을 맡는다. 다른 Luna의 renderer 감사는 read-only로 유지하고 core API와 file ownership을 먼저 고정해 충돌/재작업을 줄인다. source가 안정화되기 전 중복 전체 Cargo 검사를 병렬로 실행하지 않는다.
 
 새 [renderer resource 재사용 문서](../03-architecture/renderer-resource-reuse.md)는 현재 frame마다 world-space geometry 변환·buffer 생성이 반복되는 실제 source 감사에 근거한다. 불변 CPU handle, transform/material instance 갱신, 공통 packet backend, 장치별 cache와 in-flight byte budget·변경 종류별 측정을 명세한다. 이 문서는 다음 구현안이며 실제 성능 결과는 아직 없다.
+
+## P02.1 통합 검사와 추가 회수 감사
+
+Luna xhigh의 source freeze 후 조정자는 pinned Rust의 workspace check/fmt·all-feature CPU 151건(기본 hardware ignored 2건)·strict Clippy를 독립 통과했다. 새 bridge/CLI window build, .NET 10.0.402 Release의 경고/오류 0·Rust-backed self-test·2 integration scenario도 통과했다. source-level 리뷰에서 try/drop의 blocking mutex 회귀, in-flight query/Step의 panic terminal 누락, duplicate ticket의 unique-command 종료 통계 오류를 수정하고 회귀 검사했다.
+
+같은 debug CLI로 기존 protocol-1 external project smoke 18개를 통과했다. 해당 binary SHA-256은 `8551bf54d0a2ef704a9d22e0289f7cf15a6f3dce78d1d93fe7b00ee8137f4340`다. 이번 smoke는 native window·managed 검사와 함께 실행됐으므로 이전 단일 warm smoke와 속도 배율을 비교하지 않는다.
+
+`view --seconds 3 --work-iterations 10000 --report dist/project-evidence/p02-legacy-window.json`은 실제 M3 Pro/Metal에서 time-limit 종료했다. 로딩 중 312 frame·authority tick 185, 실제 terrain job 1개 시작/취소·active job 0·termination stop_requested를 기록했다. 키/drag를 주입한 새 물리 입력 검증이나 external project window 검증이 아니다. frame interval은 CPU present 간격이며 이번 결과를 144fps/GPU latency 통과로 표시하지 않는다. 이 fixture 회귀는 공통 mailbox/stop 추출에 대한 좁은 근거다.
+
+후속 read-only 감사에서 기존 core snapshot의 내부 `entities` Arc만 보유하면 wrapper weak tracking을 우회하는 retention 결함과 service의 world dedup capacity 상한 누락을 확인했다. 다음 수정은 core의 wrapper/backing generation 이중 추적·service backing probe·producer 최소 2/frame 최소 1의 별도 예산·dedup 16,384 hard cap이다. 이 문단의 151건은 그 후속 수정 **이전** 통합 결과이며, 수정 후 재검사를 별도로 기록한다. audit issue를 열어둔 채 PR을 병합하지 않는다.
+
+DEV01의 실제 공통화는 native owned-ticket actor와 legacy mailbox/stop까지다. legacy count-only result guard/receiver와 CLI/window/MCP/managed attach는 남았으며 P02.1c·P02 전체·D1을 통과시키지 않는다. 다음 renderer API 명세는 동일 mesh hash/Arc와 stable instance 갱신을 고정했지만 아직 코드나 개선 수치가 아니다.

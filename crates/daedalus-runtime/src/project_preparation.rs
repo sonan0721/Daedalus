@@ -17,8 +17,15 @@ use daedalus_content::assets::{
     CacheLimits, FileCookCache, ImportCancellation, ImportLimits, NativeProjectResolver,
 };
 use daedalus_content::project::{PreparedProject, load_project_with_assets};
+use daedalus_content::{AssetReplacementCompatibilityError, check_asset_replacement_compatibility};
 use daedalus_core::{CommandId, SessionId, Tick};
 use thiserror::Error;
+
+use crate::project_activation::{AssetActivationMemoryStatus, AssetActivationState};
+use crate::session_control::{
+    SessionControlConfig, SessionControlService, SessionControlStartError, SessionShutdownReport,
+    SessionTermination,
+};
 
 const DEFAULT_MAX_CATALOG_ACCOUNTED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FAILURE_CODE_BYTES: usize = 64;
@@ -124,6 +131,8 @@ pub enum NativeProjectPreparationStartError {
     WorkerPanicked,
     #[error("preparation worker stopped before publishing its initial project")]
     StartupDisconnected,
+    #[error("could not create the one-shot preparation control port: {0}")]
+    Port(ProjectPreparationPortError),
 }
 
 /// A native owner for the initial project and its long-lived cache/preparation worker.
@@ -167,69 +176,33 @@ impl NativeProjectPreparationService {
     fn start_native(
         options: NativeProjectPreparationOptions,
     ) -> Result<Self, NativeProjectPreparationStartError> {
-        let shared = Arc::new(Shared::new());
-        let worker_shared = Arc::clone(&shared);
-        let panic_shared = Arc::clone(&shared);
-        let worker_options = options.clone();
-        let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
-        let join = thread::Builder::new()
-            .name("daedalus-project-preparation".to_owned())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker_main(worker_shared, worker_options, startup_tx)
-                }));
-                if let Err(payload) = result {
-                    // Record bounded failure status, then preserve the panic for JoinHandle.
-                    panic_shared.mark_panicked();
-                    std::panic::resume_unwind(payload);
-                }
-            })
-            .map_err(|error| NativeProjectPreparationStartError::ThreadSpawn(error.to_string()))?;
-
-        let initial_project = match startup_rx.recv() {
-            Ok(Ok(project)) => project,
-            Ok(Err(error)) => {
-                let _ = join.join();
-                return Err(error);
-            }
-            Err(_) => {
-                let panic_recorded = shared.worker_panicked.load(Ordering::Acquire);
-                let join_panicked = join.join().is_err();
-                return if panic_recorded || join_panicked {
-                    shared.mark_panic_joined();
-                    Err(NativeProjectPreparationStartError::WorkerPanicked)
-                } else {
-                    Err(NativeProjectPreparationStartError::StartupDisconnected)
-                };
-            }
-        };
-
+        let parts = start_native_worker(options, false)?;
         Ok(Self {
-            shared,
-            initial_project,
+            shared: parts.shared,
+            initial_project: parts.initial_project,
             control_port_taken: false,
-            join: Some(join),
+            join: Some(parts.join),
         })
     }
 
-    /// Returns the immutable tick-zero project prepared by the worker.
+    /// Returns the initial prepared project kept alive by this legacy preparation owner.
     pub fn initial_project(&self) -> &Arc<PreparedProject> {
         &self.initial_project
+    }
+
+    fn make_control_port(&mut self) -> Result<ProjectPreparationPort, ProjectPreparationPortError> {
+        make_control_port(
+            &self.shared,
+            &self.initial_project,
+            &mut self.control_port_taken,
+        )
     }
 
     /// Transfers the single opaque control capability to one session actor.
     pub fn take_control_port(
         &mut self,
     ) -> Result<ProjectPreparationPort, ProjectPreparationPortError> {
-        if self.control_port_taken {
-            return Err(ProjectPreparationPortError::AlreadyTaken);
-        }
-        self.control_port_taken = true;
-        Ok(ProjectPreparationPort {
-            shared: Arc::clone(&self.shared),
-            initial_project: Arc::clone(&self.initial_project),
-            bound: false,
-        })
+        self.make_control_port()
     }
 
     /// Requests worker shutdown without waiting for filesystem/parser work to return.
@@ -274,12 +247,278 @@ impl NativeProjectPreparationService {
     }
 }
 
+/// Result of observing the headless activation service's nonblocking shutdown progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeProjectActivationShutdown {
+    Stopping,
+    Stopped,
+}
+
+/// Failure observed after both owners have been asked to stop.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum NativeProjectActivationShutdownError {
+    #[error("the project preparation worker panicked")]
+    WorkerPanicked,
+    #[error("the project actor did not stop normally")]
+    ActorFailed,
+}
+
+/// Startup failure for the native headless project activation service.
+#[derive(Debug, Error)]
+pub enum NativeProjectActivationStartError {
+    #[error(transparent)]
+    Preparation(#[from] NativeProjectPreparationStartError),
+    #[error(transparent)]
+    Session(#[from] SessionControlStartError),
+}
+
+/// Owns one headless control actor and its existing native preparation/cache worker.
+///
+/// This factory deliberately has no renderer or audio attachment. Drop requests stop and never
+/// joins either thread; callers observe full cleanup with `try_shutdown`.
+pub struct NativeProjectActivationService {
+    actor: SessionControlService,
+    worker_shared: Arc<Shared>,
+    worker_join: Option<JoinHandle<()>>,
+    shutdown_report: Option<SessionShutdownReport>,
+}
+
+impl std::fmt::Debug for NativeProjectActivationService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeProjectActivationService")
+            .field("actor_stopped", &self.shutdown_report.is_some())
+            .field("worker_joinable", &self.worker_join.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeProjectActivationService {
+    /// Starts the initial project and the actor synchronously, then leaves preparation/activation
+    /// work on the single worker owned by this service.
+    pub fn start_headless(
+        options: NativeProjectPreparationOptions,
+        config: SessionControlConfig,
+    ) -> Result<Self, NativeProjectActivationStartError> {
+        options.validate()?;
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (options, config);
+            Err(NativeProjectPreparationStartError::NativeUnavailable.into())
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let parts = start_native_worker(options, true)?;
+            let mut port_taken = false;
+            let port = make_control_port(&parts.shared, &parts.initial_project, &mut port_taken);
+            let port = match port {
+                Ok(port) => port,
+                Err(error) => {
+                    parts.shared.request_stop();
+                    drop(parts.initial_project);
+                    let _ = parts.join.join();
+                    return Err(NativeProjectPreparationStartError::Port(error).into());
+                }
+            };
+            let actor = match SessionControlService::start_shared_with_activation(
+                Arc::clone(&parts.initial_project),
+                config,
+                port,
+            ) {
+                Ok(actor) => actor,
+                Err(error) => {
+                    parts.shared.request_stop();
+                    drop(parts.initial_project);
+                    let _ = parts.join.join();
+                    return Err(error.into());
+                }
+            };
+            drop(parts.initial_project);
+            Ok(Self {
+                actor,
+                worker_shared: parts.shared,
+                worker_join: Some(parts.join),
+                shutdown_report: None,
+            })
+        }
+    }
+
+    pub fn session(&self) -> &SessionControlService {
+        &self.actor
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_preparation_for_test(&self, epoch: u64) -> PreparationTestGateRelease {
+        let gate = Arc::new(PreparationTestGate::new(epoch));
+        self.worker_shared.install_test_gate(Arc::clone(&gate));
+        PreparationTestGateRelease(gate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_worker_state_for_test(&self) -> impl Drop + '_ {
+        self.worker_shared.state.lock().unwrap()
+    }
+
+    pub fn request_stop(&self) {
+        self.actor.request_stop();
+        self.worker_shared.request_stop();
+    }
+
+    pub fn shutdown_report(&self) -> Option<&SessionShutdownReport> {
+        self.shutdown_report.as_ref()
+    }
+
+    /// Requests stop, joining only threads already known to have finished.
+    pub fn try_shutdown(
+        &mut self,
+    ) -> Result<NativeProjectActivationShutdown, NativeProjectActivationShutdownError> {
+        self.request_stop();
+        if self.worker_join.is_none() && self.worker_shared.worker_panicked.load(Ordering::Acquire)
+        {
+            return Err(NativeProjectActivationShutdownError::WorkerPanicked);
+        }
+        if self.shutdown_report.is_none() {
+            let Some(report) = self.actor.try_join_finished() else {
+                return Ok(NativeProjectActivationShutdown::Stopping);
+            };
+            self.shutdown_report = Some(report);
+        }
+
+        let Some(join) = self.worker_join.as_ref() else {
+            return match self
+                .shutdown_report
+                .as_ref()
+                .map(|report| &report.termination)
+            {
+                Some(SessionTermination::StopRequested) => {
+                    Ok(NativeProjectActivationShutdown::Stopped)
+                }
+                _ => Err(NativeProjectActivationShutdownError::ActorFailed),
+            };
+        };
+        if !join.is_finished() {
+            return Ok(NativeProjectActivationShutdown::Stopping);
+        }
+        let join = self
+            .worker_join
+            .take()
+            .expect("worker handle checked above");
+        let worker_panicked =
+            join.join().is_err() || self.worker_shared.worker_panicked.load(Ordering::Acquire);
+        if worker_panicked {
+            self.worker_shared.mark_panic_joined();
+            return Err(NativeProjectActivationShutdownError::WorkerPanicked);
+        }
+        if !matches!(
+            self.shutdown_report
+                .as_ref()
+                .map(|report| &report.termination),
+            Some(SessionTermination::StopRequested)
+        ) {
+            return Err(NativeProjectActivationShutdownError::ActorFailed);
+        }
+        Ok(NativeProjectActivationShutdown::Stopped)
+    }
+}
+
+impl Drop for NativeProjectActivationService {
+    fn drop(&mut self) {
+        self.request_stop();
+    }
+}
+
+fn make_control_port(
+    shared: &Arc<Shared>,
+    initial_project: &Arc<PreparedProject>,
+    taken: &mut bool,
+) -> Result<ProjectPreparationPort, ProjectPreparationPortError> {
+    if *taken {
+        return Err(ProjectPreparationPortError::AlreadyTaken);
+    }
+    *taken = true;
+    let stage_results = shared
+        .stage_result_receiver
+        .lock()
+        .map_err(|_| ProjectPreparationPortError::Stopped)?
+        .take();
+    Ok(ProjectPreparationPort {
+        shared: Arc::clone(shared),
+        initial_project: Arc::downgrade(initial_project),
+        stage_results,
+        bound: false,
+    })
+}
+
 impl Drop for NativeProjectPreparationService {
     fn drop(&mut self) {
         self.request_stop();
         // Dropping JoinHandle detaches. The worker closure keeps the cache owner alive until its
         // actual return; Drop never waits on the actor/UI thread.
     }
+}
+
+struct WorkerStartupParts {
+    shared: Arc<Shared>,
+    initial_project: Arc<PreparedProject>,
+    join: JoinHandle<()>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn start_native_worker(
+    options: NativeProjectPreparationOptions,
+    activation_enabled: bool,
+) -> Result<WorkerStartupParts, NativeProjectPreparationStartError> {
+    let shared = Arc::new(Shared::new(activation_enabled));
+    let worker_shared = Arc::clone(&shared);
+    let panic_shared = Arc::clone(&shared);
+    let worker_options = options.clone();
+    let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
+    let join = thread::Builder::new()
+        .name("daedalus-project-preparation".to_owned())
+        .spawn(move || {
+            let mut registry = ReclamationRegistry::default();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker_main(
+                    worker_shared,
+                    worker_options,
+                    startup_tx,
+                    activation_enabled,
+                    &mut registry,
+                )
+            }));
+            if let Err(payload) = result {
+                // The outer registry survives worker_main's unwind. It remains a backstop
+                // until the actor releases its last source references on the worker thread.
+                panic_shared.mark_panicked();
+                registry.reclaim_after_worker_failure();
+                std::panic::resume_unwind(payload);
+            }
+        })
+        .map_err(|error| NativeProjectPreparationStartError::ThreadSpawn(error.to_string()))?;
+
+    let initial_project = match startup_rx.recv() {
+        Ok(Ok(project)) => project,
+        Ok(Err(error)) => {
+            let _ = join.join();
+            return Err(error);
+        }
+        Err(_) => {
+            let panic_recorded = shared.worker_panicked.load(Ordering::Acquire);
+            let join_panicked = join.join().is_err();
+            return if panic_recorded || join_panicked {
+                shared.mark_panic_joined();
+                Err(NativeProjectPreparationStartError::WorkerPanicked)
+            } else {
+                Err(NativeProjectPreparationStartError::StartupDisconnected)
+            };
+        }
+    };
+
+    Ok(WorkerStartupParts {
+        shared,
+        initial_project,
+        join,
+    })
 }
 
 /// Nonblocking result of observing native worker shutdown.
@@ -302,7 +541,8 @@ pub enum PreparationWorkerShutdownError {
 /// cannot bypass session command replay or capability checks.
 pub struct ProjectPreparationPort {
     shared: Arc<Shared>,
-    initial_project: Arc<PreparedProject>,
+    initial_project: std::sync::Weak<PreparedProject>,
+    stage_results: Option<std::sync::mpsc::Receiver<StageResult>>,
     bound: bool,
 }
 
@@ -317,7 +557,9 @@ impl std::fmt::Debug for ProjectPreparationPort {
 
 impl ProjectPreparationPort {
     pub(crate) fn matches_initial_project(&self, project: &Arc<PreparedProject>) -> bool {
-        Arc::ptr_eq(&self.initial_project, project)
+        self.initial_project
+            .upgrade()
+            .is_some_and(|initial| Arc::ptr_eq(&initial, project))
     }
 
     pub(crate) fn bind_session(
@@ -355,18 +597,36 @@ impl ProjectPreparationPort {
         if !self.bound || state.bound_session.is_none() {
             return Err(ProjectPreparationPortError::SessionMismatch);
         }
+        if state.pending_promotion.is_some() {
+            return Err(ProjectPreparationPortError::Busy);
+        }
         if epoch <= state.last_issued_epoch {
             return Err(ProjectPreparationPortError::InvalidEpoch);
         }
+        let retained_without_replaced_candidate = state
+            .active_cooked_accounted_bytes
+            .checked_add(state.retired_cooked_accounted_bytes)
+            .ok_or(ProjectPreparationPortError::Capacity)?;
         let remaining = state
             .max_catalog_accounted_bytes
-            .checked_sub(state.active_cooked_accounted_bytes)
+            .checked_sub(retained_without_replaced_candidate)
             .ok_or(ProjectPreparationPortError::Capacity)?;
         if remaining == 0 {
             return Err(ProjectPreparationPortError::Capacity);
         }
 
         state.last_issued_epoch = epoch;
+        if matches!(
+            state.activation_state,
+            AssetActivationState::StagePending
+                | AssetActivationState::Staging
+                | AssetActivationState::Staged
+                | AssetActivationState::CancelRequested
+        ) {
+            state.activation_state = AssetActivationState::Superseded;
+            state.stage_request = None;
+            state.stage_cancelled_sequence = state.activation_sequence;
+        }
         state.desired_epoch = Some(epoch);
         state.pending_epoch = Some(epoch);
         state.cancel_requested_epoch = None;
@@ -408,6 +668,17 @@ impl ProjectPreparationPort {
         }
         state.cancel_requested_epoch = Some(epoch);
         state.state = PreparationState::CancelRequested;
+        if matches!(
+            state.activation_state,
+            AssetActivationState::StagePending
+                | AssetActivationState::Staging
+                | AssetActivationState::Staged
+                | AssetActivationState::Failed
+        ) {
+            state.activation_state = AssetActivationState::CancelRequested;
+            state.stage_request = None;
+            state.stage_cancelled_sequence = state.activation_sequence;
+        }
         self.shared.desired_epoch.store(0, Ordering::Release);
         self.shared.cancelled_epoch.store(epoch, Ordering::Release);
         drop(state);
@@ -436,6 +707,229 @@ impl ProjectPreparationPort {
     pub(crate) fn request_stop(&self) {
         self.shared.request_stop();
     }
+
+    pub(crate) fn try_take_stage_result(&mut self) -> Option<StageResult> {
+        self.stage_results.as_ref()?.try_recv().ok()
+    }
+
+    pub(crate) fn try_stage(
+        &self,
+        sequence: u64,
+        epoch: u64,
+        expected_generation: u64,
+    ) -> Result<(), ProjectPreparationPortError> {
+        if sequence == 0 || epoch == 0 {
+            return Err(ProjectPreparationPortError::InvalidEpoch);
+        }
+        let mut state = match self.shared.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return Err(ProjectPreparationPortError::Busy),
+            Err(TryLockError::Poisoned(_)) => return Err(ProjectPreparationPortError::Stopped),
+        };
+        if !self.shared.activation_enabled {
+            return Err(ProjectPreparationPortError::Stopped);
+        }
+        if state.stopped || state.stopping || self.shared.stop_requested.load(Ordering::Acquire) {
+            return Err(ProjectPreparationPortError::Stopped);
+        }
+        if !self.bound || state.bound_session.is_none() {
+            return Err(ProjectPreparationPortError::SessionMismatch);
+        }
+        if state.active_generation != expected_generation {
+            return Err(ProjectPreparationPortError::GenerationMismatch);
+        }
+        if matches!(
+            state.activation_state,
+            AssetActivationState::StagePending
+                | AssetActivationState::Staging
+                | AssetActivationState::Staged
+                | AssetActivationState::CancelRequested
+        ) || state.pending_promotion.is_some()
+        {
+            return Err(ProjectPreparationPortError::Busy);
+        }
+        if state.pending_epoch.is_some() || state.running_epoch.is_some() {
+            return Err(ProjectPreparationPortError::Busy);
+        }
+        if state.desired_epoch != Some(epoch) || state.ready_epoch != Some(epoch) {
+            return Err(ProjectPreparationPortError::NoActiveCandidate);
+        }
+        state.activation_state = AssetActivationState::StagePending;
+        state.activation_sequence = Some(sequence);
+        state.activation_epoch = Some(epoch);
+        state.stage_cancelled_sequence = None;
+        state.stage_request = Some(StageRequest {
+            sequence,
+            epoch,
+            expected_generation,
+        });
+        drop(state);
+        self.shared.changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn try_cancel_activation(
+        &self,
+        sequence: u64,
+    ) -> Result<(), ProjectPreparationPortError> {
+        let mut state = match self.shared.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return Err(ProjectPreparationPortError::Busy),
+            Err(TryLockError::Poisoned(_)) => return Err(ProjectPreparationPortError::Stopped),
+        };
+        if state.stopped || state.stopping || self.shared.stop_requested.load(Ordering::Acquire) {
+            return Err(ProjectPreparationPortError::Stopped);
+        }
+        if !self.bound || state.bound_session.is_none() {
+            return Err(ProjectPreparationPortError::SessionMismatch);
+        }
+        if state.stage_cancelled_sequence == Some(sequence)
+            && state.activation_state == AssetActivationState::Cancelled
+        {
+            return Ok(());
+        }
+        let active_sequence = state.activation_sequence;
+        if active_sequence != Some(sequence) {
+            return Err(ProjectPreparationPortError::NoActiveCandidate);
+        }
+        if !matches!(
+            state.activation_state,
+            AssetActivationState::StagePending
+                | AssetActivationState::Staging
+                | AssetActivationState::Staged
+                | AssetActivationState::Failed
+        ) {
+            return Err(ProjectPreparationPortError::NoActiveCandidate);
+        }
+        state.stage_request = None;
+        state.stage_cancelled_sequence = Some(sequence);
+        state.activation_state = AssetActivationState::CancelRequested;
+        if let Some(epoch) = state.activation_epoch {
+            state.desired_epoch = None;
+            state.cancel_requested_epoch = Some(epoch);
+            self.shared.desired_epoch.store(0, Ordering::Release);
+            self.shared.cancelled_epoch.store(epoch, Ordering::Release);
+        }
+        drop(state);
+        self.shared.changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn try_commit_activation(
+        &self,
+        sequence: u64,
+        epoch: u64,
+        expected_generation: u64,
+        new_generation: u64,
+        source_digest: String,
+        commit_source: impl FnOnce(),
+    ) -> Result<(), ProjectPreparationPortError> {
+        let mut state = match self.shared.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return Err(ProjectPreparationPortError::Busy),
+            Err(TryLockError::Poisoned(_)) => return Err(ProjectPreparationPortError::Stopped),
+        };
+        if state.stopped || state.stopping || self.shared.stop_requested.load(Ordering::Acquire) {
+            return Err(ProjectPreparationPortError::Stopped);
+        }
+        if !self.bound || state.bound_session.is_none() {
+            return Err(ProjectPreparationPortError::SessionMismatch);
+        }
+        if state.activation_sequence != Some(sequence)
+            || state.activation_state != AssetActivationState::Staged
+            || state.stage_request.is_some()
+            || state.ready_epoch != Some(epoch)
+            || state.desired_epoch != Some(epoch)
+        {
+            return Err(ProjectPreparationPortError::NoActiveCandidate);
+        }
+        if state.active_generation != expected_generation {
+            return Err(ProjectPreparationPortError::GenerationMismatch);
+        }
+        if state.retired_generation_count != 0 || state.pending_promotion.is_some() {
+            return Err(ProjectPreparationPortError::Busy);
+        }
+        let Some(next_generation) = expected_generation.checked_add(1) else {
+            return Err(ProjectPreparationPortError::GenerationExhausted);
+        };
+        if next_generation != new_generation {
+            return Err(ProjectPreparationPortError::GenerationMismatch);
+        }
+        let candidate_bytes = state.candidate_cooked_accounted_bytes;
+        let old_bytes = state.active_cooked_accounted_bytes;
+        commit_source();
+        state.retired_cooked_accounted_bytes = old_bytes;
+        state.retired_generation_count = 1;
+        state.active_cooked_accounted_bytes = candidate_bytes;
+        state.candidate_cooked_accounted_bytes = 0;
+        state.active_generation = new_generation;
+        state.active_source_digest = source_digest;
+        state.pending_promotion = Some((sequence, epoch));
+        state.activation_state = AssetActivationState::Committed;
+        drop(state);
+        self.shared.changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn activation_snapshot(
+        &self,
+    ) -> Result<(AssetActivationState, AssetActivationMemoryStatus), ProjectPreparationPortError>
+    {
+        let state = self.shared.state.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => ProjectPreparationPortError::Busy,
+            TryLockError::Poisoned(_) => ProjectPreparationPortError::Stopped,
+        })?;
+        let activation_state = if self.shared.stop_requested.load(Ordering::Acquire) {
+            if state.stopped {
+                AssetActivationState::Stopped
+            } else {
+                AssetActivationState::Stopping
+            }
+        } else {
+            state.activation_state
+        };
+        let memory = AssetActivationMemoryStatus::new(
+            state.active_cooked_accounted_bytes,
+            state.candidate_cooked_accounted_bytes,
+            state.retired_cooked_accounted_bytes,
+            state.max_catalog_accounted_bytes,
+            state.retired_generation_count,
+        );
+        Ok((activation_state, memory))
+    }
+
+    pub(crate) fn worker_panicked(&self) -> bool {
+        self.shared.worker_panicked.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_stage_result(
+        &self,
+        sequence: u64,
+        epoch: u64,
+        staged: bool,
+    ) -> Result<(), ProjectPreparationPortError> {
+        let mut state = self.shared.state.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => ProjectPreparationPortError::Busy,
+            TryLockError::Poisoned(_) => ProjectPreparationPortError::Stopped,
+        })?;
+        if state.activation_sequence != Some(sequence)
+            || state.ready_epoch != Some(epoch)
+            || state.activation_state != AssetActivationState::Staging
+        {
+            return Err(ProjectPreparationPortError::NoActiveCandidate);
+        }
+        state.activation_state = if staged {
+            AssetActivationState::Staged
+        } else {
+            AssetActivationState::Failed
+        };
+        if !staged {
+            state.stage_request = None;
+        }
+        drop(state);
+        self.shared.changed.notify_all();
+        Ok(())
+    }
 }
 
 impl Drop for ProjectPreparationPort {
@@ -459,6 +953,10 @@ pub enum ProjectPreparationPortError {
     NoActiveCandidate,
     #[error("active plus candidate cooked/catalog capacity is exhausted")]
     Capacity,
+    #[error("active generation changed before worker operation")]
+    GenerationMismatch,
+    #[error("project generation space is exhausted")]
+    GenerationExhausted,
     #[error("the one-shot preparation control port was already taken")]
     AlreadyTaken,
     #[error("the preparation control port was already bound to a session")]
@@ -996,7 +1494,7 @@ impl PreparationTestGate {
 #[cfg(test)]
 pub(crate) struct PreparationTestGateRelease(Arc<PreparationTestGate>);
 
-#[cfg(all(test, feature = "audio"))]
+#[cfg(test)]
 impl PreparationTestGateRelease {
     pub(crate) fn wait_until_entered(&self) {
         self.0.wait_until_entered();
@@ -1021,12 +1519,16 @@ struct Shared {
     worker_panicked: AtomicBool,
     desired_epoch: AtomicU64,
     cancelled_epoch: AtomicU64,
+    activation_enabled: bool,
+    stage_result_sender: std::sync::mpsc::SyncSender<StageResult>,
+    stage_result_receiver: Mutex<Option<std::sync::mpsc::Receiver<StageResult>>>,
     #[cfg(test)]
     test_gate: Mutex<Option<Arc<PreparationTestGate>>>,
 }
 
 impl Shared {
-    fn new() -> Self {
+    fn new(activation_enabled: bool) -> Self {
+        let (stage_result_sender, stage_result_receiver) = std::sync::mpsc::sync_channel(1);
         Self {
             state: Mutex::new(WorkerState::starting()),
             changed: Condvar::new(),
@@ -1034,6 +1536,9 @@ impl Shared {
             worker_panicked: AtomicBool::new(false),
             desired_epoch: AtomicU64::new(0),
             cancelled_epoch: AtomicU64::new(0),
+            activation_enabled,
+            stage_result_sender,
+            stage_result_receiver: Mutex::new(Some(stage_result_receiver)),
             #[cfg(test)]
             test_gate: Mutex::new(None),
         }
@@ -1078,7 +1583,7 @@ impl Shared {
             .map(|failure| failure.to_public(session));
         Ok(AssetPreparationStatus {
             session,
-            active_generation: 1,
+            active_generation: state.active_generation,
             active_source_digest: state.active_source_digest.clone(),
             active_cooked_accounted_bytes: state.active_cooked_accounted_bytes,
             desired,
@@ -1165,6 +1670,10 @@ impl Shared {
         state.ready_epoch = None;
         state.ready_summary = None;
         state.cancel_requested_epoch = None;
+        state.active_cooked_accounted_bytes = 0;
+        state.candidate_cooked_accounted_bytes = 0;
+        state.retired_cooked_accounted_bytes = 0;
+        state.retired_generation_count = 0;
         state.stopping = false;
         state.stopped = true;
         state.state = PreparationState::Stopped;
@@ -1177,6 +1686,16 @@ struct WorkerState {
     max_catalog_accounted_bytes: u64,
     active_source_digest: String,
     active_cooked_accounted_bytes: u64,
+    active_generation: u64,
+    candidate_cooked_accounted_bytes: u64,
+    retired_cooked_accounted_bytes: u64,
+    retired_generation_count: usize,
+    activation_state: AssetActivationState,
+    activation_sequence: Option<u64>,
+    activation_epoch: Option<u64>,
+    stage_request: Option<StageRequest>,
+    stage_cancelled_sequence: Option<u64>,
+    pending_promotion: Option<(u64, u64)>,
     bound_session: Option<SessionId>,
     last_issued_epoch: u64,
     desired_epoch: Option<u64>,
@@ -1197,6 +1716,16 @@ impl WorkerState {
             max_catalog_accounted_bytes: 0,
             active_source_digest: String::new(),
             active_cooked_accounted_bytes: 0,
+            active_generation: 1,
+            candidate_cooked_accounted_bytes: 0,
+            retired_cooked_accounted_bytes: 0,
+            retired_generation_count: 0,
+            activation_state: AssetActivationState::Idle,
+            activation_sequence: None,
+            activation_epoch: None,
+            stage_request: None,
+            stage_cancelled_sequence: None,
+            pending_promotion: None,
             bound_session: None,
             last_issued_epoch: 0,
             desired_epoch: None,
@@ -1213,6 +1742,79 @@ impl WorkerState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct StageRequest {
+    sequence: u64,
+    epoch: u64,
+    expected_generation: u64,
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Default)]
+struct ReclamationRegistry {
+    active: Option<Arc<PreparedProject>>,
+    candidate: Option<(u64, Arc<PreparedProject>)>,
+    retired: Option<Arc<PreparedProject>>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl ReclamationRegistry {
+    fn reclaim_after_worker_failure(&mut self) {
+        loop {
+            self.reclaim_once();
+            if self.active.is_none() && self.candidate.is_none() && self.retired.is_none() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn reclaim_once(&mut self) {
+        reclaim_candidate_slot(&mut self.candidate);
+        reclaim_project_slot(&mut self.active);
+        reclaim_project_slot(&mut self.retired);
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn reclaim_project_slot(slot: &mut Option<Arc<PreparedProject>>) {
+    let Some(project) = slot.take() else {
+        return;
+    };
+    match Arc::try_unwrap(project) {
+        Ok(project) => drop(project),
+        Err(project) => *slot = Some(project),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn reclaim_candidate_slot(slot: &mut Option<(u64, Arc<PreparedProject>)>) {
+    let Some((epoch, project)) = slot.take() else {
+        return;
+    };
+    match Arc::try_unwrap(project) {
+        Ok(project) => drop(project),
+        Err(project) => *slot = Some((epoch, project)),
+    }
+}
+
+pub(crate) enum StageResult {
+    Ready {
+        sequence: u64,
+        epoch: u64,
+        project: Arc<PreparedProject>,
+    },
+    Incompatible {
+        sequence: u64,
+        epoch: u64,
+        error: AssetReplacementCompatibilityError,
+    },
+    Failed {
+        sequence: u64,
+        epoch: u64,
+    },
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn worker_main(
     shared: Arc<Shared>,
@@ -1220,6 +1822,8 @@ fn worker_main(
     startup: std::sync::mpsc::SyncSender<
         Result<Arc<PreparedProject>, NativeProjectPreparationStartError>,
     >,
+    activation_enabled: bool,
+    registry: &mut ReclamationRegistry,
 ) {
     // Validate the project root before FileCookCache can create the default nested cache path.
     if let Err(error) = NativeProjectResolver::open(&options.root) {
@@ -1261,6 +1865,9 @@ fn worker_main(
         return;
     }
     let initial = Arc::new(initial.release_asset_cache_pins());
+    if activation_enabled {
+        registry.active = Some(Arc::clone(&initial));
+    }
     if let Ok(mut state) = shared.state.lock() {
         state.max_catalog_accounted_bytes = options.max_catalog_accounted_bytes;
         state.active_source_digest = initial.digest().to_owned();
@@ -1270,16 +1877,21 @@ fn worker_main(
     shared.changed.notify_all();
     if startup.send(Ok(initial)).is_err() {
         shared.request_stop();
-        worker_loop(shared, options, cache);
+        worker_loop(shared, options, cache, activation_enabled, registry);
         return;
     }
-    worker_loop(shared, options, cache);
+    worker_loop(shared, options, cache, activation_enabled, registry);
 }
 
 #[cfg(not(target_family = "wasm"))]
 enum WorkerAction {
     Prepare(u64),
     DropReady(u64),
+    ReclaimCandidate,
+    Stage(StageRequest),
+    CancelStage(u64, u64),
+    Promote(u64, u64),
+    ReclaimRetired,
     Stop,
 }
 
@@ -1288,9 +1900,11 @@ fn worker_loop(
     shared: Arc<Shared>,
     options: NativeProjectPreparationOptions,
     mut cache: FileCookCache,
+    activation_enabled: bool,
+    registry: &mut ReclamationRegistry,
 ) {
     // Candidate payloads live only on this thread; shared status holds bounded metadata only.
-    let mut ready: Option<(u64, PreparedProject)> = None;
+    let mut ready: Option<(u64, Arc<PreparedProject>)> = None;
     loop {
         let action = {
             let mut state = match shared.state.lock() {
@@ -1304,15 +1918,39 @@ fn worker_loop(
                     shared.changed.notify_all();
                     break WorkerAction::Stop;
                 }
+                if let Some((sequence, epoch)) = state.pending_promotion {
+                    break WorkerAction::Promote(sequence, epoch);
+                }
                 if let Some(epoch) = state.pending_epoch {
                     if let Some((ready_epoch, _)) = ready.as_ref() {
                         break WorkerAction::DropReady(*ready_epoch);
+                    }
+                    if registry.candidate.is_some() {
+                        break WorkerAction::ReclaimCandidate;
                     }
                     state.pending_epoch = None;
                     state.running_epoch = Some(epoch);
                     state.state = PreparationState::Preparing;
                     shared.changed.notify_all();
                     break WorkerAction::Prepare(epoch);
+                }
+                if activation_enabled
+                    && state.activation_state == AssetActivationState::CancelRequested
+                    && let (Some(sequence), Some(epoch)) =
+                        (state.stage_cancelled_sequence, state.activation_epoch)
+                {
+                    break WorkerAction::CancelStage(sequence, epoch);
+                }
+                if activation_enabled
+                    && let Some(request) = state.stage_request
+                    && ready
+                        .as_ref()
+                        .is_some_and(|(ready_epoch, _)| *ready_epoch == request.epoch)
+                {
+                    state.stage_request = None;
+                    state.activation_state = AssetActivationState::Staging;
+                    shared.changed.notify_all();
+                    break WorkerAction::Stage(request);
                 }
                 if let Some(epoch) = state.cancel_requested_epoch
                     && state.running_epoch.is_none()
@@ -1324,8 +1962,26 @@ fn worker_loop(
                         break WorkerAction::DropReady(epoch);
                     }
                     state.cancel_requested_epoch = None;
+                    state.candidate_cooked_accounted_bytes = 0;
                     state.state = PreparationState::Cancelled;
                     shared.changed.notify_all();
+                }
+                if activation_enabled
+                    && registry.candidate.as_ref().is_some_and(|(epoch, _)| {
+                        state.pending_epoch.is_some()
+                            || state.cancel_requested_epoch == Some(*epoch)
+                            || state.desired_epoch != Some(*epoch)
+                            || matches!(
+                                state.activation_state,
+                                AssetActivationState::CancelRequested
+                                    | AssetActivationState::Superseded
+                            )
+                    })
+                {
+                    break WorkerAction::ReclaimCandidate;
+                }
+                if activation_enabled && registry.retired.is_some() {
+                    break WorkerAction::ReclaimRetired;
                 }
                 // `request_stop` is intentionally lock-free. The timeout closes the small race
                 // where its Condvar notification arrives just before this wait begins.
@@ -1343,6 +1999,9 @@ fn worker_loop(
             WorkerAction::Stop => {
                 // Destruction of candidate buffers and cache ownership precedes Stopped.
                 drop(ready.take());
+                if activation_enabled {
+                    registry.reclaim_after_worker_failure();
+                }
                 drop(cache);
                 if let Ok(mut state) = shared.state.lock() {
                     state.running_epoch = None;
@@ -1350,6 +2009,10 @@ fn worker_loop(
                     state.ready_epoch = None;
                     state.ready_summary = None;
                     state.cancel_requested_epoch = None;
+                    state.candidate_cooked_accounted_bytes = 0;
+                    state.active_cooked_accounted_bytes = 0;
+                    state.retired_cooked_accounted_bytes = 0;
+                    state.retired_generation_count = 0;
                     state.stopping = false;
                     state.stopped = true;
                     state.state = PreparationState::Stopped;
@@ -1364,10 +2027,20 @@ fn worker_loop(
                 {
                     drop(ready.take());
                 }
+                if activation_enabled
+                    && registry
+                        .candidate
+                        .as_ref()
+                        .is_some_and(|(candidate_epoch, _)| *candidate_epoch == epoch)
+                {
+                    reclaim_candidate_slot(&mut registry.candidate);
+                }
                 if let Ok(mut state) = shared.state.lock() {
-                    if state.ready_epoch == Some(epoch) {
+                    let candidate_reclaimed = registry.candidate.is_none();
+                    if state.ready_epoch == Some(epoch) && candidate_reclaimed {
                         state.ready_epoch = None;
                         state.ready_summary = None;
+                        state.candidate_cooked_accounted_bytes = 0;
                     }
                     if state.cancel_requested_epoch == Some(epoch) {
                         state.cancel_requested_epoch = None;
@@ -1378,12 +2051,39 @@ fn worker_loop(
                 }
                 shared.changed.notify_all();
             }
+            WorkerAction::ReclaimCandidate => {
+                let epoch = registry.candidate.as_ref().map(|(epoch, _)| *epoch);
+                reclaim_candidate_slot(&mut registry.candidate);
+                if registry.candidate.is_none() {
+                    if let Ok(mut state) = shared.state.lock() {
+                        if let Some(epoch) = epoch
+                            && state.ready_epoch == Some(epoch)
+                        {
+                            state.ready_epoch = None;
+                            state.ready_summary = None;
+                            state.candidate_cooked_accounted_bytes = 0;
+                        }
+                        if state.cancel_requested_epoch == epoch {
+                            state.cancel_requested_epoch = None;
+                            if state.pending_epoch.is_none() && !state.stopping {
+                                state.state = PreparationState::Cancelled;
+                            }
+                        }
+                    }
+                } else {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                shared.changed.notify_all();
+            }
             WorkerAction::Prepare(epoch) => {
                 shared.wait_at_test_gate(epoch, PreparationTestGatePhase::BeforeImport);
                 let remaining = match shared.state.lock() {
-                    Ok(state) => state
-                        .max_catalog_accounted_bytes
-                        .checked_sub(state.active_cooked_accounted_bytes),
+                    Ok(state) => state.max_catalog_accounted_bytes.checked_sub(
+                        state
+                            .active_cooked_accounted_bytes
+                            .saturating_add(state.candidate_cooked_accounted_bytes)
+                            .saturating_add(state.retired_cooked_accounted_bytes),
+                    ),
                     Err(_) => return,
                 };
                 let Some(remaining) = remaining.filter(|remaining| *remaining > 0) else {
@@ -1417,6 +2117,13 @@ fn worker_loop(
                         match cooked_bytes {
                             Some(cooked_bytes) if cooked_bytes <= remaining => {
                                 if let Some(project) = finish_candidate(&shared, epoch, project) {
+                                    if let Ok(mut state) = shared.state.lock() {
+                                        state.candidate_cooked_accounted_bytes = cooked_bytes;
+                                    }
+                                    let project = Arc::new(project);
+                                    if activation_enabled {
+                                        registry.candidate = Some((epoch, Arc::clone(&project)));
+                                    }
                                     ready = Some((epoch, project));
                                 }
                             }
@@ -1447,6 +2154,112 @@ fn worker_loop(
                         }
                     }
                     Err(error) => finish_import_error(&shared, epoch, error),
+                }
+            }
+            WorkerAction::Stage(request) => {
+                let candidate = ready
+                    .as_ref()
+                    .filter(|(epoch, _)| *epoch == request.epoch)
+                    .map(|(_, project)| Arc::clone(project));
+                let active = registry.active.as_ref();
+                let result = match (active, candidate) {
+                    (Some(active), Some(candidate)) => {
+                        check_asset_replacement_compatibility(active, &candidate)
+                            .map(|()| StageResult::Ready {
+                                sequence: request.sequence,
+                                epoch: request.epoch,
+                                project: candidate,
+                            })
+                            .unwrap_or_else(|error| StageResult::Incompatible {
+                                sequence: request.sequence,
+                                epoch: request.epoch,
+                                error,
+                            })
+                    }
+                    _ => StageResult::Failed {
+                        sequence: request.sequence,
+                        epoch: request.epoch,
+                    },
+                };
+                let still_current = shared.state.lock().is_ok_and(|state| {
+                    state.activation_sequence == Some(request.sequence)
+                        && state.activation_epoch == Some(request.epoch)
+                        && state.activation_state == AssetActivationState::Staging
+                        && state.active_generation == request.expected_generation
+                        && state.desired_epoch == Some(request.epoch)
+                        && !shared.stop_requested.load(Ordering::Acquire)
+                });
+                if still_current {
+                    let _ = shared.stage_result_sender.send(result);
+                }
+            }
+            WorkerAction::CancelStage(sequence, epoch) => {
+                if ready
+                    .as_ref()
+                    .is_some_and(|(ready_epoch, _)| *ready_epoch == epoch)
+                {
+                    drop(ready.take());
+                }
+                if registry
+                    .candidate
+                    .as_ref()
+                    .is_some_and(|(candidate_epoch, _)| *candidate_epoch == epoch)
+                {
+                    reclaim_candidate_slot(&mut registry.candidate);
+                }
+                let reclaimed = registry.candidate.is_none();
+                if let Ok(mut state) = shared.state.lock()
+                    && state.activation_sequence == Some(sequence)
+                    && reclaimed
+                {
+                    state.ready_epoch = None;
+                    state.ready_summary = None;
+                    state.desired_epoch = None;
+                    state.cancel_requested_epoch = None;
+                    state.candidate_cooked_accounted_bytes = 0;
+                    state.activation_state = AssetActivationState::Cancelled;
+                    state.state = PreparationState::Cancelled;
+                    drop(state);
+                    shared.changed.notify_all();
+                } else if !reclaimed {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            WorkerAction::Promote(sequence, epoch) => {
+                if let Some((candidate_epoch, project)) = registry.candidate.take() {
+                    if candidate_epoch == epoch {
+                        drop(ready.take());
+                        let previous = registry.active.replace(project);
+                        registry.retired = previous;
+                    } else {
+                        registry.candidate = Some((candidate_epoch, project));
+                    }
+                }
+                if let Ok(mut state) = shared.state.lock()
+                    && state.pending_promotion == Some((sequence, epoch))
+                {
+                    state.pending_promotion = None;
+                    state.ready_epoch = None;
+                    state.ready_summary = None;
+                    state.desired_epoch = None;
+                    state.cancel_requested_epoch = None;
+                    state.stage_request = None;
+                    state.state = PreparationState::Idle;
+                    drop(state);
+                    shared.changed.notify_all();
+                }
+            }
+            WorkerAction::ReclaimRetired => {
+                reclaim_project_slot(&mut registry.retired);
+                if registry.retired.is_none()
+                    && let Ok(mut state) = shared.state.lock()
+                {
+                    state.retired_cooked_accounted_bytes = 0;
+                    state.retired_generation_count = 0;
+                    drop(state);
+                    shared.changed.notify_all();
+                } else if registry.retired.is_some() {
+                    thread::sleep(Duration::from_millis(10));
                 }
             }
         }
@@ -1691,6 +2504,17 @@ mod tests {
             stopped.latest_failure().map(PreparationFailure::code),
             Some("worker_panic")
         );
+        assert_eq!(
+            service.try_shutdown(),
+            Err(PreparationWorkerShutdownError::WorkerPanicked),
+            "a later shutdown poll must preserve the observed worker panic"
+        );
+        let reclaimed = service.shared.state.lock().unwrap();
+        assert_eq!(reclaimed.active_cooked_accounted_bytes, 0);
+        assert_eq!(reclaimed.candidate_cooked_accounted_bytes, 0);
+        assert_eq!(reclaimed.retired_cooked_accounted_bytes, 0);
+        assert_eq!(reclaimed.retired_generation_count, 0);
+        drop(reclaimed);
         let reopened = FileCookCache::open(
             project.path().join(".daedalus/cache"),
             CacheLimits::default(),

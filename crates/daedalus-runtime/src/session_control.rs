@@ -20,9 +20,14 @@ use thiserror::Error;
 
 use crate::MAX_PREPARATION_STATUS_RESULT_BYTES;
 use crate::project::MAX_PROJECT_SESSION_ENTITIES;
+use crate::project_activation::{
+    ActivationId, AssetActivationCommandOutcome, AssetActivationCommandResult,
+    AssetActivationOperation, AssetActivationRequestResult, AssetActivationStatus,
+};
 use crate::project_preparation::{
     AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
     AssetPreparationResult, PreparationId, ProjectPreparationPort, ProjectPreparationPortError,
+    StageResult,
 };
 use crate::session_primitives::{
     CreditError, CreditLease, CreditLimits, CreditPool, LatestValueMailbox, MailboxError,
@@ -273,6 +278,7 @@ pub enum SessionOperation {
     },
     Status,
     AssetPreparation(AssetPreparationOperation),
+    AssetActivation(AssetActivationOperation),
     #[cfg(feature = "audio")]
     Audio(SessionAudioOperation),
 }
@@ -290,10 +296,15 @@ impl SessionOperation {
             self,
             Self::AssetPreparation(AssetPreparationOperation::Status)
         );
+        let activation = matches!(
+            self,
+            Self::AssetActivation(AssetActivationOperation::Status)
+        );
         #[cfg(feature = "audio")]
         {
             world
                 || preparation
+                || activation
                 || matches!(
                     self,
                     Self::Audio(
@@ -306,7 +317,7 @@ impl SessionOperation {
         }
         #[cfg(not(feature = "audio"))]
         {
-            world || preparation
+            world || preparation || activation
         }
     }
 
@@ -321,10 +332,24 @@ impl SessionOperation {
                     | AssetPreparationOperation::Cancel { .. }
             )
         );
+        let activation = matches!(
+            self,
+            Self::AssetActivation(
+                AssetActivationOperation::Stage { .. }
+                    | AssetActivationOperation::Commit { .. }
+                    | AssetActivationOperation::Cancel { .. }
+            )
+        );
         #[cfg(feature = "audio")]
-        return world || matches!(self, Self::Audio(SessionAudioOperation::Command { .. }));
+        {
+            world
+                || activation
+                || matches!(self, Self::Audio(SessionAudioOperation::Command { .. }))
+        }
         #[cfg(not(feature = "audio"))]
-        world
+        {
+            world || activation
+        }
     }
 
     fn is_step(&self) -> bool {
@@ -461,6 +486,7 @@ pub enum SessionRequestResult {
     Step(Vec<StepReport>),
     Status(SessionStatus),
     AssetPreparation(AssetPreparationResult),
+    AssetActivation(AssetActivationRequestResult),
     #[cfg(feature = "audio")]
     Audio(SessionAudioResult),
 }
@@ -507,6 +533,8 @@ pub enum SessionRequestError {
     AudioUnavailable,
     #[error("asset preparation operations require a service started with preparation enabled")]
     AssetPreparationUnavailable,
+    #[error("asset activation operations require the native headless activation service")]
+    AssetActivationUnavailable,
     #[error("asset preparation state is busy")]
     PreparationBusy,
     #[error("asset preparation capacity is exhausted")]
@@ -521,6 +549,22 @@ pub enum SessionRequestError {
     CandidateNotActive,
     #[error("asset preparation epoch space is exhausted")]
     PreparationEpochExhausted,
+    #[error("asset activation state is busy")]
+    ActivationBusy,
+    #[error("activation ID is invalid for this session")]
+    InvalidActivation,
+    #[error("activation has expired")]
+    ActivationExpired,
+    #[error("activation is not staged")]
+    ActivationNotStaged,
+    #[error("active project generation does not match the request")]
+    ActiveGenerationMismatch,
+    #[error("activation sequence space is exhausted")]
+    ActivationSequenceExhausted,
+    #[error("project generation space is exhausted")]
+    ProjectGenerationExhausted,
+    #[error("retained project activation capacity is exhausted")]
+    ActivationCapacity,
     #[cfg(feature = "audio")]
     #[error(transparent)]
     Audio(#[from] SessionAudioError),
@@ -555,6 +599,8 @@ pub enum SessionSubmitError {
     AudioUnavailable,
     #[error("this session was started without asset preparation enabled")]
     AssetPreparationUnavailable,
+    #[error("this session was started without native asset activation enabled")]
+    AssetActivationUnavailable,
 }
 
 #[derive(Debug, Error)]
@@ -647,6 +693,7 @@ pub struct SessionFrame {
     session: SessionId,
     tick: Tick,
     sequence: u64,
+    authority_snapshot_sequence: u64,
     project_generation: u64,
     source_digest: String,
     source_scene_revision: u64,
@@ -667,6 +714,13 @@ impl SessionFrame {
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// Engine snapshot sequence represented by this publication. It can stay fixed when the
+    /// same authority state is republished under a newly committed project generation.
+    #[must_use]
+    pub const fn authority_snapshot_sequence(&self) -> u64 {
+        self.authority_snapshot_sequence
     }
 
     #[must_use]
@@ -1058,6 +1112,7 @@ struct ControlShared {
     #[cfg(feature = "audio")]
     audio_enabled: bool,
     asset_preparation_enabled: bool,
+    asset_activation_enabled: bool,
     stop: StopSignal,
     queue: RequestQueue,
     frames: Arc<LatestValueMailbox<SessionFrame>>,
@@ -1116,7 +1171,7 @@ impl SessionControlService {
         let audio_options = None;
         #[cfg(not(feature = "audio"))]
         let audio_options = ();
-        Self::start_shared_inner(prepared, config, audio_options, None)
+        Self::start_shared_inner(prepared, config, audio_options, None, false)
     }
 
     /// Starts the existing project actor with an optional native preparation control capability.
@@ -1132,7 +1187,34 @@ impl SessionControlService {
         let audio_options = None;
         #[cfg(not(feature = "audio"))]
         let audio_options = ();
-        Self::start_shared_inner(prepared, config, audio_options, Some(preparation_port))
+        Self::start_shared_inner(
+            prepared,
+            config,
+            audio_options,
+            Some(preparation_port),
+            false,
+        )
+    }
+
+    pub(crate) fn start_shared_with_activation(
+        prepared: Arc<PreparedProject>,
+        config: SessionControlConfig,
+        preparation_port: ProjectPreparationPort,
+    ) -> Result<Self, SessionControlStartError> {
+        if !preparation_port.matches_initial_project(&prepared) {
+            return Err(SessionControlStartError::PreparationProjectMismatch);
+        }
+        #[cfg(feature = "audio")]
+        let audio_options = None;
+        #[cfg(not(feature = "audio"))]
+        let audio_options = ();
+        Self::start_shared_inner(
+            prepared,
+            config,
+            audio_options,
+            Some(preparation_port),
+            true,
+        )
     }
 
     /// Starts one project actor with both optional native preparation and audio services.
@@ -1151,6 +1233,7 @@ impl SessionControlService {
             config,
             Some(audio_options),
             Some(preparation_port),
+            false,
         )
     }
 
@@ -1160,7 +1243,7 @@ impl SessionControlService {
         config: SessionControlConfig,
         audio_options: SessionAudioOptions,
     ) -> Result<Self, SessionControlStartError> {
-        Self::start_shared_inner(prepared, config, Some(audio_options), None)
+        Self::start_shared_inner(prepared, config, Some(audio_options), None, false)
     }
 
     fn start_shared_inner(
@@ -1168,6 +1251,7 @@ impl SessionControlService {
         mut config: SessionControlConfig,
         audio_options: ActorAudioOptions,
         preparation_port: Option<ProjectPreparationPort>,
+        asset_activation_enabled: bool,
     ) -> Result<Self, SessionControlStartError> {
         config.limits.validate(&config.engine)?;
         if prepared.entities().len() > MAX_PROJECT_SESSION_ENTITIES {
@@ -1197,6 +1281,7 @@ impl SessionControlService {
             #[cfg(feature = "audio")]
             audio_enabled: audio_options.is_some(),
             asset_preparation_enabled: preparation_port.is_some(),
+            asset_activation_enabled,
             stop: StopSignal::default(),
             queue: RequestQueue::new(config.limits.command_capacity),
             frames: Arc::new(LatestValueMailbox::new(config.limits.max_retained_frames)),
@@ -1275,6 +1360,12 @@ impl SessionControlService {
         self.shared.asset_preparation_enabled
     }
 
+    /// Whether this actor is the native headless asset activation service.
+    #[must_use]
+    pub fn asset_activation_enabled(&self) -> bool {
+        self.shared.asset_activation_enabled
+    }
+
     pub fn attach_with_capabilities(
         &self,
         capabilities: SessionCapabilities,
@@ -1334,6 +1425,22 @@ impl SessionControlService {
         self.shared.request_stop();
     }
 
+    pub(crate) fn try_join_finished(&mut self) -> Option<SessionShutdownReport> {
+        self.shared.request_stop();
+        let join = self.join.as_ref()?;
+        if !join.is_finished() {
+            return None;
+        }
+        let join = self.join.take().expect("actor handle checked above");
+        Some(join.join().unwrap_or_else(|payload| {
+            shutdown_report(
+                &self.shared,
+                SessionTermination::Panicked(panic_message(payload)),
+                Tick(0),
+            )
+        }))
+    }
+
     pub fn shutdown(mut self) -> SessionShutdownReport {
         self.shared.request_stop();
         self.join
@@ -1385,6 +1492,12 @@ impl SessionControlClient {
         self.shared.asset_preparation_enabled
     }
 
+    /// Whether this attachment is connected to native headless asset activation.
+    #[must_use]
+    pub fn asset_activation_enabled(&self) -> bool {
+        self.shared.asset_activation_enabled
+    }
+
     /// Whether the session has closed request admission or stopped. A retained latest frame may
     /// still be readable after this returns true; frame availability is not a liveness signal.
     #[must_use]
@@ -1411,6 +1524,11 @@ impl SessionControlClient {
         {
             return Err(SessionSubmitError::AssetPreparationUnavailable);
         }
+        if matches!(&operation, SessionOperation::AssetActivation(_))
+            && !self.shared.asset_activation_enabled
+        {
+            return Err(SessionSubmitError::AssetActivationUnavailable);
+        }
         if operation.needs_inspect() && !self.attachment.capabilities.inspect
             || operation.needs_mutate() && !self.attachment.capabilities.mutate
             || operation.is_step() && !self.attachment.capabilities.manual_step
@@ -1432,6 +1550,18 @@ impl SessionControlClient {
                 command_id: Some(id),
             })
             | SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel {
+                command_id: Some(id),
+                ..
+            }) => Some(*id),
+            SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                command_id: Some(id),
+                ..
+            })
+            | SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(id),
+                ..
+            })
+            | SessionOperation::AssetActivation(AssetActivationOperation::Cancel {
                 command_id: Some(id),
                 ..
             }) => Some(*id),
@@ -1552,10 +1682,37 @@ fn preparation_port_error(error: ProjectPreparationPortError) -> SessionRequestE
         ProjectPreparationPortError::InvalidEpoch => SessionRequestError::InvalidCandidate,
         ProjectPreparationPortError::NoActiveCandidate => SessionRequestError::CandidateNotActive,
         ProjectPreparationPortError::Capacity => SessionRequestError::PreparationCapacity,
+        ProjectPreparationPortError::GenerationMismatch => {
+            SessionRequestError::ActiveGenerationMismatch
+        }
+        ProjectPreparationPortError::GenerationExhausted => {
+            SessionRequestError::ProjectGenerationExhausted
+        }
         ProjectPreparationPortError::SessionMismatch
         | ProjectPreparationPortError::AlreadyTaken
         | ProjectPreparationPortError::AlreadyBound => SessionRequestError::ActorFailed(
             "preparation port violated its session binding".to_owned(),
+        ),
+    }
+}
+
+fn activation_port_error(error: ProjectPreparationPortError) -> SessionRequestError {
+    match error {
+        ProjectPreparationPortError::Busy => SessionRequestError::ActivationBusy,
+        ProjectPreparationPortError::Stopped => SessionRequestError::PreparationStopped,
+        ProjectPreparationPortError::InvalidEpoch => SessionRequestError::InvalidActivation,
+        ProjectPreparationPortError::NoActiveCandidate => SessionRequestError::ActivationNotStaged,
+        ProjectPreparationPortError::Capacity => SessionRequestError::ActivationCapacity,
+        ProjectPreparationPortError::GenerationMismatch => {
+            SessionRequestError::ActiveGenerationMismatch
+        }
+        ProjectPreparationPortError::GenerationExhausted => {
+            SessionRequestError::ProjectGenerationExhausted
+        }
+        ProjectPreparationPortError::SessionMismatch
+        | ProjectPreparationPortError::AlreadyTaken
+        | ProjectPreparationPortError::AlreadyBound => SessionRequestError::ActorFailed(
+            "activation port violated its session binding".to_owned(),
         ),
     }
 }
@@ -1594,7 +1751,8 @@ fn validate_operation(
         | SessionOperation::Status
         | SessionOperation::AssetPreparation(AssetPreparationOperation::Status)
         | SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare { .. })
-        | SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel { .. }) => {}
+        | SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel { .. })
+        | SessionOperation::AssetActivation(_) => {}
         #[cfg(feature = "audio")]
         SessionOperation::Audio(operation) => match operation {
             SessionAudioOperation::Status | SessionAudioOperation::Voice { .. } => {}
@@ -1651,6 +1809,7 @@ enum CachedCommandResult {
     #[cfg(feature = "audio")]
     Audio(SessionAudioCommandResult),
     Preparation(AssetPreparationCommandResult),
+    Activation(AssetActivationCommandResult),
 }
 
 #[derive(Clone)]
@@ -1666,6 +1825,10 @@ struct ControlActor {
     shared: Arc<ControlShared>,
     last_advance: Instant,
     last_published_sequence: u64,
+    last_authority_snapshot_sequence: u64,
+    frame_needs_publish: bool,
+    active_project_generation: u64,
+    active_project_digest: String,
     next_server_command_id: u128,
     caller_command_high_water: Option<u128>,
     pending_commands: HashMap<CommandId, PendingCommand>,
@@ -1673,9 +1836,22 @@ struct ControlActor {
     replay_order: VecDeque<CommandId>,
     preparation_port: Option<ProjectPreparationPort>,
     last_issued_preparation_epoch: u64,
+    cancelled_preparation_epoch: Option<u64>,
+    last_issued_activation_sequence: u64,
+    current_activation: Option<crate::AssetActivationSummary>,
+    latest_activation_failure: Option<crate::AssetActivationFailure>,
+    staged_project: Option<StagedProjectCandidate>,
+    deferred_stage_result: Option<StageResult>,
     #[cfg(feature = "audio")]
     audio: Option<ProjectAudioRuntime>,
     active_request: Option<ActiveRequest>,
+}
+
+struct StagedProjectCandidate {
+    activation: ActivationId,
+    candidate: PreparationId,
+    expected_active_generation: u64,
+    project: Arc<PreparedProject>,
 }
 
 fn run_control_actor(
@@ -1791,12 +1967,17 @@ fn run_control_actor(
             Tick(0),
         );
     }
+    let active_project_digest = session.project().digest().to_owned();
     let mut actor = ControlActor {
         session,
         config,
         shared: Arc::clone(&shared),
         last_advance: Instant::now(),
         last_published_sequence: 0,
+        last_authority_snapshot_sequence: 0,
+        frame_needs_publish: true,
+        active_project_generation: 1,
+        active_project_digest,
         next_server_command_id: 1,
         caller_command_high_water: None,
         pending_commands: HashMap::new(),
@@ -1804,6 +1985,12 @@ fn run_control_actor(
         replay_order,
         preparation_port,
         last_issued_preparation_epoch: 0,
+        cancelled_preparation_epoch: None,
+        last_issued_activation_sequence: 0,
+        current_activation: None,
+        latest_activation_failure: None,
+        staged_project: None,
+        deferred_stage_result: None,
         #[cfg(feature = "audio")]
         audio,
         active_request: None,
@@ -1901,6 +2088,14 @@ impl ControlActor {
             if self.shared.stop.is_requested() {
                 return Ok(());
             }
+            if self
+                .preparation_port
+                .as_ref()
+                .is_some_and(ProjectPreparationPort::worker_panicked)
+            {
+                return Err("project preparation worker panicked".to_owned());
+            }
+            self.poll_activation_stage_results()?;
             #[cfg(feature = "audio")]
             if let Some(audio) = self.audio.as_mut() {
                 audio
@@ -1941,6 +2136,9 @@ impl ControlActor {
                     self.process_step_report(&report);
                     let _ = self.publish_latest_frame();
                 }
+            }
+            if self.frame_needs_publish {
+                self.publish_latest_frame()?;
             }
         }
     }
@@ -2017,6 +2215,9 @@ impl ControlActor {
             SessionOperation::AssetPreparation(operation) => {
                 self.preparation_operation(cell, credit, operation);
             }
+            SessionOperation::AssetActivation(operation) => {
+                self.asset_activation_operation(cell, credit, operation);
+            }
             #[cfg(feature = "audio")]
             SessionOperation::Audio(operation) => {
                 self.audio_operation(cell, credit, operation);
@@ -2056,6 +2257,560 @@ impl ControlActor {
             mutation @ (AssetPreparationOperation::Prepare { .. }
             | AssetPreparationOperation::Cancel { .. }) => {
                 self.submit_preparation_command(cell, credit, mutation);
+            }
+        }
+    }
+
+    fn asset_activation_operation(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        operation: AssetActivationOperation,
+    ) {
+        match operation {
+            AssetActivationOperation::Status => {
+                if MAX_PREPARATION_STATUS_RESULT_BYTES > MAX_RESULT_BYTES_PER_TICKET {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ResultTooLarge));
+                    return;
+                }
+                let session = self.session.engine().world().session();
+                let result = self
+                    .preparation_port
+                    .as_ref()
+                    .ok_or(SessionRequestError::AssetActivationUnavailable)
+                    .and_then(|port| {
+                        let (state, memory) =
+                            port.activation_snapshot().map_err(activation_port_error)?;
+                        Ok(AssetActivationStatus::new(
+                            session,
+                            state,
+                            self.active_project_generation,
+                            self.active_project_digest.clone(),
+                            self.current_activation.clone(),
+                            self.latest_activation_failure.clone(),
+                            memory,
+                        ))
+                    })
+                    .map(Box::new)
+                    .map(AssetActivationRequestResult::Status)
+                    .map(SessionRequestResult::AssetActivation);
+                self.finish_cell(cell, credit, result);
+            }
+            mutation @ (AssetActivationOperation::Stage { .. }
+            | AssetActivationOperation::Commit { .. }
+            | AssetActivationOperation::Cancel { .. }) => {
+                self.submit_asset_activation_command(cell, credit, mutation);
+            }
+        }
+    }
+
+    fn submit_asset_activation_command(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        operation: AssetActivationOperation,
+    ) {
+        let requested_id = match &operation {
+            AssetActivationOperation::Stage { command_id, .. }
+            | AssetActivationOperation::Commit { command_id, .. }
+            | AssetActivationOperation::Cancel { command_id, .. } => *command_id,
+            AssetActivationOperation::Status => unreachable!("status has no command ID"),
+        };
+        let (command_id, caller_id) = match requested_id {
+            Some(command_id) => (command_id, true),
+            None => match self.next_server_command_id() {
+                Some(command_id) => (command_id, false),
+                None => {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ActorFailed(
+                            "server command identifier space is exhausted".to_owned(),
+                        )),
+                    );
+                    return;
+                }
+            },
+        };
+        let Some((cell, credit)) =
+            self.replay_existing_command(cell, credit, command_id, caller_id)
+        else {
+            return;
+        };
+        if self.preparation_port.is_none() {
+            self.finish_cell(
+                cell,
+                credit,
+                Err(SessionRequestError::AssetActivationUnavailable),
+            );
+            return;
+        }
+
+        let session = self.session.engine().world().session();
+        let outcome = match operation {
+            AssetActivationOperation::Stage {
+                candidate,
+                expected_active_generation,
+                ..
+            } => {
+                if candidate.session() != session || candidate.epoch() == 0 {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::InvalidCandidate));
+                    return;
+                }
+                if candidate.epoch() > self.last_issued_preparation_epoch {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::InvalidCandidate));
+                    return;
+                }
+                if candidate.epoch() < self.last_issued_preparation_epoch {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::CandidateExpired));
+                    return;
+                }
+                if expected_active_generation != self.active_project_generation {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ActiveGenerationMismatch),
+                    );
+                    return;
+                }
+                let preparation = match self
+                    .preparation_port
+                    .as_ref()
+                    .expect("activation port checked above")
+                    .try_status(session)
+                {
+                    Ok(status) => status,
+                    Err(error) => {
+                        self.finish_cell(cell, credit, Err(preparation_port_error(error)));
+                        return;
+                    }
+                };
+                if matches!(
+                    preparation.state(),
+                    crate::PreparationState::Pending | crate::PreparationState::Preparing
+                ) {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::PreparationBusy));
+                    return;
+                }
+                let Some(ready) = preparation.ready_candidate() else {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::CandidateNotActive));
+                    return;
+                };
+                if ready.id() != candidate || !ready.is_current() {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::CandidateNotActive));
+                    return;
+                }
+                let Some(sequence) = self.last_issued_activation_sequence.checked_add(1) else {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ActivationSequenceExhausted),
+                    );
+                    return;
+                };
+                if let Err(error) = self.prepare_replay_slot() {
+                    self.finish_cell(cell, credit, Err(error));
+                    return;
+                }
+                if std::mem::size_of::<AssetActivationCommandResult>() + 128
+                    > MAX_RESULT_BYTES_PER_TICKET
+                {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ResultTooLarge));
+                    return;
+                }
+                let activation = ActivationId::from_parts(session, sequence);
+                let accepted = self
+                    .preparation_port
+                    .as_ref()
+                    .expect("activation port checked above")
+                    .try_stage(sequence, candidate.epoch(), expected_active_generation);
+                if let Err(error) = accepted {
+                    self.finish_cell(cell, credit, Err(activation_port_error(error)));
+                    return;
+                }
+                if let Some(active) = self.active_request.as_mut() {
+                    active.possible_command_id = Some(command_id);
+                }
+                self.last_issued_activation_sequence = sequence;
+                self.current_activation = Some(crate::AssetActivationSummary::new(
+                    activation,
+                    candidate,
+                    expected_active_generation,
+                    ready.source_digest().to_owned(),
+                    None,
+                ));
+                self.latest_activation_failure = None;
+                self.staged_project = None;
+                self.deferred_stage_result = None;
+                self.drain_stage_results();
+                AssetActivationCommandOutcome::StageAccepted {
+                    activation,
+                    candidate,
+                }
+            }
+            AssetActivationOperation::Commit {
+                activation,
+                expected_active_generation,
+                ..
+            } => {
+                if let Err(error) = self.validate_activation_id(activation, session) {
+                    self.finish_cell(cell, credit, Err(error));
+                    return;
+                }
+                if expected_active_generation != self.active_project_generation {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ActiveGenerationMismatch),
+                    );
+                    return;
+                }
+                let Some(staged) = self.staged_project.as_ref() else {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ActivationNotStaged));
+                    return;
+                };
+                if staged.activation != activation
+                    || staged.expected_active_generation != expected_active_generation
+                {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ActivationNotStaged));
+                    return;
+                }
+                let candidate = staged.candidate;
+                let new_digest = staged.project.digest().to_owned();
+                let project = Arc::clone(&staged.project);
+                let Some(generation) = self.active_project_generation.checked_add(1) else {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ProjectGenerationExhausted),
+                    );
+                    return;
+                };
+                if self.last_published_sequence.checked_add(1).is_none() {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ActorFailed(
+                            "session presentation frame sequence space is exhausted".to_owned(),
+                        )),
+                    );
+                    return;
+                }
+                if let Err(error) = self.prepare_replay_slot() {
+                    self.finish_cell(cell, credit, Err(error));
+                    return;
+                }
+                if std::mem::size_of::<AssetActivationCommandResult>() + 128
+                    > MAX_RESULT_BYTES_PER_TICKET
+                {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ResultTooLarge));
+                    return;
+                }
+                if let Some(active) = self.active_request.as_mut() {
+                    active.possible_command_id = Some(command_id);
+                }
+                let mut displaced = None;
+                let port = self
+                    .preparation_port
+                    .as_ref()
+                    .expect("activation port checked above");
+                let session = &mut self.session;
+                let accepted = port.try_commit_activation(
+                    activation.sequence(),
+                    candidate.epoch(),
+                    expected_active_generation,
+                    generation,
+                    new_digest.clone(),
+                    || {
+                        displaced = Some(session.replace_project_source(project));
+                    },
+                );
+                if let Err(error) = accepted {
+                    if let Some(active) = self.active_request.as_mut() {
+                        active.possible_command_id = None;
+                    }
+                    self.finish_cell(cell, credit, Err(activation_port_error(error)));
+                    return;
+                }
+                if caller_id {
+                    self.caller_command_high_water = Some(
+                        self.caller_command_high_water
+                            .map_or(command_id.get(), |current| current.max(command_id.get())),
+                    );
+                }
+                // The worker registry still owns the old source; this local drop cannot be its
+                // final large deallocation. Promotion/reclamation occurs on the worker thread.
+                drop(displaced.take());
+                self.active_project_generation = generation;
+                self.active_project_digest = new_digest.clone();
+                self.current_activation = Some(crate::AssetActivationSummary::new(
+                    activation,
+                    candidate,
+                    expected_active_generation,
+                    new_digest,
+                    Some(generation),
+                ));
+                self.latest_activation_failure = None;
+                self.staged_project = None;
+                self.frame_needs_publish = true;
+                AssetActivationCommandOutcome::CommitApplied {
+                    activation,
+                    generation,
+                }
+            }
+            AssetActivationOperation::Cancel { activation, .. } => {
+                if let Err(error) = self.validate_activation_id(activation, session) {
+                    self.finish_cell(cell, credit, Err(error));
+                    return;
+                }
+                if self
+                    .current_activation
+                    .as_ref()
+                    .is_some_and(|summary| summary.committed_generation().is_some())
+                {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ActivationNotStaged));
+                    return;
+                }
+                if let Err(error) = self.prepare_replay_slot() {
+                    self.finish_cell(cell, credit, Err(error));
+                    return;
+                }
+                if std::mem::size_of::<AssetActivationCommandResult>() + 128
+                    > MAX_RESULT_BYTES_PER_TICKET
+                {
+                    self.finish_cell(cell, credit, Err(SessionRequestError::ResultTooLarge));
+                    return;
+                }
+                if let Some(active) = self.active_request.as_mut() {
+                    active.possible_command_id = Some(command_id);
+                }
+                if let Err(error) = self
+                    .preparation_port
+                    .as_ref()
+                    .expect("activation port checked above")
+                    .try_cancel_activation(activation.sequence())
+                {
+                    if let Some(active) = self.active_request.as_mut() {
+                        active.possible_command_id = None;
+                    }
+                    self.finish_cell(cell, credit, Err(activation_port_error(error)));
+                    return;
+                }
+                self.staged_project = None;
+                self.drain_stage_results();
+                AssetActivationCommandOutcome::CancelAccepted { activation }
+            }
+            AssetActivationOperation::Status => unreachable!("status handled above"),
+        };
+
+        if caller_id {
+            self.caller_command_high_water = Some(
+                self.caller_command_high_water
+                    .map_or(command_id.get(), |current| current.max(command_id.get())),
+            );
+        }
+        let observed_tick = self.session.engine().clock().current_tick();
+        let command = AssetActivationCommandResult::new(command_id, observed_tick, outcome);
+        self.remember_completed(
+            command_id,
+            ReplayEntry {
+                apply_tick: None,
+                resolve_tick: None,
+                result: CachedCommandResult::Activation(command.clone()),
+            },
+        );
+        if let Some(active) = self.active_request.as_mut() {
+            active.possible_command_id = None;
+        }
+        self.finish_cell(
+            cell,
+            credit,
+            Ok(SessionRequestResult::AssetActivation(
+                AssetActivationRequestResult::Command(command),
+            )),
+        );
+    }
+
+    fn validate_activation_id(
+        &self,
+        activation: ActivationId,
+        session: SessionId,
+    ) -> Result<(), SessionRequestError> {
+        if activation.session() != session
+            || activation.sequence() == 0
+            || activation.sequence() > self.last_issued_activation_sequence
+        {
+            return Err(SessionRequestError::InvalidActivation);
+        }
+        if activation.sequence() < self.last_issued_activation_sequence {
+            return Err(SessionRequestError::ActivationExpired);
+        }
+        if !self
+            .current_activation
+            .as_ref()
+            .is_some_and(|summary| summary.id() == activation)
+        {
+            return Err(SessionRequestError::ActivationExpired);
+        }
+        Ok(())
+    }
+
+    fn poll_activation_stage_results(&mut self) -> Result<(), String> {
+        if let Some(result) = self.deferred_stage_result.take()
+            && !self.consume_activation_stage_result(result)
+        {
+            return Ok(());
+        }
+        loop {
+            let result = self
+                .preparation_port
+                .as_mut()
+                .and_then(ProjectPreparationPort::try_take_stage_result);
+            let Some(result) = result else {
+                break;
+            };
+            if !self.consume_activation_stage_result(result) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn drain_stage_results(&mut self) {
+        self.deferred_stage_result = None;
+        while let Some(result) = self
+            .preparation_port
+            .as_mut()
+            .and_then(ProjectPreparationPort::try_take_stage_result)
+        {
+            drop(result);
+        }
+    }
+
+    fn consume_activation_stage_result(&mut self, result: StageResult) -> bool {
+        match result {
+            StageResult::Ready {
+                sequence,
+                epoch,
+                project,
+            } => {
+                let session = self.session.engine().world().session();
+                let activation = ActivationId::from_parts(session, sequence);
+                let candidate = PreparationId::from_parts(session, epoch);
+                let current = self.current_activation.as_ref().is_some_and(|summary| {
+                    summary.id() == activation
+                        && summary.candidate() == candidate
+                        && summary.expected_active_generation() == self.active_project_generation
+                }) && epoch == self.last_issued_preparation_epoch
+                    && self.cancelled_preparation_epoch != Some(epoch);
+                if !current {
+                    drop(project);
+                    return true;
+                }
+                if let Some(port) = self.preparation_port.as_ref() {
+                    match port.mark_stage_result(sequence, epoch, true) {
+                        Ok(()) => {}
+                        Err(ProjectPreparationPortError::Busy) => {
+                            self.deferred_stage_result = Some(StageResult::Ready {
+                                sequence,
+                                epoch,
+                                project,
+                            });
+                            return false;
+                        }
+                        Err(_) => {
+                            drop(project);
+                            return true;
+                        }
+                    }
+                } else {
+                    drop(project);
+                    return true;
+                }
+                self.latest_activation_failure = None;
+                self.staged_project = Some(StagedProjectCandidate {
+                    activation,
+                    candidate,
+                    expected_active_generation: self.active_project_generation,
+                    project,
+                });
+                true
+            }
+            StageResult::Incompatible {
+                sequence,
+                epoch,
+                error,
+            } => {
+                let session = self.session.engine().world().session();
+                let activation = ActivationId::from_parts(session, sequence);
+                if self
+                    .current_activation
+                    .as_ref()
+                    .is_some_and(|summary| summary.id() == activation)
+                    && epoch == self.last_issued_preparation_epoch
+                    && self.cancelled_preparation_epoch != Some(epoch)
+                {
+                    if let Some(port) = self.preparation_port.as_ref() {
+                        match port.mark_stage_result(sequence, epoch, false) {
+                            Ok(()) => {}
+                            Err(ProjectPreparationPortError::Busy) => {
+                                self.deferred_stage_result = Some(StageResult::Incompatible {
+                                    sequence,
+                                    epoch,
+                                    error,
+                                });
+                                return false;
+                            }
+                            Err(_) => return true,
+                        }
+                    } else {
+                        return true;
+                    }
+                    let mut truncated = false;
+                    let message =
+                        bounded_activation_text(&error.to_string(), 2_048, &mut truncated);
+                    self.latest_activation_failure = Some(crate::AssetActivationFailure::new(
+                        activation,
+                        "incompatible_topology".to_owned(),
+                        message,
+                        Some(error),
+                    ));
+                    let _ = epoch;
+                }
+                true
+            }
+            StageResult::Failed { sequence, epoch } => {
+                let session = self.session.engine().world().session();
+                let activation = ActivationId::from_parts(session, sequence);
+                if self
+                    .current_activation
+                    .as_ref()
+                    .is_some_and(|summary| summary.id() == activation)
+                    && epoch == self.last_issued_preparation_epoch
+                    && self.cancelled_preparation_epoch != Some(epoch)
+                {
+                    if let Some(port) = self.preparation_port.as_ref() {
+                        match port.mark_stage_result(sequence, epoch, false) {
+                            Ok(()) => {}
+                            Err(ProjectPreparationPortError::Busy) => {
+                                self.deferred_stage_result =
+                                    Some(StageResult::Failed { sequence, epoch });
+                                return false;
+                            }
+                            Err(_) => return true,
+                        }
+                    } else {
+                        return true;
+                    }
+                    self.latest_activation_failure = Some(crate::AssetActivationFailure::new(
+                        activation,
+                        "internal".to_owned(),
+                        "the prepared candidate could not be staged".to_owned(),
+                        None,
+                    ));
+                    let _ = epoch;
+                }
+                true
             }
         }
     }
@@ -2163,9 +2918,15 @@ impl ControlActor {
             return;
         }
 
-        if matches!(operation, AssetPreparationOperation::Prepare { .. }) {
+        if matches!(&operation, AssetPreparationOperation::Prepare { .. }) {
             self.last_issued_preparation_epoch = candidate.epoch();
+            self.cancelled_preparation_epoch = None;
+            self.drain_stage_results();
+        } else {
+            self.cancelled_preparation_epoch = Some(candidate.epoch());
+            self.drain_stage_results();
         }
+        self.staged_project = None;
         if caller_id {
             self.caller_command_high_water = Some(
                 self.caller_command_high_water
@@ -2674,6 +3435,9 @@ impl ControlActor {
             CachedCommandResult::Preparation(result) => {
                 SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(result))
             }
+            CachedCommandResult::Activation(result) => {
+                SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(result))
+            }
         };
         self.finish_cell(cell, credit, Ok(result));
     }
@@ -2846,23 +3610,33 @@ impl ControlActor {
             .latest_snapshot()
             .map_err(|error| format!("snapshot read failed: {error}"))?
             .ok_or_else(|| "no Engine snapshot has been published".to_owned())?;
-        if snapshot.sequence <= self.last_published_sequence {
+        if snapshot.sequence <= self.last_authority_snapshot_sequence && !self.frame_needs_publish {
             return Ok(());
         }
-        let sequence = snapshot.sequence;
+        let authority_snapshot_sequence = snapshot.sequence;
+        let sequence = if authority_snapshot_sequence > self.last_published_sequence {
+            snapshot.sequence
+        } else {
+            let Some(sequence) = self.last_published_sequence.checked_add(1) else {
+                return Err("session presentation frame sequence space is exhausted".to_owned());
+            };
+            sequence
+        };
         let prepared = self.session.project();
         let frame = SessionFrame {
             session: self.session.engine().world().session(),
             tick: snapshot.tick,
-            sequence: snapshot.sequence,
-            project_generation: 1,
-            source_digest: prepared.digest().to_owned(),
+            sequence,
+            authority_snapshot_sequence,
+            project_generation: self.active_project_generation,
+            source_digest: self.active_project_digest.clone(),
             source_scene_revision: prepared.scene().revision,
             snapshot,
         };
         let snapshot = Arc::downgrade(&frame.snapshot);
         let entities = Arc::downgrade(&frame.snapshot.entities);
-        self.shared
+        match self
+            .shared
             .frames
             .try_publish_with_backing_probe(frame, move || {
                 let snapshot = snapshot.upgrade();
@@ -2871,9 +3645,19 @@ impl ControlActor {
                     let internal_and_probe = 1 + usize::from(snapshot.is_some());
                     Arc::strong_count(&entities) > internal_and_probe
                 })
-            })
-            .map_err(|error| format!("session frame mailbox rejected publication: {error:?}"))?;
-        self.last_published_sequence = sequence;
+            }) {
+            Ok(()) => {
+                self.last_published_sequence = sequence;
+                self.last_authority_snapshot_sequence = authority_snapshot_sequence;
+                self.frame_needs_publish = false;
+            }
+            Err(MailboxError::Busy | MailboxError::AtCapacity) => {
+                self.frame_needs_publish = true;
+            }
+            Err(MailboxError::Poisoned) => {
+                return Err("session frame mailbox was poisoned".to_owned());
+            }
+        }
         Ok(())
     }
 }
@@ -2939,9 +3723,27 @@ fn estimate_result_bytes(result: &SessionRequestResult) -> usize {
         SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_)) => {
             std::mem::size_of::<AssetPreparationCommandResult>() + 128
         }
+        SessionRequestResult::AssetActivation(AssetActivationRequestResult::Status(_)) => {
+            MAX_PREPARATION_STATUS_RESULT_BYTES
+        }
+        SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(_)) => {
+            std::mem::size_of::<AssetActivationCommandResult>() + 128
+        }
         #[cfg(feature = "audio")]
         SessionRequestResult::Audio(audio) => estimate_audio_result_bytes(audio),
     }
+}
+
+fn bounded_activation_text(input: &str, max_bytes: usize, truncated: &mut bool) -> String {
+    if input.len() <= max_bytes {
+        return input.to_owned();
+    }
+    *truncated = true;
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    input[..end].to_owned()
 }
 
 #[cfg(feature = "audio")]
@@ -3042,7 +3844,9 @@ mod tests {
     use crate::EngineConfig;
     use crate::project_preparation::PreparationTestProject;
     use crate::{
-        AssetPreparationCommandOutcome, AssetPreparationOperation, AssetPreparationResult,
+        AssetActivationCommandOutcome, AssetActivationOperation, AssetActivationRequestResult,
+        AssetActivationState, AssetPreparationCommandOutcome, AssetPreparationOperation,
+        AssetPreparationResult, NativeProjectActivationService, NativeProjectActivationShutdown,
         NativeProjectPreparationOptions, NativeProjectPreparationService, PreparationId,
         PreparationState, PreparationWorkerShutdown,
     };
@@ -4949,6 +5753,256 @@ mod tests {
         }
     }
 
+    #[test]
+    fn headless_activation_commits_same_engine_and_republishes_authority_under_new_source() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start headless asset activation service");
+        let gate = service.block_preparation_for_test(1);
+        let client = service.session().attach().unwrap();
+        let initial_frame = wait_for_frame(&client);
+        let session = initial_frame.session();
+        let initial_digest = initial_frame.source_digest().to_owned();
+        assert_eq!(initial_frame.project_generation(), 1);
+        assert_eq!(initial_frame.tick(), Tick(0));
+
+        let initial_transform = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::GetTransform {
+                target: SessionEntityTarget::StableId(stable_id("entity:hero")),
+            },
+        )
+        .expect("initial authority entity should exist");
+        let SessionRequestResult::Transform(initial_transform) = initial_transform else {
+            panic!("transform query returned the wrong result")
+        };
+        let entity_handle = initial_transform.entity.handle;
+
+        let mut set = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
+                target: SessionEntityTarget::Handle(entity_handle),
+                command_id: Some(CommandId::from_raw(88_010)),
+                expected_revision: Revision(0),
+                apply_at: Some(Tick(1)),
+                transform: moved(9.0),
+            },
+        );
+        set.wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
+            .unwrap();
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        wait_terminal(&step);
+        assert!(matches!(
+            wait_terminal(&set).terminal().unwrap(),
+            Ok(SessionRequestResult::Command(_))
+        ));
+        set.acknowledge().unwrap();
+        step.acknowledge().unwrap();
+        let frame_before_commit = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = wait_for_frame(&client);
+                if frame.tick() == Tick(1) {
+                    break frame;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "tick-one frame was not published"
+                );
+                thread::yield_now();
+            }
+        };
+        assert_eq!(frame_before_commit.project_generation(), 1);
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let prepare = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(CommandId::from_raw(88_011)),
+            }),
+        )
+        .expect("candidate preparation should be accepted");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(prepare)) =
+            prepare
+        else {
+            panic!("prepare returned the wrong result")
+        };
+        let AssetPreparationCommandOutcome::PrepareAccepted { candidate } = *prepare.outcome()
+        else {
+            panic!("prepare did not return its candidate")
+        };
+        gate.wait_until_entered();
+
+        // The same command ID remains available after the pre-effect Busy result.
+        let early_stage_id = CommandId::from_raw(88_012);
+        let mut early_stage = submit_after_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                command_id: Some(early_stage_id),
+                candidate,
+                expected_active_generation: 1,
+            }),
+        );
+        assert_eq!(
+            wait_terminal(&early_stage).terminal().unwrap(),
+            &Err(SessionRequestError::PreparationBusy)
+        );
+        early_stage.acknowledge().unwrap();
+
+        gate.release();
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let stage = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                command_id: Some(early_stage_id),
+                candidate,
+                expected_active_generation: 1,
+            }),
+        )
+        .expect("ready candidate should stage");
+        let SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(stage)) =
+            stage
+        else {
+            panic!("stage returned the wrong result")
+        };
+        let AssetActivationCommandOutcome::StageAccepted { activation, .. } = *stage.outcome()
+        else {
+            panic!("stage did not return an activation")
+        };
+        let staged = wait_for_activation_state(&client, AssetActivationState::Staged);
+        assert_eq!(staged.session(), session);
+        assert_eq!(staged.active_generation(), 1);
+
+        let commit_id = CommandId::from_raw(88_013);
+        let commit_operation =
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(commit_id),
+                activation,
+                expected_active_generation: 1,
+            });
+        let locked_worker_state = service.hold_worker_state_for_test();
+        let mut busy_commit = submit_after_busy(&client, commit_operation.clone());
+        let busy_commit_result = wait_terminal(&busy_commit)
+            .terminal()
+            .expect("busy commit must reach a terminal result")
+            .clone();
+        assert_eq!(
+            busy_commit_result,
+            Err(SessionRequestError::ActivationBusy),
+            "transient commit contention must not consume the caller command ID"
+        );
+        busy_commit.acknowledge().unwrap();
+        drop(locked_worker_state);
+
+        let mut expired_command = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
+                target: SessionEntityTarget::Handle(entity_handle),
+                command_id: Some(CommandId::from_raw(88_009)),
+                expected_revision: Revision(1),
+                apply_at: Some(Tick(2)),
+                transform: moved(10.0),
+            },
+        );
+        let expired_result = wait_terminal(&expired_command)
+            .terminal()
+            .expect("old command ID must reach a terminal result")
+            .clone();
+        assert!(
+            matches!(
+                expired_result,
+                Err(SessionRequestError::ReplayWindowExpired {
+                    command_id: 88_009,
+                    high_water: 88_012,
+                })
+            ),
+            "transient commit contention must preserve the earlier caller replay high-water"
+        );
+        expired_command.acknowledge().unwrap();
+
+        let commit = terminal_result_after_activation_busy(&client, commit_operation)
+            .expect("staged candidate should commit");
+        let SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(commit)) =
+            &commit
+        else {
+            panic!("commit returned the wrong result")
+        };
+        assert!(matches!(
+            commit.outcome(),
+            AssetActivationCommandOutcome::CommitApplied { generation: 2, .. }
+        ));
+
+        let committed_frame = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = wait_for_frame(&client);
+                if frame.project_generation() == 2 {
+                    break frame;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "generation-two frame was not published"
+                );
+                thread::yield_now();
+            }
+        };
+        assert_eq!(committed_frame.session(), session);
+        assert_eq!(committed_frame.tick(), frame_before_commit.tick());
+        assert_eq!(
+            committed_frame.authority_snapshot_sequence(),
+            frame_before_commit.authority_snapshot_sequence(),
+            "commit republishes the same authority snapshot without stepping"
+        );
+        assert!(committed_frame.sequence() > frame_before_commit.sequence());
+        assert_ne!(committed_frame.source_digest(), initial_digest);
+        assert_eq!(committed_frame.source_scene_revision(), 38);
+
+        let after_commit = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::GetTransform {
+                target: SessionEntityTarget::Handle(entity_handle),
+            },
+        )
+        .expect("same entity handle should remain bound after source replacement");
+        let SessionRequestResult::Transform(after_commit) = after_commit else {
+            panic!("transform query returned the wrong result")
+        };
+        assert_eq!(after_commit.entity.handle, entity_handle);
+        assert_eq!(after_commit.entity.transform, moved(9.0));
+        assert_eq!(after_commit.entity.revision, Revision(1));
+
+        // Cross-kind same-ID retry replays the committed activation before target validation.
+        let replay = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::SetTransform {
+                target: SessionEntityTarget::StableId(stable_id("missing:never-read")),
+                command_id: Some(commit_id),
+                expected_revision: Revision(0),
+                apply_at: Some(Tick(2)),
+                transform: moved(99.0),
+            },
+        )
+        .expect("cross-kind retry should replay the original activation result");
+        assert_eq!(
+            replay,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(
+                commit.clone()
+            ))
+        );
+
+        drop(client);
+        stop_activation_service(&mut service);
+        assert_eq!(
+            service.shutdown_report().unwrap().termination,
+            SessionTermination::StopRequested
+        );
+    }
+
     #[cfg(feature = "audio")]
     #[test]
     fn held_preparation_worker_does_not_block_reserved_step_or_same_actor_audio() {
@@ -5151,6 +6205,82 @@ mod tests {
                 Instant::now() < deadline,
                 "preparation remained busy past bounded retry deadline"
             );
+        }
+    }
+
+    fn terminal_result_after_activation_busy(
+        client: &super::SessionControlClient,
+        operation: SessionOperation,
+    ) -> Result<SessionRequestResult, SessionRequestError> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut ticket = submit_after_busy(client, operation.clone());
+            let progress = wait_terminal(&ticket);
+            let terminal = progress
+                .terminal()
+                .expect("terminal wait returns a terminal result")
+                .clone();
+            ticket.acknowledge().unwrap();
+            drop(progress);
+            match terminal {
+                Err(SessionRequestError::ActivationBusy | SessionRequestError::PreparationBusy)
+                    if Instant::now() < deadline =>
+                {
+                    thread::yield_now();
+                }
+                other => return other,
+            }
+            assert!(
+                Instant::now() < deadline,
+                "activation worker remained busy past bounded retry deadline"
+            );
+        }
+    }
+
+    fn wait_for_activation_state(
+        client: &super::SessionControlClient,
+        expected: AssetActivationState,
+    ) -> crate::AssetActivationStatus {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = terminal_result_after_activation_busy(
+                client,
+                SessionOperation::AssetActivation(AssetActivationOperation::Status),
+            );
+            let status = match result {
+                Ok(SessionRequestResult::AssetActivation(
+                    AssetActivationRequestResult::Status(status),
+                )) => status,
+                Ok(other) => panic!("activation status returned an unexpected result: {other:?}"),
+                Err(error) => panic!("activation status failed while waiting: {error}"),
+            };
+            if status.state() == expected {
+                return *status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "activation did not reach {expected:?} (actual {:?})",
+                status.state()
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn stop_activation_service(service: &mut NativeProjectActivationService) {
+        service.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.try_shutdown() {
+                Ok(NativeProjectActivationShutdown::Stopped) => return,
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "activation service shutdown timed out"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("activation service shutdown failed: {error}"),
+            }
         }
     }
 

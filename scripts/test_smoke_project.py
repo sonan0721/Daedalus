@@ -19,6 +19,9 @@ from smoke_project import (
     MAX_STDOUT_PIPE_FILL_BYTES,
     SmokeError,
     _JsonlProjectServer,
+    _asset_activation_command,
+    _asset_activation_expect_terminal_error,
+    _asset_activation_status,
     _asset_preparation_command,
     _asset_preparation_status,
     _fill_stdout_pipe,
@@ -201,6 +204,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertFalse(arguments.audio)
         self.assertFalse(arguments.audio_native)
         self.assertFalse(arguments.asset_preparation)
+        self.assertFalse(arguments.asset_activation)
         view_arguments = _parse_args(["--cli", "/bin/true", "--view"])
         self.assertTrue(view_arguments.view)
         asset_arguments = _parse_args(["--cli", "/bin/true", "--assets"])
@@ -217,6 +221,10 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             ["--cli", "/bin/true", "--asset-preparation"]
         )
         self.assertTrue(asset_preparation_arguments.asset_preparation)
+        asset_activation_arguments = _parse_args(
+            ["--cli", "/bin/true", "--asset-activation"]
+        )
+        self.assertTrue(asset_activation_arguments.asset_activation)
         combined_arguments = _parse_args(["--cli", "/bin/true", "--assets", "--view"])
         self.assertTrue(combined_arguments.assets)
         self.assertTrue(combined_arguments.view)
@@ -241,6 +249,11 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         )
         self.assertTrue(combined_audio_preparation.audio)
         self.assertTrue(combined_audio_preparation.asset_preparation)
+        combined_activation = _parse_args(
+            ["--cli", "/bin/true", "--asset-preparation", "--asset-activation"]
+        )
+        self.assertTrue(combined_activation.asset_preparation)
+        self.assertTrue(combined_activation.asset_activation)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])
@@ -422,6 +435,155 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertIsNotNone(server.process.poll())
         self.assertTrue(server._stdin.closed)
         self.assertTrue(server._stdout.closed)
+
+    def test_asset_activation_status_and_stage_use_bounded_ticket_ack(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "def read(): return json.loads(sys.stdin.readline())\n"
+            "def reply(request, result):\n"
+            " print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,'result':result}), flush=True)\n"
+            "status = {'session':'7','state':'idle','active_generation':'1','active_source_digest':'sha256:active',"
+            "'current_activation':None,'latest_failure':None,'memory':{'active_cooked_accounted_bytes':20,"
+            "'candidate_cooked_accounted_bytes':0,'retired_cooked_accounted_bytes':0,'total_cooked_accounted_bytes':20,"
+            "'max_cooked_accounted_bytes':100,'retired_generation_count':0}}\n"
+            "first = read(); assert first['request']['operation'] == {'op':'asset_activation_status'}\n"
+            "reply(first, {'kind':'submitted','data':{'ticket':'status-ticket','request_id_reused':False}})\n"
+            "poll = read(); reply(poll, {'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':"
+            "{'ok':True,'result':{'kind':'asset_activation','data':{'kind':'status','data':status}}}}})\n"
+            "ack = read(); assert ack['request']['ticket'] == 'status-ticket'; reply(ack, {'kind':'acked'})\n"
+            "stage_operation = {'op':'asset_activation_stage','candidate':{'session':'7','epoch':'3'},"
+            "'expected_active_generation':'1','command_id':'44'}\n"
+            "stage = read(); assert stage['request']['operation'] == stage_operation\n"
+            "reply(stage, {'kind':'submitted','data':{'ticket':'stage-ticket','request_id_reused':False}})\n"
+            "poll = read(); command = {'command_id':'44','observed_tick':'2','outcome':{'kind':'stage_accepted',"
+            "'data':{'activation':{'session':'7','sequence':'1'},'candidate':{'session':'7','epoch':'3'}}}}\n"
+            "terminal = {'ok':True,'result':{'kind':'asset_activation','data':{'kind':'command','data':command}}}\n"
+            "reply(poll, {'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':terminal}})\n"
+            "ack = read(); assert ack['request']['ticket'] == 'stage-ticket'; reply(ack, {'kind':'acked'})\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=STUB_TIMEOUT_SECONDS,
+            protocol_version=2,
+            process_label="asset-activation result stub",
+        )
+        with server:
+            status, _ = _asset_activation_status(
+                server,
+                "asset-activation-status-test",
+                timeout=STUB_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(status["active_generation"], "1")
+            command, _ = _asset_activation_command(
+                server,
+                "asset-activation-stage-test",
+                {
+                    "op": "asset_activation_stage",
+                    "candidate": {"session": "7", "epoch": "3"},
+                    "expected_active_generation": "1",
+                    "command_id": "44",
+                },
+                command_id="44",
+                outcome_kind="stage_accepted",
+                timeout=STUB_TIMEOUT_SECONDS,
+            )
+        self.assertEqual(command["outcome"]["data"]["activation"]["sequence"], "1")
+        self.assertIsNotNone(server.process.returncode)
+
+    def test_asset_activation_expected_generation_error_is_acked(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "def read(): return json.loads(sys.stdin.readline())\n"
+            "def reply(request, result):\n"
+            " print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,'result':result}), flush=True)\n"
+            "stale = read(); stale_operation = stale['request']['operation']\n"
+            "assert stale_operation['command_id'] == '44' and stale_operation['expected_active_generation'] == '1'\n"
+            "reply(stale, {'kind':'submitted','data':{'ticket':'stale-ticket','request_id_reused':False}})\n"
+            "poll = read(); terminal = {'ok':False,'error':{'code':'active_generation_mismatch','message':'stale generation'}}\n"
+            "reply(poll, {'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':terminal}})\n"
+            "ack = read(); assert ack['request']['op'] == 'ack' and ack['request']['ticket'] == 'stale-ticket'\n"
+            "reply(ack, {'kind':'acked'})\n"
+            "retry = read(); retry_operation = retry['request']['operation']\n"
+            "assert retry_operation['command_id'] == stale_operation['command_id']\n"
+            "assert retry_operation['expected_active_generation'] == '2'\n"
+            "reply(retry, {'kind':'submitted','data':{'ticket':'retry-ticket','request_id_reused':False}})\n"
+            "poll = read(); command = {'command_id':'44','observed_tick':'2','outcome':{'kind':'stage_accepted',"
+            "'data':{'activation':{'session':'7','sequence':'1'},'candidate':{'session':'7','epoch':'3'}}}}\n"
+            "terminal = {'ok':True,'result':{'kind':'asset_activation','data':{'kind':'command','data':command}}}\n"
+            "reply(poll, {'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':terminal}})\n"
+            "ack = read(); assert ack['request']['op'] == 'ack' and ack['request']['ticket'] == 'retry-ticket'\n"
+            "reply(ack, {'kind':'acked'})\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=STUB_TIMEOUT_SECONDS,
+            protocol_version=2,
+            process_label="asset-activation generation mismatch stub",
+        )
+        with server:
+            poll = _asset_activation_expect_terminal_error(
+                server,
+                "asset-activation-generation-mismatch-test",
+                {
+                    "op": "asset_activation_stage",
+                    "candidate": {"session": "7", "epoch": "3"},
+                    "expected_active_generation": "1",
+                    "command_id": "44",
+                },
+                code="active_generation_mismatch",
+                timeout=STUB_TIMEOUT_SECONDS,
+            )
+            command, _ = _asset_activation_command(
+                server,
+                "asset-activation-generation-mismatch-retry",
+                {
+                    "op": "asset_activation_stage",
+                    "candidate": {"session": "7", "epoch": "3"},
+                    "expected_active_generation": "2",
+                    "command_id": "44",
+                },
+                command_id="44",
+                outcome_kind="stage_accepted",
+                timeout=STUB_TIMEOUT_SECONDS,
+            )
+        self.assertEqual(poll["terminal"]["error"]["code"], "active_generation_mismatch")
+        self.assertEqual(command["command_id"], "44")
+        self.assertEqual(command["outcome"]["kind"], "stage_accepted")
+        self.assertIsNotNone(server.process.returncode)
+
+    def test_asset_activation_status_timeout_terminates_and_reaps_server(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys, time\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,"
+            "'result':{'kind':'submitted','data':{'ticket':'t1','request_id_reused':False}}}), flush=True)\n"
+            "json.loads(sys.stdin.readline())\n"
+            "time.sleep(30)\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=1.0,
+            protocol_version=2,
+            process_label="asset-activation stalled status stub",
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(SmokeError, "timed out"):
+            with server:
+                _asset_activation_status(
+                    server,
+                    "asset-activation-status-timeout",
+                    timeout=0.15,
+                )
+        self.assertIsNotNone(server.process.poll())
+        self.assertTrue(server._stdin.closed)
+        self.assertTrue(server._stdout.closed)
+        self.assertLess(time.monotonic() - started, 2.0)
 
     def test_invalid_jsonl_response_terminates_and_reaps_server_child(self) -> None:
         binary = self.create_server_stub(

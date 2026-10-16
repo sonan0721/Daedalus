@@ -251,6 +251,22 @@ The opt-in preparation mode adds twelve CPU checks using one persistent service/
 
 The coordinator's local runs passed 30 checks with preparation alone, 50 combined CPU checks, and 60 full native checks. The same preparation actor produced 256 frames of finite nonzero PCM, retained the authority tick, and reaped the voice after Stop and another 64 frames. Its native view subsequently presented the same session/source at authority tick 1. The separate native audio check reached backend-reported Ended. Python discovery passed 61 tests; clean archive and CI acceptance are recorded separately in the preparation worklog.
 
+## Native headless source-generation activation
+
+The opt-in CPU path uses one existing Engine and preparation/cache worker:
+
+```sh
+cargo test -p daedalus-runtime --all-features --locked headless_activation
+cargo test -p daedalus-cli --all-features --locked project_view_control::tests::activation_
+cargo build -p daedalus-cli --all-features --locked
+target/debug/daedalus project serve /path/to/project --protocol 2 --asset-activation
+python3 scripts/smoke_project.py --cli target/debug/daedalus --asset-activation
+```
+
+`--asset-activation` includes CPU preparation. Protocol 1, native viewing, and audio attached to that service are rejected before project/cache/device startup. The helper needs no GPU, output device, or network assets. It edits PNG, model-node, atlas, and WAV source data in one session, waits for actual Staged before Commit, and checks generation/source/frame identity while preserving the live handle, transform, revision, and authority tick. Replay, stale-generation retry, staged cancellation, incompatible topology, and fully stopped owner are also checked. The first actual CLI run passed 28 checks (CPU18 plus activation10) in 1.005974 seconds.
+
+This is CPU source activation. It does not update displayed pixels or an audio bank. `latest_frame.sequence` is the publication sequence; `authority_snapshot_sequence` identifies the underlying simulation snapshot. The first runtime test and process smoke passed, but lifecycle/retirement/panic stress, final integration, clean packaging, and CI acceptance remain pending. See the [headless contract](docs/03-architecture/headless-asset-generation.md) and [activation worklog](docs/06-worklog/2026-10-16-project-asset-activation.md) for exact source/binary identities and intermediate failures.
+
 ## Physics/audio integration
 
 The initial physics/audio adapters can be checked independently:

@@ -10,10 +10,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 
+use daedalus_content::asset_replacement::AssetReplacementMismatch;
 use daedalus_content::assets::{AssetImportMemorySummary, AssetImportMetrics};
 use daedalus_content::scene::StableId;
 use daedalus_core::{CommandId, EntityHandle, Revision, SessionId, Tick, Transform};
 use daedalus_runtime::{
+    ActivationId, AssetActivationCommandOutcome, AssetActivationOperation,
+    AssetActivationRequestResult, AssetActivationState, AssetActivationStatus,
     AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
     AssetPreparationResult, AssetPreparationStatus, AuthorityAdmission, FrameReadError,
     PreparationCandidateSummary, PreparationFailure, PreparationId, PreparationState,
@@ -44,49 +47,52 @@ const BASE_OPERATIONS: [&str; 7] = [
     "step",
     "status",
 ];
-const AUDIO_OPERATIONS: [&str; 12] = [
-    "project_info",
-    "get_transform",
-    "list_transforms",
-    "set_transform",
-    "spawn_transform",
-    "step",
-    "status",
+const AUDIO_EXTENSION: [&str; 5] = [
     "audio_status",
     "audio_clips",
     "audio_voice",
     "audio_voices",
     "audio_command",
 ];
-const PREPARATION_OPERATIONS: [&str; 10] = [
-    "project_info",
-    "get_transform",
-    "list_transforms",
-    "set_transform",
-    "spawn_transform",
-    "step",
-    "status",
+const PREPARATION_EXTENSION: [&str; 3] = [
     "asset_preparation_status",
     "asset_preparation_prepare",
     "asset_preparation_cancel",
 ];
-const AUDIO_PREPARATION_OPERATIONS: [&str; 15] = [
-    "project_info",
-    "get_transform",
-    "list_transforms",
-    "set_transform",
-    "spawn_transform",
-    "step",
-    "status",
-    "audio_status",
-    "audio_clips",
-    "audio_voice",
-    "audio_voices",
-    "audio_command",
-    "asset_preparation_status",
-    "asset_preparation_prepare",
-    "asset_preparation_cancel",
+const ACTIVATION_EXTENSION: [&str; 4] = [
+    "asset_activation_status",
+    "asset_activation_stage",
+    "asset_activation_commit",
+    "asset_activation_cancel",
 ];
+
+fn operation_names(audio: bool, preparation: bool, activation: bool) -> Vec<&'static str> {
+    let mut names = Vec::with_capacity(
+        BASE_OPERATIONS.len()
+            + if audio { AUDIO_EXTENSION.len() } else { 0 }
+            + if preparation {
+                PREPARATION_EXTENSION.len()
+            } else {
+                0
+            }
+            + if activation {
+                ACTIVATION_EXTENSION.len()
+            } else {
+                0
+            },
+    );
+    names.extend(BASE_OPERATIONS);
+    if audio {
+        names.extend(AUDIO_EXTENSION);
+    }
+    if preparation {
+        names.extend(PREPARATION_EXTENSION);
+    }
+    if activation {
+        names.extend(ACTIVATION_EXTENSION);
+    }
+    names
+}
 
 const TRANSPORT_RUNNING: u8 = 0;
 const TRANSPORT_EOF: u8 = 1;
@@ -314,6 +320,24 @@ enum WireOperation {
         command_id: Option<DecimalU128>,
         candidate: WirePreparationId,
     },
+    AssetActivationStatus,
+    AssetActivationStage {
+        #[serde(default)]
+        command_id: Option<DecimalU128>,
+        candidate: WirePreparationId,
+        expected_active_generation: DecimalU64,
+    },
+    AssetActivationCommit {
+        #[serde(default)]
+        command_id: Option<DecimalU128>,
+        activation: WireActivationId,
+        expected_active_generation: DecimalU64,
+    },
+    AssetActivationCancel {
+        #[serde(default)]
+        command_id: Option<DecimalU128>,
+        activation: WireActivationId,
+    },
     AudioStatus,
     AudioClips {
         #[serde(default)]
@@ -364,6 +388,13 @@ struct WirePreparationId {
     epoch: DecimalU64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireActivationId {
+    session: DecimalU64,
+    sequence: DecimalU64,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireAudioMutation {
@@ -394,6 +425,7 @@ impl WireOperation {
         &self,
         audio_enabled: bool,
         asset_preparation_enabled: bool,
+        asset_activation_enabled: bool,
     ) -> Result<SessionOperation, ProtocolError> {
         let operation = match self {
             Self::ProjectInfo { offset, limit } => {
@@ -491,6 +523,58 @@ impl WireOperation {
                 return Err(ProtocolError::new(
                     "asset_preparation_unavailable",
                     "asset preparation operations require an asset-preparation-enabled session",
+                ));
+            }
+            Self::AssetActivationStatus if asset_activation_enabled => {
+                SessionOperation::AssetActivation(AssetActivationOperation::Status)
+            }
+            Self::AssetActivationStage {
+                command_id,
+                candidate,
+                expected_active_generation,
+            } if asset_activation_enabled => {
+                SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                    command_id: command_id.map(|id| CommandId::from_raw(id.0)),
+                    candidate: PreparationId::from_parts(
+                        SessionId::from_raw(candidate.session.0),
+                        candidate.epoch.0,
+                    ),
+                    expected_active_generation: expected_active_generation.0,
+                })
+            }
+            Self::AssetActivationCommit {
+                command_id,
+                activation,
+                expected_active_generation,
+            } if asset_activation_enabled => {
+                SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                    command_id: command_id.map(|id| CommandId::from_raw(id.0)),
+                    activation: ActivationId::from_parts(
+                        SessionId::from_raw(activation.session.0),
+                        activation.sequence.0,
+                    ),
+                    expected_active_generation: expected_active_generation.0,
+                })
+            }
+            Self::AssetActivationCancel {
+                command_id,
+                activation,
+            } if asset_activation_enabled => {
+                SessionOperation::AssetActivation(AssetActivationOperation::Cancel {
+                    command_id: command_id.map(|id| CommandId::from_raw(id.0)),
+                    activation: ActivationId::from_parts(
+                        SessionId::from_raw(activation.session.0),
+                        activation.sequence.0,
+                    ),
+                })
+            }
+            Self::AssetActivationStatus
+            | Self::AssetActivationStage { .. }
+            | Self::AssetActivationCommit { .. }
+            | Self::AssetActivationCancel { .. } => {
+                return Err(ProtocolError::new(
+                    "asset_activation_unavailable",
+                    "asset activation operations require an asset-activation-enabled session",
                 ));
             }
             Self::AudioStatus => audio_operation(audio_enabled, AudioWireOperation::Status)?,
@@ -727,9 +811,10 @@ enum WireResult {
 #[derive(Serialize)]
 struct Capabilities {
     clock: &'static str,
-    operations: &'static [&'static str],
+    operations: Vec<&'static str>,
     audio_enabled: bool,
     asset_preparation_enabled: bool,
+    asset_activation_enabled: bool,
     max_line_bytes: usize,
     max_response_bytes: usize,
     max_retained_tickets: usize,
@@ -789,8 +874,85 @@ enum OperationResult {
     Step(Vec<StepOut>),
     Status(StatusOut),
     AssetPreparation(AssetPreparationOut),
+    AssetActivation(AssetActivationOut),
     #[cfg(feature = "audio")]
     Audio(AudioResultOut),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum AssetActivationOut {
+    Status(Box<AssetActivationStatusOut>),
+    Command(AssetActivationCommandOut),
+}
+
+#[derive(Serialize)]
+struct AssetActivationStatusOut {
+    session: DecimalU64,
+    state: &'static str,
+    active_generation: DecimalU64,
+    active_source_digest: String,
+    current_activation: Option<AssetActivationSummaryOut>,
+    latest_failure: Option<AssetActivationFailureOut>,
+    memory: AssetActivationMemoryOut,
+}
+
+#[derive(Serialize)]
+struct AssetActivationSummaryOut {
+    id: WireActivationId,
+    candidate: PreparationIdOut,
+    expected_active_generation: DecimalU64,
+    source_digest: String,
+    committed_generation: Option<DecimalU64>,
+}
+
+#[derive(Serialize)]
+struct AssetActivationFailureOut {
+    id: WireActivationId,
+    code: String,
+    message: String,
+    compatibility: Option<CompatibilityFailureOut>,
+}
+
+#[derive(Serialize)]
+struct CompatibilityFailureOut {
+    kind: &'static str,
+    entity_id: Option<String>,
+    component_id: Option<String>,
+    asset_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AssetActivationMemoryOut {
+    active_cooked_accounted_bytes: u64,
+    candidate_cooked_accounted_bytes: u64,
+    retired_cooked_accounted_bytes: u64,
+    total_cooked_accounted_bytes: u64,
+    max_cooked_accounted_bytes: u64,
+    retired_generation_count: usize,
+}
+
+#[derive(Serialize)]
+struct AssetActivationCommandOut {
+    command_id: DecimalU128,
+    observed_tick: DecimalU64,
+    outcome: AssetActivationCommandOutcomeOut,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum AssetActivationCommandOutcomeOut {
+    StageAccepted {
+        activation: WireActivationId,
+        candidate: PreparationIdOut,
+    },
+    CommitApplied {
+        activation: WireActivationId,
+        generation: DecimalU64,
+    },
+    CancelAccepted {
+        activation: WireActivationId,
+    },
 }
 
 #[derive(Serialize)]
@@ -1110,6 +1272,7 @@ struct LatestFrame {
     session: DecimalU64,
     tick: DecimalU64,
     sequence: DecimalU64,
+    authority_snapshot_sequence: DecimalU64,
     project_generation: DecimalU64,
     source_scene_revision: DecimalU64,
     source_digest: String,
@@ -1190,6 +1353,7 @@ pub(crate) struct ProtocolController {
     native_limits: SessionControlLimits,
     audio_enabled: bool,
     asset_preparation_enabled: bool,
+    asset_activation_enabled: bool,
     tickets: HashMap<String, TicketEntry>,
     submit_ids: HashMap<String, String>,
     detached_reason: Option<String>,
@@ -1208,6 +1372,7 @@ impl ProtocolController {
         audio_enabled: bool,
     ) -> Self {
         let asset_preparation_enabled = client.asset_preparation_enabled();
+        let asset_activation_enabled = client.asset_activation_enabled();
         Self {
             transport,
             client,
@@ -1215,6 +1380,7 @@ impl ProtocolController {
             native_limits,
             audio_enabled,
             asset_preparation_enabled,
+            asset_activation_enabled,
             tickets: HashMap::new(),
             submit_ids: HashMap::new(),
             detached_reason: None,
@@ -1323,14 +1489,14 @@ impl ProtocolController {
         match request {
             ClientRequest::Capabilities {} => Ok(WireResult::Capabilities(Capabilities {
                 clock: clock_name(self.clock),
-                operations: match (self.audio_enabled, self.asset_preparation_enabled) {
-                    (false, false) => &BASE_OPERATIONS,
-                    (true, false) => &AUDIO_OPERATIONS,
-                    (false, true) => &PREPARATION_OPERATIONS,
-                    (true, true) => &AUDIO_PREPARATION_OPERATIONS,
-                },
+                operations: operation_names(
+                    self.audio_enabled,
+                    self.asset_preparation_enabled,
+                    self.asset_activation_enabled,
+                ),
                 audio_enabled: self.audio_enabled,
                 asset_preparation_enabled: self.asset_preparation_enabled,
+                asset_activation_enabled: self.asset_activation_enabled,
                 max_line_bytes: MAX_PROTOCOL_LINE_BYTES,
                 max_response_bytes: MAX_PROTOCOL_RESPONSE_BYTES,
                 max_retained_tickets: MAX_PROTOCOL_TICKETS,
@@ -1491,6 +1657,7 @@ impl ProtocolController {
             session: DecimalU64(frame.session().get()),
             tick: DecimalU64(frame.tick().get()),
             sequence: DecimalU64(frame.sequence()),
+            authority_snapshot_sequence: DecimalU64(frame.authority_snapshot_sequence()),
             project_generation: DecimalU64(frame.project_generation()),
             source_scene_revision: DecimalU64(frame.source_scene_revision()),
             source_digest: frame.source_digest().to_owned(),
@@ -1528,7 +1695,11 @@ impl ProtocolController {
                 } else {
                     match envelope.request {
                         ClientRequest::Submit { operation } => operation
-                            .native(self.audio_enabled, self.asset_preparation_enabled)
+                            .native(
+                                self.audio_enabled,
+                                self.asset_preparation_enabled,
+                                self.asset_activation_enabled,
+                            )
                             .and_then(|operation| {
                                 self.submit_with_id(request_id.clone(), operation)
                             }),
@@ -1629,6 +1800,7 @@ fn submit_error(error: SessionSubmitError) -> ProtocolError {
         SessionSubmitError::ClockModeMismatch => "clock_mode_mismatch",
         SessionSubmitError::InvalidRequest => "invalid_request",
         SessionSubmitError::AssetPreparationUnavailable => "asset_preparation_unavailable",
+        SessionSubmitError::AssetActivationUnavailable => "asset_activation_unavailable",
         #[cfg(feature = "audio")]
         SessionSubmitError::AudioUnavailable => "audio_unavailable",
         SessionSubmitError::ReservedCommandId => "reserved_command_id",
@@ -1738,6 +1910,9 @@ fn result_out(result: &SessionRequestResult) -> OperationResult {
         SessionRequestResult::Status(status) => OperationResult::Status(status_out(status)),
         SessionRequestResult::AssetPreparation(result) => {
             OperationResult::AssetPreparation(preparation_result_out(result))
+        }
+        SessionRequestResult::AssetActivation(result) => {
+            OperationResult::AssetActivation(asset_activation_result_out(result))
         }
         #[cfg(feature = "audio")]
         SessionRequestResult::Audio(audio) => OperationResult::Audio(audio_result_out(audio)),
@@ -2099,6 +2274,135 @@ fn preparation_result_out(result: &AssetPreparationResult) -> AssetPreparationOu
     }
 }
 
+fn activation_id_out(id: ActivationId) -> WireActivationId {
+    WireActivationId {
+        session: DecimalU64(id.session().get()),
+        sequence: DecimalU64(id.sequence()),
+    }
+}
+
+fn activation_state_name(state: AssetActivationState) -> &'static str {
+    match state {
+        AssetActivationState::Idle => "idle",
+        AssetActivationState::StagePending => "stage_pending",
+        AssetActivationState::Staging => "staging",
+        AssetActivationState::Staged => "staged",
+        AssetActivationState::CancelRequested => "cancel_requested",
+        AssetActivationState::Cancelled => "cancelled",
+        AssetActivationState::Superseded => "superseded",
+        AssetActivationState::Committed => "committed",
+        AssetActivationState::Failed => "failed",
+        AssetActivationState::Stopping => "stopping",
+        AssetActivationState::Stopped => "stopped",
+    }
+}
+
+fn compatibility_mismatch_name(kind: AssetReplacementMismatch) -> &'static str {
+    match kind {
+        AssetReplacementMismatch::Manifest => "manifest",
+        AssetReplacementMismatch::SceneSchema => "scene_schema",
+        AssetReplacementMismatch::AssetSet => "asset_set",
+        AssetReplacementMismatch::AssetKind => "asset_kind",
+        AssetReplacementMismatch::AssetMetadata => "asset_metadata",
+        AssetReplacementMismatch::EntitySet => "entity_set",
+        AssetReplacementMismatch::EntityName => "entity_name",
+        AssetReplacementMismatch::EntityParent => "entity_parent",
+        AssetReplacementMismatch::ComponentSet => "component_set",
+        AssetReplacementMismatch::ComponentType => "component_type",
+        AssetReplacementMismatch::ComponentAssetRefs => "component_asset_refs",
+        AssetReplacementMismatch::ComponentData => "component_data",
+        AssetReplacementMismatch::ComparisonCapacity => "comparison_capacity",
+    }
+}
+
+fn activation_status_out(status: &AssetActivationStatus) -> AssetActivationStatusOut {
+    let current_activation =
+        status
+            .current_activation()
+            .map(|activation| AssetActivationSummaryOut {
+                id: activation_id_out(activation.id()),
+                candidate: preparation_id_out(activation.candidate()),
+                expected_active_generation: DecimalU64(activation.expected_active_generation()),
+                source_digest: activation.source_digest().to_owned(),
+                committed_generation: activation.committed_generation().map(DecimalU64),
+            });
+    let latest_failure = status.latest_failure().map(|failure| {
+        let compatibility = failure
+            .compatibility()
+            .map(|error| CompatibilityFailureOut {
+                kind: compatibility_mismatch_name(error.kind()),
+                entity_id: error.entity_id().map(ToString::to_string),
+                component_id: error.component_id().map(ToString::to_string),
+                asset_id: error.asset_id().map(ToString::to_string),
+            });
+        AssetActivationFailureOut {
+            id: activation_id_out(failure.id()),
+            code: failure.code().to_owned(),
+            message: failure.message().to_owned(),
+            compatibility,
+        }
+    });
+    let memory = status.memory();
+    AssetActivationStatusOut {
+        session: DecimalU64(status.session().get()),
+        state: activation_state_name(status.state()),
+        active_generation: DecimalU64(status.active_generation()),
+        active_source_digest: status.active_source_digest().to_owned(),
+        current_activation,
+        latest_failure,
+        memory: AssetActivationMemoryOut {
+            active_cooked_accounted_bytes: memory.active_cooked_accounted_bytes(),
+            candidate_cooked_accounted_bytes: memory.candidate_cooked_accounted_bytes(),
+            retired_cooked_accounted_bytes: memory.retired_cooked_accounted_bytes(),
+            total_cooked_accounted_bytes: memory.total_cooked_accounted_bytes(),
+            max_cooked_accounted_bytes: memory.max_cooked_accounted_bytes(),
+            retired_generation_count: memory.retired_generation_count(),
+        },
+    }
+}
+
+fn activation_command_out(
+    command: &daedalus_runtime::AssetActivationCommandResult,
+) -> AssetActivationCommandOut {
+    let outcome = match command.outcome() {
+        AssetActivationCommandOutcome::StageAccepted {
+            activation,
+            candidate,
+        } => AssetActivationCommandOutcomeOut::StageAccepted {
+            activation: activation_id_out(*activation),
+            candidate: preparation_id_out(*candidate),
+        },
+        AssetActivationCommandOutcome::CommitApplied {
+            activation,
+            generation,
+        } => AssetActivationCommandOutcomeOut::CommitApplied {
+            activation: activation_id_out(*activation),
+            generation: DecimalU64(*generation),
+        },
+        AssetActivationCommandOutcome::CancelAccepted { activation } => {
+            AssetActivationCommandOutcomeOut::CancelAccepted {
+                activation: activation_id_out(*activation),
+            }
+        }
+    };
+    AssetActivationCommandOut {
+        command_id: DecimalU128(command.command_id().get()),
+        observed_tick: DecimalU64(command.observed_tick().get()),
+        outcome,
+    }
+}
+
+fn asset_activation_result_out(result: &AssetActivationRequestResult) -> AssetActivationOut {
+    match result {
+        AssetActivationRequestResult::Status(status) => {
+            AssetActivationOut::Status(Box::new(activation_status_out(status)))
+        }
+        AssetActivationRequestResult::Command(command) => {
+            AssetActivationOut::Command(activation_command_out(command))
+        }
+    }
+}
+
 fn request_error(error: &SessionRequestError) -> ProtocolError {
     use SessionRequestError as E;
     let mut result = match error {
@@ -2156,6 +2460,23 @@ fn request_error(error: &SessionRequestError) -> ProtocolError {
         E::AssetPreparationUnavailable => {
             ProtocolError::new("asset_preparation_unavailable", error.to_string())
         }
+        E::AssetActivationUnavailable => {
+            ProtocolError::new("asset_activation_unavailable", error.to_string())
+        }
+        E::ActivationBusy => ProtocolError::retryable("busy", error.to_string()),
+        E::InvalidActivation => ProtocolError::new("invalid_activation", error.to_string()),
+        E::ActivationExpired => ProtocolError::new("activation_expired", error.to_string()),
+        E::ActivationNotStaged => ProtocolError::new("activation_not_staged", error.to_string()),
+        E::ActiveGenerationMismatch => {
+            ProtocolError::new("active_generation_mismatch", error.to_string())
+        }
+        E::ActivationSequenceExhausted => {
+            ProtocolError::new("activation_sequence_exhausted", error.to_string())
+        }
+        E::ProjectGenerationExhausted => {
+            ProtocolError::new("project_generation_exhausted", error.to_string())
+        }
+        E::ActivationCapacity => ProtocolError::new("activation_capacity", error.to_string()),
         E::PreparationBusy => ProtocolError::retryable("busy", error.to_string()),
         E::PreparationCapacity => ProtocolError::new("preparation_capacity", error.to_string()),
         E::PreparationStopped => ProtocolError::new("preparation_stopped", error.to_string()),

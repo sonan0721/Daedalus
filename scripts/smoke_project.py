@@ -1675,14 +1675,15 @@ def _asset_preparation_request(
     *,
     expected_kind: str,
     timeout: float,
+    outer_result_kind: str = "asset_preparation",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     ticket, poll, attempt_prefix, deadline = _asset_preparation_terminal_poll(
         server, request_prefix, operation, timeout=timeout
     )
     result = _v2_terminal_result(poll, context=request_prefix)
     _expect(
-        result.get("kind") == "asset_preparation",
-        "asset-preparation operation returned another result kind",
+        result.get("kind") == outer_result_kind,
+        f"{request_prefix!r} operation returned another result kind",
         result,
     )
     tagged = result.get("data")
@@ -1724,6 +1725,7 @@ def _asset_preparation_command(
     command_id: str,
     outcome_kind: str,
     timeout: float,
+    outer_result_kind: str = "asset_preparation",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     command, result = _asset_preparation_request(
         server,
@@ -1731,6 +1733,7 @@ def _asset_preparation_command(
         operation,
         expected_kind="command",
         timeout=timeout,
+        outer_result_kind=outer_result_kind,
     )
     _expect(
         command.get("command_id") == command_id
@@ -1765,7 +1768,7 @@ def _asset_preparation_expect_terminal_error(
         and terminal.get("ok") is False
         and terminal.get("error", {}).get("code") == code
         and "result" not in terminal,
-        f"invalid candidate did not reach the expected terminal error {code!r}",
+        f"operation did not reach the expected terminal error {code!r}",
         poll,
     )
     remaining = deadline - time.monotonic()
@@ -1796,6 +1799,265 @@ def _asset_preparation_project_info(
         raise SmokeError(f"timed out acknowledging asset-preparation project_info {request_prefix!r}")
     _v2_ack(server, f"{attempt_prefix}-ack", ticket, timeout=remaining)
     return info
+
+
+def _asset_activation_status(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    status, result = _asset_preparation_request(
+        server,
+        request_prefix,
+        {"op": "asset_activation_status"},
+        expected_kind="status",
+        timeout=timeout,
+        outer_result_kind="asset_activation",
+    )
+    return status, result
+
+
+def _asset_activation_command(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    operation: dict[str, Any],
+    *,
+    command_id: str,
+    outcome_kind: str,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    return _asset_preparation_command(
+        server,
+        request_prefix,
+        operation,
+        command_id=command_id,
+        outcome_kind=outcome_kind,
+        timeout=timeout,
+        outer_result_kind="asset_activation",
+    )
+
+
+def _asset_activation_expect_terminal_error(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    operation: dict[str, Any],
+    *,
+    code: str,
+    timeout: float,
+) -> dict[str, Any]:
+    return _asset_preparation_expect_terminal_error(
+        server,
+        request_prefix,
+        operation,
+        code=code,
+        timeout=timeout,
+    )
+
+
+def _asset_activation_validate_id(
+    value: Any,
+    *,
+    session: str,
+    sequence_field: str,
+    context: str,
+) -> dict[str, str]:
+    _expect(
+        isinstance(value, dict)
+        and value.get("session") == session
+        and isinstance(value.get(sequence_field), str)
+        and value[sequence_field].isdecimal()
+        and int(value[sequence_field]) > 0,
+        f"{context} has an invalid decimal identity",
+        value,
+    )
+    return {"session": session, sequence_field: value[sequence_field]}
+
+
+def _asset_activation_validate_status(
+    status: dict[str, Any],
+    *,
+    session: str,
+    active_generation: str | None = None,
+    active_source_digest: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "session",
+        "state",
+        "active_generation",
+        "active_source_digest",
+        "current_activation",
+        "latest_failure",
+        "memory",
+    }
+    _expect(
+        set(status) == fields,
+        "asset-activation status has an unexpected or missing wire field",
+        status,
+    )
+    generation = status.get("active_generation")
+    source_digest = status.get("active_source_digest")
+    _expect(
+        status.get("session") == session
+        and isinstance(generation, str)
+        and generation.isdecimal()
+        and int(generation) > 0
+        and isinstance(source_digest, str)
+        and source_digest,
+        "asset-activation status has invalid active identity",
+        status,
+    )
+    if active_generation is not None:
+        _expect(
+            generation == active_generation,
+            "asset activation unexpectedly changed the active generation",
+            status,
+        )
+    if active_source_digest is not None:
+        _expect(
+            source_digest == active_source_digest,
+            "asset activation unexpectedly changed the active source digest",
+            status,
+        )
+    allowed_states = {
+        "idle",
+        "stage_pending",
+        "staging",
+        "staged",
+        "cancel_requested",
+        "cancelled",
+        "superseded",
+        "committed",
+        "failed",
+        "stopping",
+        "stopped",
+    }
+    _expect(status.get("state") in allowed_states, "asset activation returned an unknown state", status)
+
+    memory = status.get("memory")
+    memory_fields = {
+        "active_cooked_accounted_bytes",
+        "candidate_cooked_accounted_bytes",
+        "retired_cooked_accounted_bytes",
+        "total_cooked_accounted_bytes",
+        "max_cooked_accounted_bytes",
+        "retired_generation_count",
+    }
+    _expect(
+        isinstance(memory, dict) and set(memory) == memory_fields,
+        "asset-activation status has an unexpected or missing memory field",
+        memory,
+    )
+    _expect(
+        all(type(memory.get(field)) is int and memory[field] >= 0 for field in memory_fields)
+        and memory["active_cooked_accounted_bytes"] > 0
+        and memory["total_cooked_accounted_bytes"] <= memory["max_cooked_accounted_bytes"]
+        and memory["retired_generation_count"] <= 1,
+        "asset-activation status has invalid bounded memory accounting",
+        memory,
+    )
+
+    current = status.get("current_activation")
+    if current is not None:
+        _expect(
+            isinstance(current, dict)
+            and set(current)
+            == {
+                "id",
+                "candidate",
+                "expected_active_generation",
+                "source_digest",
+                "committed_generation",
+            },
+            "asset-activation summary has an unexpected or missing field",
+            current,
+        )
+        _asset_activation_validate_id(
+            current.get("id"),
+            session=session,
+            sequence_field="sequence",
+            context="activation summary ID",
+        )
+        candidate = current.get("candidate")
+        _expect(
+            isinstance(candidate, dict)
+            and candidate.get("session") == session
+            and isinstance(candidate.get("epoch"), str)
+            and candidate["epoch"].isdecimal()
+            and int(candidate["epoch"]) > 0
+            and isinstance(current.get("expected_active_generation"), str)
+            and current["expected_active_generation"].isdecimal()
+            and isinstance(current.get("source_digest"), str)
+            and current["source_digest"]
+            and (
+                current.get("committed_generation") is None
+                or (
+                    isinstance(current.get("committed_generation"), str)
+                    and current["committed_generation"].isdecimal()
+                )
+            ),
+            "asset-activation summary has invalid candidate/source metadata",
+            current,
+        )
+    failure = status.get("latest_failure")
+    if failure is not None:
+        _expect(
+            isinstance(failure, dict)
+            and isinstance(failure.get("code"), str)
+            and failure["code"],
+            "asset-activation failure summary has no bounded error code",
+            failure,
+        )
+    _asset_preparation_assert_no_payload(status)
+    return memory
+
+
+def _asset_activation_wait_for_state(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    activation_id: dict[str, str],
+    session: str,
+    expected_state: str,
+    active_generation: str,
+    active_source_digest: str,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    deadline = time.monotonic() + min(timeout, server.timeout)
+    for attempt in range(int(min(timeout, server.timeout) * 100) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(
+                f"timed out waiting for activation {activation_id!r} to reach {expected_state}"
+            )
+        status, result = _asset_activation_status(
+            server,
+            f"{request_prefix}-status-{attempt}",
+            timeout=remaining,
+        )
+        _asset_activation_validate_status(
+            status,
+            session=session,
+            active_generation=active_generation,
+            active_source_digest=active_source_digest,
+        )
+        current = status.get("current_activation")
+        if status.get("state") == expected_state:
+            _expect(
+                isinstance(current, dict) and current.get("id") == activation_id,
+                "asset activation reached the requested state for another activation ID",
+                status,
+            )
+            return status, result
+        if status.get("state") in {"failed", "cancelled", "superseded", "stopped"}:
+            raise SmokeError(
+                f"activation {activation_id!r} reached {status.get('state')} before "
+                f"{expected_state}: {json.dumps(status, sort_keys=True)}"
+            )
+        time.sleep(min(0.01, max(0.0, remaining)))
+    raise SmokeError(
+        f"activation {activation_id!r} exceeded the bounded poll count for {expected_state}"
+    )
 
 
 def _asset_preparation_assert_no_payload(value: Any) -> None:
@@ -1832,6 +2094,7 @@ def _asset_preparation_validate_identity(
     session: str,
     active_source_digest: str,
     active_cooked_accounted_bytes: int | None,
+    active_generation: str = "1",
 ) -> int:
     required_fields = {
         "session",
@@ -1852,7 +2115,7 @@ def _asset_preparation_validate_identity(
     )
     _expect(
         status.get("session") == session
-        and status.get("active_generation") == "1"
+        and status.get("active_generation") == active_generation
         and status.get("active_source_digest") == active_source_digest,
         "preparation status changed the active session/generation/source identity",
         status,
@@ -1989,6 +2252,7 @@ def _asset_preparation_wait_for_candidate(
     active_cooked_accounted_bytes: int,
     entity_count: int,
     timeout: float,
+    active_generation: str = "1",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     deadline = time.monotonic() + timeout
     for attempt in range(int(timeout * 100) + 1):
@@ -2005,6 +2269,7 @@ def _asset_preparation_wait_for_candidate(
             session=session,
             active_source_digest=active_source_digest,
             active_cooked_accounted_bytes=active_cooked_accounted_bytes,
+            active_generation=active_generation,
         )
         candidate = status.get("ready_candidate")
         if (
@@ -2730,6 +2995,952 @@ def _run_asset_preparation_smoke(
     }
 
 
+def _asset_activation_v2_terminal_request(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    operation: dict[str, Any],
+    *,
+    result_kind: str,
+    timeout: float,
+) -> dict[str, Any]:
+    ticket, poll, attempt_prefix, deadline = _asset_preparation_terminal_poll(
+        server,
+        request_prefix,
+        operation,
+        timeout=timeout,
+    )
+    result = _v2_terminal_result(poll, context=request_prefix)
+    _expect(
+        result.get("kind") == result_kind,
+        f"{request_prefix!r} returned another terminal result kind",
+        result,
+    )
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SmokeError(f"timed out acknowledging {request_prefix!r}")
+    _v2_ack(server, f"{attempt_prefix}-ack", ticket, timeout=remaining)
+    return result
+
+
+def _asset_activation_get_transform(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    result = _asset_activation_v2_terminal_request(
+        server,
+        request_prefix,
+        {"op": "get_transform", "target": {"stable_id": ENTITY_ID}},
+        result_kind="transform",
+        timeout=timeout,
+    )
+    data = result.get("data")
+    _expect(isinstance(data, dict), "get_transform omitted its data", result)
+    return data
+
+
+def _asset_activation_apply_authority_transform(
+    server: _JsonlProjectServer,
+    *,
+    session: str,
+    command_id: str,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    initial = _asset_activation_get_transform(
+        server,
+        "asset-activation-transform-initial",
+        timeout=timeout,
+    )
+    initial_entity = initial.get("entity")
+    _expect(
+        initial.get("observed_tick") == "0"
+        and isinstance(initial_entity, dict)
+        and initial_entity.get("stable_id") == ENTITY_ID
+        and initial_entity.get("revision") == "0"
+        and initial_entity.get("handle", {}).get("session") == session
+        and initial_entity.get("transform")
+        == {
+            "translation": [0.0, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+            "scale": [1.0, 1.0, 1.0],
+        },
+        "activation smoke did not start with the authored live entity state",
+        initial,
+    )
+    handle = initial_entity.get("handle")
+    _expect(isinstance(handle, dict), "get_transform returned no live entity handle", initial_entity)
+
+    set_ticket, reused = _v2_submit(
+        server,
+        "asset-activation-transform-set",
+        {
+            "op": "set_transform",
+            "target": {"stable_id": ENTITY_ID},
+            "command_id": command_id,
+            "expected_revision": "0",
+            "transform": TRANSFORM_AFTER_COMMAND,
+        },
+        timeout=timeout,
+    )
+    _expect(not reused, "activation transform submit unexpectedly reused a ticket")
+    accepted = _v2_poll_until(
+        server,
+        set_ticket,
+        request_prefix="asset-activation-transform-authority",
+        phase="authority_accepted",
+        timeout=timeout,
+    )
+    authority = accepted.get("authority")
+    _expect(
+        isinstance(authority, dict)
+        and authority.get("submission") == "enqueued"
+        and authority.get("apply_tick") == "1",
+        "live transform was not accepted for the next authority tick",
+        accepted,
+    )
+
+    step_ticket, reused = _v2_submit(
+        server,
+        "asset-activation-authority-step",
+        {"op": "step", "count": 1},
+        timeout=timeout,
+    )
+    _expect(not reused, "activation authority Step unexpectedly reused a ticket")
+    step_poll = _v2_poll_until(
+        server,
+        step_ticket,
+        request_prefix="asset-activation-authority-step-poll",
+        phase="terminal",
+        timeout=timeout,
+    )
+    step = _v2_terminal_result(step_poll, context="activation authority Step")
+    step_data = step.get("data")
+    step_commands = (
+        step_data[0].get("commands")
+        if isinstance(step_data, list) and len(step_data) == 1
+        else None
+    )
+    _expect(
+        step.get("kind") == "step"
+        and isinstance(step_data, list)
+        and len(step_data) == 1
+        and step_data[0].get("tick") == "1"
+        and isinstance(step_commands, list)
+        and len(step_commands) == 1
+        and step_commands[0].get("command_id") == command_id
+        and step_commands[0].get("outcome")
+        == {"kind": "applied", "data": {"revision": "1"}},
+        "authority Step did not apply the live transform at revision one",
+        step,
+    )
+    _v2_ack(server, "asset-activation-authority-step-ack", step_ticket, timeout=timeout)
+
+    set_poll = _v2_poll_until(
+        server,
+        set_ticket,
+        request_prefix="asset-activation-transform-terminal",
+        phase="terminal",
+        timeout=timeout,
+    )
+    set_result = _v2_terminal_result(set_poll, context="activation set_transform")
+    set_data = set_result.get("data")
+    _expect(
+        set_result.get("kind") == "command"
+        and isinstance(set_data, dict)
+        and set_data.get("command_id") == command_id
+        and set_data.get("outcome") == {"kind": "applied", "data": {"revision": "1"}}
+        and set_data.get("resolve_tick") == "1",
+        "set_transform did not confirm its authoritative application",
+        set_result,
+    )
+    _v2_ack(server, "asset-activation-transform-set-ack", set_ticket, timeout=timeout)
+
+    state = _asset_activation_get_transform(
+        server,
+        "asset-activation-transform-after-step",
+        timeout=timeout,
+    )
+    entity = state.get("entity")
+    _expect(
+        state.get("observed_tick") == "1"
+        and isinstance(entity, dict)
+        and entity.get("stable_id") == ENTITY_ID
+        and entity.get("handle") == handle
+        and entity.get("revision") == "1"
+        and entity.get("transform") == TRANSFORM_AFTER_COMMAND,
+        "live transform state did not survive the authority Step",
+        state,
+    )
+    return state, handle, step_data[0]
+
+
+def _asset_activation_prepare_candidate(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    command_id: str,
+    project: Path,
+    session: str,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    active_status, _ = _asset_activation_status(
+        server,
+        f"{request_prefix}-active-before-prepare",
+        timeout=timeout,
+    )
+    active_memory = _asset_activation_validate_status(active_status, session=session)
+    active_generation = active_status["active_generation"]
+    active_source_digest = active_status["active_source_digest"]
+    preparation_status, _ = _asset_preparation_status(
+        server,
+        f"{request_prefix}-preparation-before-prepare",
+        timeout=timeout,
+    )
+    active_cooked_bytes = _asset_preparation_validate_identity(
+        preparation_status,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=None,
+        active_generation=active_generation,
+    )
+    _expect(
+        active_memory["active_cooked_accounted_bytes"] > 0,
+        "activation status reports no active cooked backing before preparation",
+        active_status,
+    )
+    command, _ = _asset_preparation_command(
+        server,
+        f"{request_prefix}-prepare",
+        {"op": "asset_preparation_prepare", "command_id": command_id},
+        command_id=command_id,
+        outcome_kind="prepare_accepted",
+        timeout=timeout,
+    )
+    candidate_id = command.get("outcome", {}).get("data", {}).get("candidate")
+    _expect(
+        isinstance(candidate_id, dict)
+        and candidate_id.get("session") == session
+        and isinstance(candidate_id.get("epoch"), str)
+        and candidate_id["epoch"].isdecimal(),
+        "Prepare receipt omitted its candidate identity",
+        command,
+    )
+    status, _ = _asset_preparation_wait_for_candidate(
+        server,
+        request_prefix,
+        accepted_candidate=candidate_id,
+        project=project,
+        session=session,
+        active_source_digest=active_source_digest,
+        active_cooked_accounted_bytes=active_cooked_bytes,
+        entity_count=1,
+        timeout=timeout,
+        active_generation=active_generation,
+    )
+    latest_active, _ = _asset_activation_status(
+        server,
+        f"{request_prefix}-active-after-prepare",
+        timeout=timeout,
+    )
+    _asset_activation_validate_status(
+        latest_active,
+        session=session,
+        active_generation=active_generation,
+        active_source_digest=active_source_digest,
+    )
+    return command, status, status["ready_candidate"]
+
+
+def _asset_activation_stage_candidate(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    command_id: str,
+    candidate: dict[str, Any],
+    session: str,
+    expected_active_generation: str,
+    active_source_digest: str,
+    timeout: float,
+) -> tuple[dict[str, str], dict[str, Any], dict[str, Any]]:
+    candidate_id = candidate["id"]
+    command, _ = _asset_activation_command(
+        server,
+        f"{request_prefix}-stage",
+        {
+            "op": "asset_activation_stage",
+            "candidate": candidate_id,
+            "expected_active_generation": expected_active_generation,
+            "command_id": command_id,
+        },
+        command_id=command_id,
+        outcome_kind="stage_accepted",
+        timeout=timeout,
+    )
+    accepted = command["outcome"].get("data")
+    _expect(
+        isinstance(accepted, dict) and accepted.get("candidate") == candidate_id,
+        "Stage receipt did not identify the prepared candidate",
+        command,
+    )
+    activation_id = _asset_activation_validate_id(
+        accepted.get("activation"),
+        session=session,
+        sequence_field="sequence",
+        context="Stage activation ID",
+    )
+    staged, _ = _asset_activation_wait_for_state(
+        server,
+        request_prefix,
+        activation_id=activation_id,
+        session=session,
+        expected_state="staged",
+        active_generation=expected_active_generation,
+        active_source_digest=active_source_digest,
+        timeout=timeout,
+    )
+    current = staged.get("current_activation")
+    _expect(
+        isinstance(current, dict)
+        and current.get("candidate") == candidate_id
+        and current.get("expected_active_generation") == expected_active_generation
+        and current.get("source_digest") == candidate["source_digest"]
+        and current.get("committed_generation") is None,
+        "staged activation summary did not retain its candidate, source digest, and expected generation",
+        staged,
+    )
+    return activation_id, command, staged
+
+
+def _asset_activation_commit_candidate(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    activation_id: dict[str, str],
+    candidate: dict[str, Any],
+    command_id: str,
+    expected_active_generation: str,
+    session: str,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    command, _ = _asset_activation_command(
+        server,
+        request_prefix,
+        {
+            "op": "asset_activation_commit",
+            "activation": activation_id,
+            "expected_active_generation": expected_active_generation,
+            "command_id": command_id,
+        },
+        command_id=command_id,
+        outcome_kind="commit_applied",
+        timeout=timeout,
+    )
+    committed = command["outcome"].get("data")
+    expected_generation = str(int(expected_active_generation) + 1)
+    _expect(
+        isinstance(committed, dict)
+        and committed.get("activation") == activation_id
+        and committed.get("generation") == expected_generation,
+        "Commit receipt did not identify the new project generation",
+        command,
+    )
+    status, _ = _asset_activation_status(
+        server,
+        f"{request_prefix}-status-committed",
+        timeout=timeout,
+    )
+    memory = _asset_activation_validate_status(
+        status,
+        session=session,
+        active_generation=expected_generation,
+        active_source_digest=candidate["source_digest"],
+    )
+    current = status.get("current_activation")
+    _expect(
+        status.get("state") == "committed"
+        and isinstance(current, dict)
+        and current.get("id") == activation_id
+        and current.get("candidate") == candidate["id"]
+        and current.get("source_digest") == candidate["source_digest"]
+        and current.get("committed_generation") == expected_generation,
+        "activation status did not retain the committed generation/source identity",
+        status,
+    )
+    _expect(
+        memory["active_cooked_accounted_bytes"] > 0,
+        "committed activation has no active cooked backing",
+        status,
+    )
+    return command, status
+
+
+def _asset_activation_verify_live_state(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    *,
+    session: str,
+    expected_handle: dict[str, Any],
+    expected_source_digest: str,
+    expected_generation: str,
+    previous_frame: dict[str, Any],
+    require_new_frame: bool,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    info = _asset_preparation_project_info(
+        server,
+        timeout=timeout,
+        request_prefix=f"{request_prefix}-project-info",
+    )
+    _expect(
+        info.get("session") == session
+        and info.get("source_digest") == expected_source_digest
+        and info.get("tick") == "1"
+        and info.get("entity_count") == 1,
+        "project_info did not reflect the active source while retaining authority tick/entity count",
+        info,
+    )
+    transform = _asset_activation_get_transform(
+        server,
+        f"{request_prefix}-transform",
+        timeout=timeout,
+    )
+    entity = transform.get("entity")
+    _expect(
+        transform.get("observed_tick") == "1"
+        and isinstance(entity, dict)
+        and entity.get("stable_id") == ENTITY_ID
+        and entity.get("handle") == expected_handle
+        and entity.get("revision") == "1"
+        and entity.get("transform") == TRANSFORM_AFTER_COMMAND,
+        "project source replacement changed the live entity handle, transform, or revision",
+        transform,
+    )
+    frame = _v2_latest_frame(
+        server,
+        timeout=timeout,
+        request_prefix=f"{request_prefix}-latest-frame",
+    )
+    _expect(
+        frame.get("session") == session
+        and frame.get("tick") == "1"
+        and frame.get("project_generation") == expected_generation
+        and frame.get("source_digest") == expected_source_digest
+        and isinstance(frame.get("source_scene_revision"), str)
+        and frame["source_scene_revision"].isdecimal()
+        and frame.get("source_scene_revision") == previous_frame.get("source_scene_revision")
+        and frame.get("authority_snapshot_sequence") == previous_frame.get("authority_snapshot_sequence"),
+        "published frame did not pair the active source with the preserved scene revision and authority snapshot",
+        frame,
+    )
+    if require_new_frame:
+        _expect(
+            isinstance(frame.get("sequence"), str)
+            and frame["sequence"].isdecimal()
+            and isinstance(previous_frame.get("sequence"), str)
+            and previous_frame["sequence"].isdecimal()
+            and int(frame["sequence"]) > int(previous_frame["sequence"]),
+            "commit did not publish a newer frame sequence",
+            {"before": previous_frame, "after": frame},
+        )
+    else:
+        _expect(
+            frame.get("sequence") == previous_frame.get("sequence"),
+            "replayed/no-effect activation published another frame",
+            {"before": previous_frame, "after": frame},
+        )
+    return info, transform, frame
+
+
+def _run_asset_activation_smoke(
+    binary: Path,
+    *,
+    root: Path,
+    cwd: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    project = root / "offline-asset-activation-project"
+    _write_asset_preparation_view_project(project)
+    command = (
+        "project",
+        "serve",
+        os.fspath(project),
+        "--protocol",
+        "2",
+        "--asset-activation",
+    )
+    server = _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="headless project serve --asset-activation",
+    )
+    checks: list[str] = []
+    with server:
+        initial_info = _asset_preparation_project_info(
+            server,
+            timeout=timeout,
+            request_prefix="asset-activation-project-info-initial",
+        )
+        session = initial_info.get("session")
+        active_source_digest = initial_info.get("source_digest")
+        source_files = initial_info.get("source_files")
+        _expect(
+            isinstance(session, str)
+            and session.isdecimal()
+            and isinstance(active_source_digest, str)
+            and active_source_digest
+            and initial_info.get("entity_count") == 1,
+            "activation server did not load the authored project/entity identity",
+            initial_info,
+        )
+        _expect(
+            isinstance(source_files, list)
+            and {item.get("source_id") for item in source_files if isinstance(item, dict)}
+            == set(ASSET_PREPARATION_SOURCE_PATHS),
+            "activation fixture did not expose exactly its authored source set",
+            source_files,
+        )
+        status, initial_status_result = _asset_activation_status(
+            server,
+            "asset-activation-status-initial",
+            timeout=timeout,
+        )
+        memory = _asset_activation_validate_status(
+            status,
+            session=session,
+            active_generation="1",
+            active_source_digest=active_source_digest,
+        )
+        initial_source_digest = active_source_digest
+        _expect(
+            status.get("state") == "idle" and status.get("current_activation") is None,
+            "activation-enabled serve did not start with an idle activation ledger",
+            status,
+        )
+        checks.append("asset_activation_one_headless_actor_starts_on_four_format_source")
+
+        next_command_id = 930001
+        issued_command_ids: list[dict[str, str]] = []
+
+        def issue_command_id(label: str) -> str:
+            nonlocal next_command_id
+            command_id = str(next_command_id)
+            next_command_id += 1
+            issued_command_ids.append({"label": label, "command_id": command_id})
+            return command_id
+
+        authority_state, entity_handle, authority_step = _asset_activation_apply_authority_transform(
+            server,
+            session=session,
+            command_id=issue_command_id("authority-transform"),
+            timeout=timeout,
+        )
+        authority_frame = _v2_latest_frame(
+            server,
+            timeout=timeout,
+            request_prefix="asset-activation-frame-after-authority-step",
+        )
+        _expect(
+            authority_frame.get("session") == session
+            and authority_frame.get("tick") == "1"
+            and authority_frame.get("authority_snapshot_sequence", "0").isdecimal()
+            and authority_frame.get("project_generation") == "1"
+            and authority_frame.get("source_digest") == active_source_digest,
+            "authority Step frame omitted the active source/tick identity",
+            authority_frame,
+        )
+        checks.append("asset_activation_live_transform_applies_before_source_commit")
+
+        commits: list[dict[str, Any]] = []
+        next_generation = 1
+
+        def prepare_and_commit(label: str) -> None:
+            nonlocal active_source_digest, next_generation, memory, status, authority_frame
+            prepare_command_id = issue_command_id(f"{label}-prepare")
+            stage_command_id = issue_command_id(f"{label}-stage")
+            commit_command_id = issue_command_id(f"{label}-commit")
+            _, _, candidate = _asset_activation_prepare_candidate(
+                server,
+                f"asset-activation-{label}",
+                command_id=prepare_command_id,
+                project=project,
+                session=session,
+                timeout=timeout,
+            )
+            _expect(
+                candidate.get("source_digest") != active_source_digest,
+                f"{label} edit did not produce a distinct project source identity",
+                candidate,
+            )
+            candidate_status, _ = _asset_activation_status(
+                server,
+                f"asset-activation-{label}-active-before-stage",
+                timeout=timeout,
+            )
+            _asset_activation_validate_status(
+                candidate_status,
+                session=session,
+                active_generation=str(next_generation),
+                active_source_digest=active_source_digest,
+            )
+            activation_id, stage_command, staged_status = _asset_activation_stage_candidate(
+                server,
+                f"asset-activation-{label}",
+                command_id=stage_command_id,
+                candidate=candidate,
+                session=session,
+                expected_active_generation=str(next_generation),
+                active_source_digest=active_source_digest,
+                timeout=timeout,
+            )
+            commit_command, commit_status = _asset_activation_commit_candidate(
+                server,
+                f"asset-activation-{label}-commit",
+                activation_id=activation_id,
+                candidate=candidate,
+                command_id=commit_command_id,
+                expected_active_generation=str(next_generation),
+                session=session,
+                timeout=timeout,
+            )
+            new_generation = str(next_generation + 1)
+            info, live_transform, frame = _asset_activation_verify_live_state(
+                server,
+                f"asset-activation-{label}-verify",
+                session=session,
+                expected_handle=entity_handle,
+                expected_source_digest=candidate["source_digest"],
+                expected_generation=new_generation,
+                previous_frame=authority_frame,
+                require_new_frame=True,
+                timeout=timeout,
+            )
+            commits.append(
+                {
+                    "label": label,
+                    "activation": activation_id,
+                    "candidate_id": candidate["id"],
+                    "source_digest": candidate["source_digest"],
+                    "generation": new_generation,
+                    "frame_sequence": frame["sequence"],
+                    "catalog_digest": candidate["catalog_digest"],
+                    "prepare_command_id": prepare_command_id,
+                    "stage_command_id": stage_command_id,
+                    "commit_command_id": commit_command_id,
+                    "commit_command": commit_command,
+                }
+            )
+            status = commit_status
+            memory = _asset_activation_validate_status(
+                status,
+                session=session,
+                active_generation=new_generation,
+                active_source_digest=candidate["source_digest"],
+            )
+            active_source_digest = candidate["source_digest"]
+            next_generation += 1
+            authority_frame = frame
+
+        # Edit source bytes and valid authored model/atlas/audio data in sequence. Each
+        # candidate is prepared, staged to actual Staged, then committed by this actor.
+        (project / "images" / "base.png").write_bytes(_png_rgba(2, 2, (44, 88, 220, 255)))
+        prepare_and_commit("png-edit")
+        checks.append("asset_activation_png_edit_is_committed_and_preserves_authority")
+
+        first_commit = commits[0]
+        replay, _ = _asset_activation_command(
+            server,
+            "asset-activation-commit-replay",
+            {
+                "op": "asset_activation_commit",
+                "activation": first_commit["activation"],
+                "expected_active_generation": "1",
+                "command_id": first_commit["commit_command_id"],
+            },
+            command_id=first_commit["commit_command_id"],
+            outcome_kind="commit_applied",
+            timeout=timeout,
+        )
+        _expect(
+            replay == first_commit["commit_command"]
+            and replay["outcome"].get("data", {}).get("activation") == first_commit["activation"]
+            and replay["outcome"].get("data", {}).get("generation") == "2",
+            "commit replay returned a different activation receipt",
+            replay,
+        )
+        replay_status, _ = _asset_activation_status(
+            server,
+            "asset-activation-status-after-commit-replay",
+            timeout=timeout,
+        )
+        _asset_activation_validate_status(
+            replay_status,
+            session=session,
+            active_generation="2",
+            active_source_digest=active_source_digest,
+        )
+        _, _, replay_frame = _asset_activation_verify_live_state(
+            server,
+            "asset-activation-replay-verify",
+            session=session,
+            expected_handle=entity_handle,
+            expected_source_digest=active_source_digest,
+            expected_generation="2",
+            previous_frame=authority_frame,
+            require_new_frame=False,
+            timeout=timeout,
+        )
+        checks.append("asset_activation_commit_replay_does_not_increment_generation_or_frame")
+
+        external_gltf = project / "models" / "external.gltf"
+        model_document = json.loads(external_gltf.read_text(encoding="utf-8"))
+        model_document["nodes"][0]["translation"] = [0.5, 0.0, 0.0]
+        _write_json(external_gltf, model_document)
+        prepare_and_commit("model-node-edit")
+        checks.append("asset_activation_model_edit_commits_without_recreating_live_entity")
+
+        atlas_path = project / "atlases" / "sprites.json"
+        atlas_document = json.loads(atlas_path.read_text(encoding="utf-8"))
+        atlas_document["regions"][0]["pivot"] = [0.25, 0.75]
+        _write_json(atlas_path, atlas_document)
+        prepare_and_commit("atlas-edit")
+        checks.append("asset_activation_atlas_edit_commits_without_recreating_live_entity")
+
+        _write_pcm16_mono(project / "audio" / "tone.wav", 8_000, (0, 1_002, -1_002, 0))
+        prepare_and_commit("wav-edit")
+        checks.append("asset_activation_wav_edit_commits_without_recreating_live_entity")
+
+        # A stale expected generation is rejected before Stage side effects. The same
+        # caller ID is then retried at the current generation and produces one real stage.
+        (project / "images" / "base.png").write_bytes(_png_rgba(2, 2, (180, 96, 28, 255)))
+        cancel_prepare_command_id = issue_command_id("cancel-candidate-prepare")
+        _, _, cancel_candidate = _asset_activation_prepare_candidate(
+            server,
+            "asset-activation-cancel-candidate",
+            command_id=cancel_prepare_command_id,
+            project=project,
+            session=session,
+            timeout=timeout,
+        )
+        stage_operation = {
+            "op": "asset_activation_stage",
+            "candidate": cancel_candidate["id"],
+            "expected_active_generation": "1",
+            "command_id": issue_command_id("stale-generation-stage"),
+        }
+        stale_command_id = stage_operation["command_id"]
+        stale_generation = _asset_activation_expect_terminal_error(
+            server,
+            "asset-activation-stale-generation",
+            stage_operation,
+            code="active_generation_mismatch",
+            timeout=timeout,
+        )
+        current_generation = str(next_generation)
+        activation_id, _, staged_status = _asset_activation_stage_candidate(
+            server,
+            "asset-activation-cancel-candidate-retry",
+            command_id=stale_command_id,
+            candidate=cancel_candidate,
+            session=session,
+            expected_active_generation=current_generation,
+            active_source_digest=active_source_digest,
+            timeout=timeout,
+        )
+        cancel_command_id = issue_command_id("cancel-staged-activation")
+        cancel_command, _ = _asset_activation_command(
+            server,
+            "asset-activation-cancel-staged",
+            {
+                "op": "asset_activation_cancel",
+                "activation": activation_id,
+                "command_id": cancel_command_id,
+            },
+            command_id=cancel_command_id,
+            outcome_kind="cancel_accepted",
+            timeout=timeout,
+        )
+        cancel_outcome = cancel_command["outcome"].get("data")
+        _expect(
+            isinstance(cancel_outcome, dict) and cancel_outcome.get("activation") == activation_id,
+            "Cancel receipt omitted the staged activation identity",
+            cancel_command,
+        )
+        cancelled_status, _ = _asset_activation_wait_for_state(
+            server,
+            "asset-activation-cancelled",
+            activation_id=activation_id,
+            session=session,
+            expected_state="cancelled",
+            active_generation=current_generation,
+            active_source_digest=active_source_digest,
+            timeout=timeout,
+        )
+        _expect(
+            cancelled_status.get("current_activation", {}).get("committed_generation") is None,
+            "cancelled staged activation unexpectedly reports a committed generation",
+            cancelled_status,
+        )
+        after_cancel, _, after_cancel_frame = _asset_activation_verify_live_state(
+            server,
+            "asset-activation-cancel-verify",
+            session=session,
+            expected_handle=entity_handle,
+            expected_source_digest=active_source_digest,
+            expected_generation=current_generation,
+            previous_frame=authority_frame,
+            require_new_frame=False,
+            timeout=timeout,
+        )
+        checks.append("asset_activation_stale_generation_retry_and_actual_staged_cancel_preserve_active_source")
+
+        # A validly loaded candidate with a different authored entity set must fail the
+        # shared compatibility worker and leave the last committed source/frame active.
+        scene_path = project / "scene.json"
+        scene_document = json.loads(scene_path.read_text(encoding="utf-8"))
+        scene_document["entities"][0]["id"] = "entity:activation-topology-rejected"
+        _write_json(scene_path, scene_document)
+        topology_prepare_command_id = issue_command_id("topology-candidate-prepare")
+        topology_prepare, _, topology_candidate = _asset_activation_prepare_candidate(
+            server,
+            "asset-activation-topology-candidate",
+            command_id=topology_prepare_command_id,
+            project=project,
+            session=session,
+            timeout=timeout,
+        )
+        topology_stage_command_id = issue_command_id("topology-stage")
+        topology_stage, _ = _asset_activation_command(
+            server,
+            "asset-activation-topology-stage",
+            {
+                "op": "asset_activation_stage",
+                "candidate": topology_candidate["id"],
+                "expected_active_generation": current_generation,
+                "command_id": topology_stage_command_id,
+            },
+            command_id=topology_stage_command_id,
+            outcome_kind="stage_accepted",
+            timeout=timeout,
+        )
+        topology_accepted = topology_stage["outcome"].get("data")
+        _expect(
+            isinstance(topology_accepted, dict)
+            and topology_accepted.get("candidate") == topology_candidate["id"],
+            "topology Stage receipt did not identify its prepared candidate",
+            topology_stage,
+        )
+        topology_activation = _asset_activation_validate_id(
+            topology_accepted.get("activation"),
+            session=session,
+            sequence_field="sequence",
+            context="topology Stage activation ID",
+        )
+        failed_status, _ = _asset_activation_wait_for_state(
+            server,
+            "asset-activation-topology-failed",
+            activation_id=topology_activation,
+            session=session,
+            expected_state="failed",
+            active_generation=current_generation,
+            active_source_digest=active_source_digest,
+            timeout=timeout,
+        )
+        failure = failed_status.get("latest_failure")
+        _expect(
+            isinstance(failure, dict) and failure.get("code") == "incompatible_topology",
+            "topology-changing candidate did not produce a bounded compatibility failure",
+            failed_status,
+        )
+        _expect(
+            topology_candidate["source_digest"] != active_source_digest
+            and topology_stage["outcome"].get("kind") == "stage_accepted"
+            and topology_prepare.get("command_id") == topology_prepare_command_id,
+            "topology rejection did not occur after a real prepared/staged candidate",
+            {"prepare": topology_prepare, "stage": topology_stage, "candidate": topology_candidate},
+        )
+        _, _, final_frame = _asset_activation_verify_live_state(
+            server,
+            "asset-activation-topology-last-good",
+            session=session,
+            expected_handle=entity_handle,
+            expected_source_digest=active_source_digest,
+            expected_generation=current_generation,
+            previous_frame=after_cancel_frame,
+            require_new_frame=False,
+            timeout=timeout,
+        )
+        checks.append("asset_activation_incompatible_topology_keeps_last_good_source_and_frame")
+
+        final_status, final_status_result = _asset_activation_status(
+            server,
+            "asset-activation-status-final",
+            timeout=timeout,
+        )
+        memory = _asset_activation_validate_status(
+            final_status,
+            session=session,
+            active_generation=current_generation,
+            active_source_digest=active_source_digest,
+        )
+        exit_response = server.request(
+            "asset-activation-close",
+            {"op": "close"},
+            allow_error=True,
+        )
+        _expect(exit_response.get("ok") is True, "activation serve did not accept bounded close", exit_response)
+        _expect(server.wait_for_exit(timeout=timeout) == 0, "activation serve did not exit cleanly", exit_response)
+        shutdown_diagnostic = server._server_diagnostic()
+        _expect(
+            "asset_activation_owner=stopped" in shutdown_diagnostic,
+            "activation owner did not report a fully stopped worker after close",
+            shutdown_diagnostic,
+        )
+        checks.append("asset_activation_owner_reports_stopped_after_bounded_close")
+
+    issued_values = [int(entry["command_id"]) for entry in issued_command_ids]
+    _expect(
+        all(previous < current for previous, current in zip(issued_values, issued_values[1:])),
+        "activation mutation command IDs did not advance in one session-wide sequence",
+        issued_command_ids,
+    )
+    return {
+        "scope": "headless_cpu_asset_source_activation",
+        "session": session,
+        "authored_source_files": source_files,
+        "initial_source_digest": initial_source_digest,
+        "final_active_source_digest": active_source_digest,
+        "initial_generation": "1",
+        "final_generation": current_generation,
+        "live_entity_handle": entity_handle,
+        "authority_tick": authority_state["observed_tick"],
+        "authority_step": authority_step,
+        "authority_snapshot_sequence": authority_frame["authority_snapshot_sequence"],
+        "command_id_trace": issued_command_ids,
+        "reused_command_ids": {
+            "first_commit_replay": first_commit["commit_command_id"],
+            "stale_generation_retry": stale_command_id,
+        },
+        "commits": commits,
+        "commit_replay": replay,
+        "stale_generation_error": stale_generation["terminal"]["error"],
+        "cancelled_activation": activation_id,
+        "cancel_status": cancelled_status,
+        "topology_candidate_source_digest": topology_candidate["source_digest"],
+        "topology_failure": failure,
+        "last_good_frame": final_frame,
+        "memory": memory,
+        "final_status": final_status_result["data"]["data"],
+        "cancel_candidate_staged_status": staged_status,
+        "pre_topology_info_after_cancel": after_cancel,
+        "checks": checks,
+    }
+
+
 def _run_asset_preparation_view_smoke(
     binary: Path,
     *,
@@ -3398,14 +4609,19 @@ def _run_native_audio_smoke(
     }
 
 
-def _v2_latest_frame(server: _JsonlProjectServer, *, timeout: float) -> dict[str, Any]:
+def _v2_latest_frame(
+    server: _JsonlProjectServer,
+    *,
+    timeout: float,
+    request_prefix: str = "view-latest-frame",
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     for attempt in range(int(timeout * 100) + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise SmokeError("timed out waiting for latest_frame")
         response = server.request(
-            f"view-latest-frame-{attempt}",
+            f"{request_prefix}-{attempt}",
             {"op": "latest_frame"},
             timeout=remaining,
             allow_error=True,
@@ -4475,6 +5691,7 @@ def run_project_smoke(
     audio: bool = False,
     audio_native: bool = False,
     asset_preparation: bool = False,
+    asset_activation: bool = False,
 ) -> dict[str, Any]:
     """Exercise CPU lifecycle checks plus any explicitly requested native/model checks."""
 
@@ -4626,6 +5843,16 @@ def run_project_smoke(
             )
             checks.extend(asset_preparation_results["session"]["checks"])
 
+        asset_activation_results: dict[str, Any] | None = None
+        if asset_activation:
+            asset_activation_results = _run_asset_activation_smoke(
+                binary,
+                root=root,
+                cwd=working_directory,
+                timeout=timeout,
+            )
+            checks.extend(asset_activation_results["checks"])
+
         audio_results: dict[str, Any] | None = None
         if audio:
             audio_results = _run_audio_project_smoke(
@@ -4754,6 +5981,8 @@ def run_project_smoke(
         result["asset_cook"] = asset_results
     if asset_preparation_results is not None:
         result["asset_preparation"] = asset_preparation_results
+    if asset_activation_results is not None:
+        result["asset_activation"] = asset_activation_results
     if asset_preparation_view_results is not None:
         result["asset_preparation_view"] = asset_preparation_view_results
     if model_results is not None:
@@ -4769,7 +5998,7 @@ def run_project_smoke(
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view/--models/--sprites add native GPU checks, --audio-native adds a native audio-device check, and --asset-preparation exercises live CPU candidate preparation."
+        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view/--models/--sprites add native GPU checks, --audio-native adds a native audio-device check, --asset-preparation exercises CPU asset preparation, and --asset-activation exercises headless CPU source replacement."
     )
     parser.add_argument("--cli", type=Path, required=True, help="already-built daedalus executable")
     parser.add_argument(
@@ -4813,6 +6042,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also exercise protocol-2 live CPU asset-candidate preparation, reuse, edits, and cancellation",
     )
+    parser.add_argument(
+        "--asset-activation",
+        action="store_true",
+        help="also exercise protocol-2 headless CPU project source Stage/Commit, replay, cancellation, and topology rejection",
+    )
     return parser.parse_args(argv)
 
 
@@ -4829,6 +6063,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             audio=arguments.audio,
             audio_native=arguments.audio_native,
             asset_preparation=arguments.asset_preparation,
+            asset_activation=arguments.asset_activation,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

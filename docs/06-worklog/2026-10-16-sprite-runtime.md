@@ -35,3 +35,5 @@ content→renderer→CLI→조정자 순서로 Cargo/shared target 소유권을 
 상세 계약은 `5d1be86`에 code보다 먼저 커밋했다. Luna xhigh 세 담당자에게 content/renderer/CLI·scripts 소유권과 public accessor 계약을 전달했다. content만 Cargo owner로 focused 검사를 시작하고 renderer/CLI는 의존 API를 공유해 disjoint source 편집을 진행한다. default smoke와 CPU CI에 GPU를 강제하지 않으며 후속 실제 hardware/원본 QA/clean package와 최종 CI는 여전히 미실행이다.
 
 공개 원본 QA 입력은 ignored `dist/qa-assets/sprite-runtime-project/`에 준비했다. Tiny Dungeon의 원본 PNG5294 bytes/SHA-256 `d24e60a41e4ac7a745c0304dfde121143688557f40215f23221c29cfe683825f`를 그대로 복사했고 atlas descriptor의16×16 region4개만 별도 작성했다. 두 atlas StableId·네 sprite와 camera-only entity로 unit quad/texture 공유 및 실제 픽셀 아트를 확인할 예정이다. 현재는 입력 준비만 했으며 새 sprite binary의 validation/render는 미실행이다.
+
+초기 CLI source 리뷰에서 실제 view JSON을 capture artifact payload 안의 `capture.render_view`로 명확히 했다. 기존 last_presented/window camera key와 새 view의 camera serialization이 따로 늘지 않도록 공통 camera 변환 재사용을 요청했다. 후속 live capture 계약에도 실제 used projection/local zoom/Busy ready metadata 재사용을 반영했지만 해당 capture 기능은 아직 구현하지 않았다.

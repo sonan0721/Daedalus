@@ -108,7 +108,7 @@ window의 pose와 projection을 하나의 private local view state로 취급한�
 
 Busy가 old-ready packet을 선택하면 실제 그 packet/projection을 submission record에서 가져온다. Camera-only override에 incoming rejected/pending packet의 projection을 섞지 않는다. full local RenderView override는 명시적 viewer 상태다. window는 queue submit와 surface present가 실제 실행된 뒤에만 PresentedView를 갱신한다. no-ready Busy는 surface drop/no-present이며 last-presented metadata를 갱신하지 않는다. batch capture report의 view도 실제 capture에 쓴 packet view다. source initial 값으로 zoom 결과를 덮어쓰지 않는다.
 
-CLI view/capture는 기존 공통 loader/packet path와 stats JSON 변환을 유지한다. same-session source watch/live capture/MCP라고 보고하지 않는다. 공통 `render_view_json` 변환을 사용한다. capture root의 `render_view`, native `last_presented.render_view`와 `window.final_render_view`는 `{camera: 기존 Camera JSON, projection:{kind:"perspective"}}` 또는 `{camera:...,projection:{kind:"orthographic",vertical_size:...}}`다. 기존 camera/FOV key는 보존하고 새 projection이 실제 투영 의미를 밝힌다. 마지막 present가 없으면 last_presented는 기존처럼 null이다.
+CLI view/capture는 기존 공통 loader/packet path와 stats JSON 변환을 유지한다. same-session source watch/live capture/MCP라고 보고하지 않는다. 공통 `render_view_json` 변환을 사용한다. capture report의 `capture.render_view`, native `last_presented.render_view`와 `window.final_render_view`는 `{camera: 기존 Camera JSON, projection:{kind:"perspective"}}` 또는 `{camera:...,projection:{kind:"orthographic",vertical_size:...}}`다. 기존 camera/FOV key는 보존하고 새 projection이 실제 투영 의미를 밝힌다. 마지막 present가 없으면 last_presented는 기존처럼 null이다.
 
 ## 검증과 분담·exit
 

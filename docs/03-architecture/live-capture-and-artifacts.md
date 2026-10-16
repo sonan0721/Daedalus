@@ -14,9 +14,9 @@ AI가 `수정 → 적용 확인 → 실제 frame 관찰 → assertion`을 같은
 
 요청은 session과 source generation을 bind한다. active source가 달라졌으면 새 generation을 조용히 캡처하지 않고 StaleGeneration으로 실패한다. packet sequence rollback/session mismatch는 기존 규칙을 유지한다. renderer residency pressure가 이전 ready packet을 그린 경우 capture identity는 incoming candidate가 아니라 `render_packet_view`가 **실제 그린 packet**이다. 조건을 만족하지 않으면 그 frame은 선택하지 않는다.
 
-결과는 session/tick/packet sequence/project generation/source digest, **present_serial**, effective local camera, 실제 surface physical width/height, color format과 PNG metadata를 포함한다. present_serial은 같은 packet을 다른 camera로 여러 번 그려도 구분하는 window-local monotonic counter다. checked 증가·고갈 실패를 정의하며 packet sequence로 대체하지 않는다. physical 크기는 선택한 frame 시점의 값이고 requested logical 크기나 이후 resize 값이 아니다.
+결과는 session/tick/packet sequence/project generation/source digest, **present_serial**, effective local camera와 tagged perspective/orthographic projection(정사영 vertical_size 포함), 실제 surface physical width/height, color format과 PNG metadata를 포함한다. present_serial은 같은 packet을 다른 camera로 여러 번 그려도 구분하는 window-local monotonic counter다. checked 증가·고갈 실패를 정의하며 packet sequence로 대체하지 않는다. physical 크기는 선택한 frame 시점의 값이고 requested logical 크기나 이후 resize 값이 아니다.
 
-copy는 그 frame의 scene·loading overlay를 모두 그린 뒤 해당 acquired surface texture에서 present 전에 기록한다. 같은 queue에서 draw→copy가 순서대로 제출되면 별도 submission도 허용하며, 불필요하게 기존 내부 submit을 전부 refactor하지 않는다. draw/copy 제출을 확인하고 present()를 호출한 frame만 선택 기록에 확정한다. present() 자체는 unit 반환이므로 OS presentation 성공을 확인했다고 표현하지 않는다. GPU map/PNG 성공을 surface scanout 증명으로 확대하지 않는다. 선택된 frame의 camera/크기/identity는 이후 frame에 덮어쓰이지 않는다.
+copy는 그 frame의 scene·loading overlay를 모두 그린 뒤 해당 acquired surface texture에서 present 전에 기록한다. 같은 queue에서 draw→copy가 순서대로 제출되면 별도 submission도 허용하며, 불필요하게 기존 내부 submit을 전부 refactor하지 않는다. draw/copy 제출을 확인하고 present()를 호출한 frame만 선택 기록에 확정한다. present() 자체는 unit 반환이므로 OS presentation 성공을 확인했다고 표현하지 않는다. GPU map/PNG 성공을 surface scanout 증명으로 확대하지 않는다. 선택된 frame의 camera/projection/크기/identity는 이후 frame에 덮어쓰이지 않는다. [P03.2b 계약](sprite-runtime-and-orthographic-view.md)의 실제 PacketViewSubmission/PresentedView를 재사용하며 incoming/source initial camera에서 다시 추측하지 않는다. runtime 결과의 view DTO는 renderer-neutral 값으로 변환하고 runtime에 wgpu 의존성을 넣지 않는다. P03.2b 자체도 현재 구현 중이므로 이 연결은 후속 capture 설계이며 live capture를 이미 구현했다는 뜻이 아니다.
 
 ## Capability와 실제 GPU 경로
 
@@ -63,7 +63,7 @@ close/device/map/encoder/파일 오류는 명시 terminal failure이며 PNG 성�
 ## 검증과 구현 순서
 
 1. CPU service: sink 없는 unsupported·single binding·wrong session/generation·normal/Step/image reserve·deadline·forget/reader retention·duplicate completion·shutdown/actor failure를 검증한다.
-2. renderer: alignment/BGRA/limits·실제 selected packet·present_serial·resize·copy/map failure와 bounded worker/artifact cleanup을 검증한다. 별도 requested real GPU 시험에서 sRGB/linear fallback의 known color·비검정 foreground·PNG decode·hash·반복 요청·계속되는 frame 제출을 확인한다.
+2. renderer: alignment/BGRA/limits·실제 selected packet/used projection·같은 tick의 local pan/zoom·Busy old-ready view·present_serial·resize·copy/map failure와 bounded worker/artifact cleanup을 검증한다. 별도 requested real GPU 시험에서 sRGB/linear fallback의 known color·비검정 foreground·PNG decode·hash·반복 요청·계속되는 frame 제출을 확인한다.
 3. 같은 실제 Mac project window에서 protocol 2 mutation→Step→capture ticket→poll→PNG decode/state/identity 대조→ACK→다음 capture를 실행한다. stale/too-large·close 중 capture·막힌 stdout·deadline과 resource 회복도 검사한다.
 4. 기존 `smoke_project.py --view` process/project/JSONL/report helper를 확장한다. 이미 빌드한 binary를 받고 자동 재빌드하지 않으며 CPU18/default package 의미는 유지한다. physical OS 입력과 source asset 품질 시험은 별도다.
 

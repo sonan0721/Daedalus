@@ -71,3 +71,9 @@ project view와 batch capture는 같은 prepared resources/packet/shader를 사�
 CPU 검사는 selected roots·공유 mesh의 여러 node·여러 primitive·matrix·stable draw ID·asset-kind 오류·합산 한도·수명을 다룬다. GPU 검사는 실제 texture/UV/sRGB·sampler·mip·정상 픽셀과 resource upload 수를 확인한다. 2D/audio는 각각의 실제 출력 증거를 별도로 남긴다. 원본 provenance는 [기록](../02-research/asset-validation-provenance.md)을 재사용하고 테스트에 외부 다운로드를 추가하지 않는다.
 
 기존 `scripts/smoke_project.py`의 process/timeout/hash/cleanup을 확장하는 것을 우선한다. GPU/device가 필요한 mode는 opt-in으로 두고 CPU/package 기본 의미를 몰래 바꾸지 않는다. 구현 전 각 하위 계약에서 JSON schema·public API·한도·파일 소유자·명령·성공/실패 기준을 확정한다. 이 초안만으로 착수 조건이나 P03.2 체크박스를 통과시키지 않는다.
+
+## P03.2c 착수 전 source 감사
+
+2026-10-16 Luna xhigh read-only 감사로 imported AudioAsset은 immutable `Arc<[f32]>`, 현재 PcmClip은 `Arc<[kira::Frame]>`를 보관함을 확인했다. 현재 `from_interleaved`는 Vec를 받아 stereo frame으로 변환하므로 borrowed-slice 진입점을 추가하면 임시 `samples.to_vec()` 한 번을 피할 수 있다. mono→stereo와 Frame layout 변환 자체는 필요하며 Vec→Arc 최종화의 임시 peak도 예산에 포함해야 한다. 재생 voice는 StaticSoundData의 Frame Arc를 공유하므로 전체 PCM을 voice마다 다시 변환할 필요가 없다. 같은 AudioAsset cook key의 alias는 한 번 변환하는 bounded project bank 후보로 둔다. 현재 project bank/adapter는 구현하지 않았다.
+
+공통 SessionControlService actor가 project/catalog와 같은 권한·owned ticket을 갖고 있으므로 별도 CLI WAV player보다 이 actor의 명시적 opt-in audio sidecar를 검토한다. 기존 SessionControlConfig literal과 device-free 기본 경로를 보존해야 한다. stop은 Kira command 요청이고 mixer가 종료를 관찰한 것과 다르다. 현재 service에 per-voice 상태 조회가 없어 stale handle·stop requested·actual ended·회수와 유한 wire ID 수명은 상세 계약에서 확정해야 한다. CPU 검증은 실제 imported WAV→bank→실제 offline Kira PCM을 사용하고 native device 출력은 별도 opt-in이다. 이 감사만으로 audio consumer나 headless/SDK 연결을 통과시키지 않는다.

@@ -23,6 +23,8 @@ P01.1에서 외부 data-only project의 실제 ECS 실행을 연결했다. 그�
 
 결과 lease/ack·Step reserve·cached replay의 테스트 비용이 생긴다. caller ID를 직접 발급하는 여러 attachment는 순서를 공유해야 하므로 일반 사용은 auto ID를 기본으로 한다. 후속 wire adapter는 새 caller 정책과 expired 오류를 명시해야 한다. 이 alpha service 계약을 기존 bridge ABI의 호환 규칙으로 소급 적용하지 않는다.
 
+새 service의 JSONL endpoint는 protocol 2로 구분한다. 기존 protocol 1의 field shape를 재사용하더라도 strict caller 정책을 몰래 소급 적용하지 않는다. 기존 bare/project serve의 실제 migration·compatibility 검증은 별도 작업이며 P02.1에서 transport를 바꾼 결과가 아니다.
+
 ## 통과 근거
 
 이 ADR 작성 시 P02.1은 Luna xhigh가 구현 중이다. public 계약을 먼저 공유했으며 독립 감사에서 frame retention·replay 보존의 누락을 보완했다. 실제 manual/realtime·복수 client·포화/ack/drop/timeout·dedup/eviction·shutdown·legacy 회귀를 통과해야 하위 구현을 체크한다. 아직 실행하지 않은 검사를 성공으로 기록하지 않는다. visible project/MCP/live capture와 전체 P02/D1 인수는 후속이다.

@@ -77,6 +77,8 @@ completed replay ledger는 기본 1024/hard 16,384 entries로 제한하고 pendi
 
 이는 새 service의 명시적인 replay 정책이다. 기존 bare JSONL/bridge/world의 bounded dedup API를 이 단계에서 몰래 변경하지 않는다. 후속 adapter migration 때 이 강화된 caller ID 정책과 expired 오류를 공개하고 wire 회귀를 검증한다. 프로세스 재시작을 넘는 exactly-once를 약속하지 않으며 durable/network replay는 P10/P11에서 별도 다룬다.
 
+기존 JSONL protocol 1의 field 모양을 재사용하는 것과 semantics 호환은 다르다. 새 strict service에 대한 후속 JSONL endpoint는 protocol 2로 명시하고 policy/capability를 조회하게 한다. 기존 protocol-1 bare/project serve는 해당 단계에서 별도 migration·회귀를 하기 전까지 기존 동작을 유지한다. 지원하지 않는 버전을 조용히 새 정책으로 실행하지 않는다. P02.1에는 새 JSONL endpoint를 구현하지 않는다.
+
 | 초기 제한 | 기본값 | hard ceiling |
 | --- | --- | --- |
 | actor queue | 128 | 4096 |

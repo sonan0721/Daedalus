@@ -130,6 +130,8 @@ retained-frame 상한은 mailbox 안의 값만이 아니라 client가 보유한 
 
 ## visible project와 제어 adapter
 
+P02.2a의 구체적인 CLI·shared source·tick-0·protocol-2·process I/O 계약은 [project 실행 창 명세](project-view-control.md)에 둔다. blocking process I/O만 분리해 종료 시 join하지 않는 첫 CLI 선택과, 반드시 회수하는 engine worker를 구분한다. 아래 장기 adapter 요구를 cancellable transport까지 이미 구현한 것으로 표시하지 않는다.
+
 후보 CLI는 `project view <directory>`이며 기존 `view` fixture는 진단용으로 보존한다. startup은 project load/검증→Host start→window/control attach 순서다. 빈 project는 빈 scene을 표시하고 실행 창에 default terrain/entity를 주입하지 않는다. camera 조작과 authored/gameplay entity의 action을 구분한다. 선택 대상 stable ID·action binding이 없는데 arrow key를 임의 첫 entity 이동으로 연결하지 않는다.
 
 stdin JSONL을 붙이는 경우 OS event loop와 별도 I/O thread를 사용하고 stdout에는 해당 protocol 응답만 출력한다. window/report 진단은 stderr 또는 명시 파일이다. window가 먼저 닫히는 경우에도 blocking stdin thread를 join하느라 프로세스가 종료되지 않는 문제를 해결해야 한다. fd-ready/비동기 transport 또는 명시적으로 종료 가능한 I/O 수명을 선택한다. timeout/EOF/창 종료의 host stop 정책도 표시한다.

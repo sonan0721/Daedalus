@@ -142,3 +142,9 @@ read-only credit 재감사에서는 실제 reader lease·pending/종료·panic c
 수정 head clean source의 로컬 package도 다시 만들었다. `dist/local/daedalus-0.1.0-aarch64-apple-darwin-6ab114f0228e-clean-20261016T012616Z-2e6be7fc9af7477f8b6357a1d9587837/`이며 dirty=false·release/window·동일 18-check extracted smoke가 통과했다. Cargo cached build는 5.76초다. binary SHA-256은 이전에 실제 Metal 창을 검증한 파일과 같은 `e0e124f70b556ac1a489b6fd950bfe0926fb5534a2c04c4d487727d1ae7ed6d4`였다. 새 service가 아직 CLI adapter에서 사용되지 않으므로 source 수정과 CLI executable identity를 같은 개념으로 취급하지 않는다. 같은 binary의 GPU 창을 불필요하게 다시 시험하지 않았고, library 수정은 별도 158건·Linux CI로 검증했다.
 
 다음 branch는 `feat/renderer-resource-reuse`다. renderer-owned immutable mesh handle·project prepare/extract·persistent GPU cache와 packet 창 API를 먼저 구현하고, 같은 service의 외부 project/JSONL control을 연결한다. window source 감사는 accepted metadata와 실제 surface submission identity의 차이, shared event handler와 camera override·in-flight 한도를 명세에 보완했다. 아직 이 새 renderer나 project window를 구현/검증한 결과는 아니다. 전체 D1/D2/D3는 계속 진행 중이다.
+
+## P02.2a 구현 전 연결 계약
+
+새 [project-view-control.md](../03-architecture/project-view-control.md)는 여러 frontend마다 source/state/command를 복제하는 개발 반복을 줄이기 위해 만들었다. 하나의 불변 source Arc, simulation을 실행하지 않는 실제 tick-0 게시, 같은 service의 protocol-2 ticket adapter, 유한 process I/O와 정상 Close를 명세한다. realtime viewer를 기본으로 두고 deterministic manual은 명시 선택이다. live capture/MCP나 정식 action system은 이 연결만으로 지원한다고 표시하지 않는다.
+
+Luna xhigh renderer 담당자는 renderer 전체·Cargo.lock·공유 Cargo target을 단독 소유한다. runtime 담당자는 disjoint project/session/lib의 shared source/tick-0와 테스트 source부터 작성하며 Cargo는 기다린다. 별도 Luna는 새 계약을 read-only 검토한다. root는 문서·리뷰·통합 검증을 맡는다. 새 범용 개발 도구나 cold target을 만들어 작업을 중복하지 않는다. 아직 새 코드의 최종 검증·개선 수치는 없다.

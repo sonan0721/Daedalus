@@ -86,6 +86,7 @@
 | S76 | [Kenney Interface Sounds](https://kenney.nl/assets/interface-sounds) | 2026-10-16: 공식 CC0·실제 archive는 OGG, 외부 FFmpeg 6.0으로 WAV 파생 | WAV importer 실제 오디오 입력. engine OGG/FFmpeg 통합·재생 검증 아님 |
 | S77 | [Kenney Nature Kit](https://kenney.nl/assets/nature-kit) | 2026-10-16: 공식/archive CC0·선택 GLB의 KHR_materials_unlit 선언 | 첫 subset의 미지원 진단 입력. 확장을 삭제해 성공으로 간주하지 않음 |
 | S78 | [W3C PNG gAMA](https://www.w3.org/TR/png-3/#11gAMA)·[sRGB](https://www.w3.org/TR/png-3/#11sRGB) | 2026-10-16: gamma power 관계·sRGB 태그의 우선순위·alpha의 별도 의미 확인 | 실제 gamma-tagged palette 원본을 보존해 color-role sRGB 정규화. 전체 ICC/CMS 지원 근거 아님 |
+| S79 | [glTF image transfer 정의](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#images)·[규격 원문](https://github.com/KhronosGroup/glTF/blob/main/specification/2.0/Specification.adoc) | 2026-10-16: image의 embedded 색공간보다 material의 transfer 정의를 사용 | standalone PNG 정규화와 glTF encoded-color 정책을 공통 decoder/API 안에서 구분하고 cache non-alias 검증 |
 
 S67~S70의 확인 결과와 CPU cook/GPU resource identity 적용안은 [에셋 상세 계약](../03-architecture/asset-import-cook-and-residency.md)에 둔다. 해당 추가는 포맷 조사이며 새 dependency를 Cargo에 설치한 결과가 아니다.
 

@@ -1,6 +1,6 @@
 # P03.2 실제 model·texture·sprite·audio 소비
 
-상태: a 인수 통과, b 로컬/clean package 확인·최종 CI 대기, c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
+상태: a/b 하위 gate 인수, c 상세 설계 진행·전체 P03.2 미통과 · 2026-10-16 · P03/DEV03/DEV05/DEV08
 
 ## 목적과 선행 조건
 

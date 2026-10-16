@@ -1,6 +1,6 @@
 # P03.1 공통 에셋 import·cook 구현 계약
 
-상태: 구현 전 public API handoff · 2026-10-16 · P03/DEV03/DEV05
+상태: public API/settings handoff 완료·구현 중·인수 전 · 2026-10-16 · P03/DEV03/DEV05
 
 ## 목적과 선행 근거
 
@@ -22,6 +22,44 @@ scene asset descriptor는 기존 schema 1과 StableId/uri를 유지한다. 기�
 model은 default scene을 사용하고, default가 없으면 scene 1개인 경우만 자동 선택한다. 여러 scene이면 metadata의 명시 scene index를 요구한다. scene 없는 자료를 임의 identity node로 그리게 만들지 않는다. transform·index·accessor/count·material scalar·실제 attribute payload를 검증하고 노드 cycle/multiple-parent·depth 초과를 오류로 낸다. 미사용 정의의 보존과 실제 선택 scene roots를 구분한다.
 
 base-color는 sRGB 의미, alpha는 linear 값이며 normal/data map을 color로 잘못 해석하지 않는다. UV 없는 geometry는 untextured material에만 허용한다. glTF의 material factor·UV·sampler 의미를 잃지 않는다. 첫 3D opaque color mip은 versioned linear-light box filter 뒤 sRGB encoding으로 생성한다. odd dimension·1×N·known-color를 검사한다. atlas는 nearest/no-mip으로 유지한다. 미지원 alpha-aware mip/재질을 조용히 근사하지 않는다.
+
+sampler는 각 축 ClampToEdge/MirroredRepeat/Repeat, magnification nearest/linear, minification nearest/linear와 mip 없음/nearest/linear를 구분한다. 반복 여부 bool이나 두 filter 값만으로 합치지 않는다. 생략된 filtering의 엔진 기본값은 문서화하고, 명시된 값을 IR/key와 후속 GPU sampler에 보존한다. 이는 [glTF filtering/wrapping 규격](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#samplers)의 구분이며 2026-10-16 API 리뷰에서 첫 표현의 손실을 찾아 보완했다.
+
+### v1 저작 settings와 atlas JSON
+
+빈 descriptor metadata는 schema 1의 아래 기본값을 사용한다. 비어 있지 않으면 `schema_version: 1`이 필요하며 모든 settings/source JSON은 unknown field를 거부한다. model의 `scene_index`는 선택 사항이고 audio/atlas descriptor에는 version 이외의 settings가 없다. image settings는 다음 형태다.
+
+```json
+{
+  "schema_version": 1,
+  "role": "sprite_atlas_srgb",
+  "mip_policy": "none",
+  "sampler": {
+    "min_filter": "nearest",
+    "mag_filter": "nearest",
+    "mipmap_filter": "none",
+    "wrap_u": "clamp_to_edge",
+    "wrap_v": "clamp_to_edge"
+  }
+}
+```
+
+role은 `base_color_srgb`/`sprite_atlas_srgb`, mip policy는 `none`/`linear_light_box_v1`, min/mag는 `nearest`/`linear`, mipmap filter는 `none`/`nearest`/`linear`, wrap은 `clamp_to_edge`/`mirrored_repeat`/`repeat`다. 기본값은 base color, no mip, linear min/mag, no mip filter, repeat 양 축이다. sprite role에는 nearest min/mag와 no-mip을 명시해야 한다. mip policy none과 mip filter none은 함께 사용하고, mip filter를 켜면 지원하는 mip policy를 요구한다. role만 바꾸었다고 sampler를 조용히 바꾸지 않는다. glTF model-owned image의 sampler는 model reference의 명시된 값을 보존한다.
+
+atlas **source file**은 아래 형태이며 rect는 pixel 단위 `[x, y, width, height]`다. descriptor 순서와 관계없이 image를 먼저 준비하고 atlas가 image kind/role/sampler/dimensions를 검사한다. 참조 image의 source/dependency identity도 atlas의 dependency 기록에 포함한다.
+
+```json
+{
+  "schema_version": 1,
+  "image_asset": "tile_image",
+  "filter_policy": "nearest_no_mip_v1",
+  "regions": [
+    { "id": "stone", "rect": [0, 0, 16, 16], "pivot": [0.5, 0.5], "pixels_per_unit": 16.0 }
+  ]
+}
+```
+
+이 예시는 새 source schema의 계약이다. project descriptor의 StableId/uri wrapper를 대신하지 않으며, 코드/CLI 검증 전부터 사용 가능하다고 표시하지 않는다.
 
 ## CPU API와 불변 자료
 
@@ -73,6 +111,8 @@ CacheRead는 Miss/검증한 Hit/Corrupt를 구분한다. version/key/kind/declar
 JSON summary는 source/catalog identity, asset kind/leaf identity·geometry/image/atlas/audio counts, read/parse/hash/decode/cook/hit/corrupt 수·현재 bytes를 담고 raw payload를 stdout으로 출력하지 않는다. 합계·asset별 작은 summary를 1 MiB 이내로 제한하고 더 큰 상세는 명시 paging/한도 오류로 처리한다. 실패는 typed code·source·JSON/accessor path·dependency chain을 가진 진단과 nonzero exit다. CLI는 별도 importer/cache 구현을 만들지 않는다.
 
 기존 `scripts/smoke_project.py`의 opt-in `--assets`를 확장해 같은 subprocess/temporary-project/binary-hash/cleanup을 재사용한다. 기본 CPU18와 native --view의 의미는 유지한다. 신규 smoke는 네 포맷을 실제 import하고 no-change·외부/embedded PNG edit·geometry edit·atlas metadata edit·WAV edit·corruption/실패에서 expected reuse를 비교한다. 외부 네트워크 다운로드는 smoke 안에서 하지 않는다. root의 별도 실제 공개 에셋 검증은 원출처/license/hash를 보존한다.
+
+기존 Mac/Linux release-package CI job은 package build 뒤 동일 helper의 `--assets`를 staged binary에 명시 실행한다. 추가 Cargo build나 별도 workflow를 만들지 않는다. package backend의 기본 CPU18/archive 검증과 tag/publish 정책은 유지한다. 로컬 인수에서는 추출한 archive binary에도 같은 assets smoke를 별도 실행해 개발 binary와 구분한다. 이는 구현 계약이며 실제 실행 결과는 worklog에 추가한다.
 
 ## 소유권과 인수
 

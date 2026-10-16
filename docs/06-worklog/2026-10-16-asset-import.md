@@ -16,6 +16,10 @@ P02 foundation은 PR9 main `66121d7676727b496d894d1c64a7fc6616a3551d`의 필수 
 
 모든 구현·test/script 코드는 사용자 지정 Luna xhigh에 맡긴다. content core/API와 Cargo.lock/shared target 소유자를 한 명으로 두고, exact types/context를 공유한 뒤 importer와 CLI가 disjoint 파일을 편집한다. root는 문서·원본 조사·리뷰·독립 QA·Git/PR를 맡는다. API 명칭만 합의한 것을 컴파일 가능한 handoff로 취급하지 않는다.
 
+실제 core seam 파일이 만들어지고 담당자가 content library `cargo check`를 통과한 뒤 driver/CLI 병렬 구현을 열었다. 이것은 신규 포맷/CLI 통과가 아니다. 리뷰에서는 wrap bool/min-mag만 가진 sampler의 의미 손실, context-local PNG memoization만으로는 CLI 재실행 때 decode가 반복되는 점, atlas가 이미 읽은 image dependency를 누락할 수 있는 점을 보완하도록 했다. schema/default를 먼저 공유해 CLI와 importer가 다른 fixture 형식을 추측하지 않게 했다.
+
+CI는 기존 두 native package job의 staged binary에 동일 offline `--assets` helper를 연결한다. package backend의 CPU18 기본 검증을 바꾸거나 새 Cargo build를 중복하지 않는 구현 계약이며 현재 아직 실행 전이다.
+
 ## 실제 입력 확보 결과
 
 고정 Khronos Cube glTF/BIN/512×512 PNG, Kenney Tiny Dungeon palette PNG, Kenney Interface Sounds OGG 원본 및 외부 FFmpeg 6.0 변환 PCM16 WAV, Kenney Nature Kit GLB를 확보하고 source 구조와 hash를 확인했다. 원본은 ignored `dist/qa-assets/`에만 있다. 자동 smoke는 별도 offline 입력을 사용한다.

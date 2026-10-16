@@ -38,6 +38,15 @@ Luna의 strict all-target Clippy는 feature-off/native 각각 통과했다. 첫 
 
 후속 source 리뷰는 reap마다 stopped-index Vec를 만들고 offline process 뒤에 fallible allocation이 남는 문제를 확인했다. 계약 `a77d9ee` 후 Luna가 공통 arena의 사전 capacity 확보·in-place reap으로 수정했다. 출력과 cleanup 저장 공간을 mixer 진행 전에 확보하고 이후 정리는 infallible 경로로 실행한다. 128회 repeated reap의 free-slot capacity 유지·stale/recycled generation 회귀를 추가했다. Luna feature-off6pass/native6pass+1ignored 및 두 strict Clippy가 통과했고, 조정자도 `cargo test -p daedalus-audio --all-features --locked` 6pass/0fail/1ignored를 확인했다. ignored 로그는 `dist/project-evidence/p03-audio-lowlevel-reaper.log`다. allocator 전체 profile이나 개발 시간 개선 배율을 측정한 것은 아니다.
 
+## 통합 첫 검사와 실패 — 진행 중
+
+Luna의 feature-off runtime 검사는65/65, CLI 검사는29/29로 통과했다. 첫 audio-feature runtime은74pass/2fail이었다. 보존한 `dist/project-evidence/p03-audio-focused-initial-runtime.log`는 명령·실패 assertion·원인 조사 내용을 담은 **실패 요약**이며 raw Cargo 전체 stdout 로그가 아니다.
+
+- imported WAV volume 변경 시험은 첫 변경 block의 peak를 곧바로 steady-state gain으로 비교해 실패했다. pinned Kira `src/parameter.rs`는 이전/현재 값을 보유하고 `src/sound/static_sound/sound.rs`는 chunk 안에서 gain을 보간한다. zero-duration Tween도 이 chunk 보간을 없애지 않는다. 별도 settling render와 그 실제 clock 진행을 기록하고 정상 구간의 gain을 비교하도록 조사 중이며, 허용 오차를 넓혀 성공 처리하지 않는다.
+- 새 normal-lane credit 회귀는 ticket ACK 후에도 terminal progress Arc를 보유하면서 credit 회수를 기대해 ResultCapacity를 만났다. 기존 owned-result 계약대로 마지막 reader가 credit을 보유하는 동작이다. 시험에서 progress owner를 해제한 뒤 회복 요청을 하도록 수정했다. actor의 한도나 실패 응답을 완화하지 않았다.
+
+이후 수정·최종 suite·CLI 실제 consumer 결과는 실행 후 기록한다. 위 실패를 해결 전 통과 기록으로 바꾸거나 P03.2c 인수로 올리지 않는다.
+
 ## 조사 한계
 
 버전 고정 docs.rs API 세 페이지 조회는 실패했다. local registry의 Kira0.12.5 source를 읽어 Frame Arc sharing/loop/state/final clamp를 확인했다. 이후 local VCS metadata의 commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`로 upstream StaticSoundData raw 원문을 확보·대조했으며 다른 raw 페이지 일부는 실패했다. browser audio·loopback/audibility·다른 장치/플랫폼은 현재 미검증이다.

@@ -226,7 +226,7 @@ The initial physics/audio adapters can be checked independently:
 
 ```sh
 cargo test -p daedalus-physics -p daedalus-audio --locked -- --nocapture
-cargo test -p daedalus-audio inspect_native_default_output_device_without_playback --locked -- --ignored --nocapture
+cargo test -p daedalus-audio --features native inspect_native_default_output_device_without_playback --locked -- --ignored --nocapture
 ```
 
 The coordinator verified 7 physics and 3 audio tests, plus the separately requested hardware probe on this Mac (48 kHz stereo). The probe does not open a stream or play audio. These tests exercise actual Jolt/Rapier bodies and Kira PCM, not completed character, terrain-collider, audio streaming, or ECS integration. See the [E06 record](docs/06-worklog/2026-10-15-e06-physics-audio.md). Native dependencies and source-build requirements are in the [dependency baseline](docs/02-research/implementation-dependency-baseline.md); Linux CPAL builds need ALSA development headers.

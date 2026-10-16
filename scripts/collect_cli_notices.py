@@ -31,7 +31,7 @@ LICENSE_OVERRIDE_DIRECTORY = Path("third_party") / "license-overrides"
 LICENSE_OVERRIDE_MANIFEST = "manifest.json"
 SPDX_LICENSE_REPOSITORY = "https://github.com/spdx/license-list-data"
 SPDX_LICENSE_COMMIT = "31ba1a50e5397e00a304dbadc76531740e89ee48"
-SUPPORTED_SPDX_REFERENCE_IDS = {"MIT", "Apache-2.0", "CC0-1.0"}
+SUPPORTED_SPDX_REFERENCE_IDS = {"MIT", "Apache-2.0", "CC0-1.0", "Zlib"}
 # These published crates omit Cargo's .cargo_vcs_info.json. Their immutable upstream
 # revisions are pinned in the curated manifest and are the explicit fallback evidence.
 NO_VCS_INFO_TAG_FALLBACKS = {
@@ -702,7 +702,9 @@ def _spdx_license_ids(expression: str) -> set[str]:
     tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9.-]*", expression)
     identifiers = {token for token in tokens if token not in {"AND", "OR", "WITH"}}
     if not identifiers or not identifiers.issubset(SUPPORTED_SPDX_REFERENCE_IDS):
-        raise NoticeCollectionError("SPDX reference mode supports only MIT, Apache-2.0, and CC0-1.0 expressions")
+        raise NoticeCollectionError(
+            "SPDX reference mode supports only MIT, Apache-2.0, CC0-1.0, and Zlib expressions"
+        )
     return identifiers
 
 

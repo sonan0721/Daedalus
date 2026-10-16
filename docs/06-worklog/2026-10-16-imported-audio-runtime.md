@@ -110,6 +110,22 @@ Rust source `fdae55d`를 push하고 all-feature debug CLI를 다시 빌드했다
 
 누락은 block2 0.6.2, dasp_sample0.11.0, dispatch2 0.3.1, kira0.12.5, objc2 0.6.5, objc2-audio-toolbox/core-audio/core-audio-types/core-foundation0.3.2, objc2-foundation0.3.2다. 기본 license 메타데이터만으로 통과시키지 않고 기존 exact crate checksum·VCS commit/path·원문 SHA 정책으로 curated evidence를 보강한다. 다른 Luna가 공식 source를 read-only 조사하고 collector 담당은 같은 정책으로 macOS/Linux target graph를 미리 대조한다. 모든 CI를 한 번 돌리고 누락을 나중에 찾는 반복을 줄이되 실제 PR 검사는 생략하지 않는다.
 
+Linux 사전 diagnostic의236dependency 중 누락은 공통 dasp_sample/kira2개뿐이었다. 해당 `--allow-missing-notices` 실행은 원인 조사이며 strict 성공이 아니다. ignored `p03-audio-linux-notices-diagnostic/`에 남긴다. 두 crate는 실제 고정 upstream MIT/Apache 원문을, objc2 계열8개는 고정 upstream scope `LICENSE.md`와 canonical terms를 보존하도록 조사했다.
+
+리뷰에서 supplemental MIT reference도 full expression의 identifier 검증을 수행함을 확인했다. Zlib expression에 MIT reference만 붙이면 허용된다는 조사 의견은 채택하지 않았다. 정책 MD `cbdd57f`를 먼저 commit하고 기존 고정 SPDX commit의 canonical Zlib 하나를 명시 허용·검증하도록 Luna에게 지시했다. 무제한 SPDX expression 수락이나 license 검사 우회는 하지 않는다. 조정자가 GitHub contents API의 Zlib blob `e0e3605ba4269a62d38ef0a510d5e96c0ae009cc`/838bytes와 복사본 `git hash-object`를 독립 대조했고 SHA-256은 `bfb1112d49db5b1daecdfef24bd7e2f3ea0bafb33aa67aa0ab51e2bf8407c03d`다. [S83](../02-research/source-register.md)에 web 조회 실패와 API 확인을 구분했다. strict collection·package 최종 성공은 후속 실행 뒤 기록한다.
+
+## 실제 창과 audio의 동일 session 검증
+
+ignored 공개 WAV driver를 기존 helper의 `native-view` mode로 확장한 코드도 Luna xhigh에게 맡기고 조정자가 source 리뷰·실행했다. `project view --stdio-control --clock manual --audio native --seconds 3 --width 320 --height 180`에서 같은 공개 clip의 Play→backend-reported Ended를 확인했다. stdin EOF는 control만 detach하고 창은 TimeLimit까지 유지했다. report의 actual last_presented/accepted packet·audio·project_info가 session1/source digest `bc4058…`/tick0에서 일치했고 actual present278회·exit0·전체5.471324초였다.
+
+ignored `dist/project-evidence/p03-public-audio-native-view-debug.json`에 원본 window report·protocol terminal·실행 파일 SHA를 함께 보존한다. 입력 project는 entities0의 clear-only fixture이므로 이 결과는 같은 native session의 표시·오디오·EOF/종료 연결 근거다. 비주얼 품질·144fps·로딩 UI 반응성·speaker audibility를 인증하지 않는다. source/digest·bank는 위 public WAV 경로와 같고 binary도 debug `391fb7…`다. 최종 clean archive의 같은 경로는 아직 대기다.
+
+## Notice 보강의 strict 사전 검증
+
+Luna의 새 curation10개는 기존 record를 변경하지 않고 exact name/version/checksum·VCS commit/package path·고정 원문/hash를 추가했다. 기존 declared-reference 시험을 triple expression의 full collector 성공·unknown identifier 거부로 보강했고 focused14건이 통과했다. scoped implementation 변경은 canonical reference의 명시적 Zlib identifier와 오류 설명이다. 임의 fallback이나 unknown 허용은 추가하지 않았다.
+
+같은 native-audio+window feature의 real Cargo metadata로 strict collection을 실행했다. 조정자도 생성 inventory와 scope/text/hash를 리뷰했다. Apple221dependency/missing0/reference-only4, Linux236/missing0/reference-only1이다. ignored `dist/project-evidence/p03-audio-apple-notices-strict/`와 `p03-audio-linux-notices-strict/`에 각 target notices/inventory를 보존했다. 새 objc2 scope는 upstream 원문으로, canonical terms는 reference로 표시한다. strict package 재시도와 실제 Linux native build/linkage는 이후 별도 게이트다.
+
 ## 조사 한계
 
 버전 고정 docs.rs API 세 페이지 조회는 실패했다. local registry의 Kira0.12.5 source를 읽어 Frame Arc sharing/loop/state/final clamp를 확인했다. 이후 local VCS metadata의 commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`로 upstream StaticSoundData raw 원문을 확보·대조했으며 다른 raw 페이지 일부는 실패했다. browser audio·loopback/audibility·다른 장치/플랫폼은 현재 미검증이다.

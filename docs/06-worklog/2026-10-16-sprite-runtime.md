@@ -49,3 +49,11 @@ Cargo/shared target은 content에서 renderer로 인계했다. content 담당자
 구현 중 조정자 source 리뷰에서 UV write counter 이중 합산과 configured instance cap 대신 최대치 고정 UV buffer를 지적했다. renderer 담당자는 각각 한 합산 지점·checked `max_instances*16` charge/allocation으로 수정했다고 보고했고 실제 통합 검사는 후속이다. 추가로 정적 sprite binding String clone/sort를 매 extract마다 하는 경로를 찾아 prepared generation의 Arc binding/order 공유를 계약에 반영했다. 이는 필요한 admission/authority scan까지 제거한다는 뜻이 아니다.
 
 CLI 작성자의 전체 Python 실행에서 기존 process timeout 세 실패가 보고됐다. 원인은 아직 확정하지 않았고 log 보존·build 경합이 없는 재실행과 실제 timeout/pipe 단계 조사를 요청했다. focused sprite/report 검사는 통과했지만 전체 suite 성공으로 바꾸어 적지 않는다.
+
+## 첫 조정자 broad와 추가 리뷰
+
+source 고정 checkpoint에서 조정자가 `cargo test --workspace --all-features --locked`를 실행해259 CPU pass/0 fail/6hardware ignored를 확인했다. log는 ignored `dist/project-evidence/p03-sprite-workspace-tests.log`다. 이는 후속 source 보완 전 checkpoint다. CLI 담당자의 독립 post-Cargo Python discovery는55/7.309초로 통과했고 기존 timeout 검사 assertion/재시도 규칙은 변경하지 않았다. 앞선 세 실패의 원인은 확정하지 않는다.
+
+read-only 독립 리뷰는 view submit의 typed non-sRGB early reject·shared cache/stamp/UV admission과 실제 PresentedView 갱신을 확인했다. capture는 target를 만든 뒤 format reject해 계약과 어긋나는 점, Busy fallback의 실제 projection/non-sRGB 무변경 검사가 없는 점을 찾아 renderer owner에게 보완 요청했다. hardware 결과는 아직 없다.
+
+추가 source 감사에서 ProjectRenderResources의 prepared binding/template/order CPU metadata는 device renderer의8 MiB bookkeeping에 포함되지 않았음을 확인했다. 계약을 별도 prepared metadata8 MiB preflight·명시적 estimator/getter로 보완했다. 두 owner의 최대 reservation은 합산16 MiB이며 catalog payload/scratch와도 다르다. bounded allocation 전 borrowed precharge와 shared backing 단1회 계산을 구현/검증해야 하므로 기존259 CPU 통과만으로 새계약을 인수하지 않는다. final/current viewer view와 last-presented view 의미도 문서에서 분명히 나눴다.

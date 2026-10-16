@@ -82,7 +82,7 @@ offscreen은 기존 Rgba8UnormSrgb를 사용한다. native는 기존 sRGB surfac
 
 공통 unit XY quad는 [0,1]²의4vertex(position XY+local UV, vertex당16bytes)와6개의u32 index로88 packed bytes다. normal은 sprite shader에 필요하지 않다. layout version은 legacy/model과 구분하되 기존 geometry cache/예산/retirement를 사용한다. region별 geometry를 복제하거나 PNG를 잘라 개별 texture로 만들지 않는다. PPU/pivot의 offset/scale을 authority matrix 뒤에 곱하고 region UV rect `[x/W,y/H,w/W,h/H]`를 slot별16-byte vertex row로 전달한다. local bottom V=1/top V=0인 unit UV를 이 rect에 적용한다.
 
-loaded generation의 binding/tint/layer/UV와 authored handle은 불변이다. `ProjectRenderResources::prepare`에서 model/sprite binding table과 deterministic painter-order array를 한 번 만들고 Arc backing을 packet/extract/validation이 공유한다. tick마다 StableId String clone·정적 HashMap 재조립·painter sort를 반복하지 않는다. retained table/order/ID backing은 CPU metadata 예산에 charge한다. 실제 mutable instance transform·device admission에 필요한 scan은 그대로 수행하며 source generation이 바뀌면 새 backing을 준비한다. `with_instances`는 기존처럼 prepared binding을 해제한다.
+loaded generation의 binding/tint/layer/UV와 authored handle은 불변이다. `ProjectRenderResources::prepare`에서 model/sprite binding table과 deterministic painter-order array를 한 번 만들고 Arc backing을 packet/extract/validation이 공유한다. tick마다 StableId String clone·정적 HashMap 재조립·painter sort를 반복하지 않는다. retained table/order/ID backing은 아래 별도 prepared CPU metadata 예산에 charge한다. 실제 mutable instance transform·device admission에 필요한 scan은 그대로 수행하며 source generation이 바뀌면 새 backing을 준비한다. `with_instances`는 기존처럼 prepared binding을 해제한다.
 
 UV buffer는 최초 sprite 사용 때 lazy 생성하고 최대 instance capacity×16bytes로 유한하다. 기본16,384instance에서256KiB이며 resident·queue staging·bookkeeping admission에 포함한다. sprite가 없어져도 renderer가 이 고정 buffer를 계속 소유하면 계속 charge한다. slot 재사용 때 이전 sprite UV와 ID를 비교하며 UV row가 필요한데 write하지 않는 오류를 막는다. 실제 UV queue write는 기존 `instance_write_count/bytes`에 추가로 계산한다. transform-only는128-byte instance row만, region-only는 필요한 transform/UV row만 갱신한다.
 
@@ -91,6 +91,16 @@ GPU tint는 기존48-byte private MaterialUniform의 base_color RGBA lane에 담
 기존 model texture upload는 full mip chain을 요구한다. common texture upload 설명을 base-only atlas(1 mip level)와 model cooked chain 모두 받도록 일반화한다. key는 실제 dimensions/RGBA/mip/layout이고 같은 payload의 alias는 하나다. source image/atlas를 매 frame hash하거나 새로 decode하지 않는다.
 
 모든 sprite draw·quad/metadata를 기존 packet/project entity와 retained CPU/geometry 예산에 checked arithmetic으로 먼저 charge한다. 생성된 quad의 owned backing/hash 비용도 포함한다. image/pair를 model과 별도 중복 보관하지 않는다. P03.2a resident working128/hard256 MiB, geometry64/128 MiB, staging128 MiB, scratch128 MiB, bookkeeping8 MiB, in-flight3과 entry 상한을 유지한다. 어떤 private GPU metadata 증가도 기존 resident/staging/scratch 계획에 포함한다. 예산이 부족하면 queue write/state mutation 이전 Reject/Busy이고 마지막 정상 frame을 손상시키지 않는다. frame 수로 회수하지 않고 실제 completion watermark를 따른다.
+
+### PreparedProject 렌더 준비의 CPU metadata admission
+
+source 리뷰에서 device renderer의 bookkeeping reservation은 ProjectRenderResources의 CPU binding/template/order를 포함하지 않음을 확인했다. 두 owner의 수명을 합쳐 이미 charge한 것처럼 취급하지 않는다. 새 default hard ceiling은 **prepared render metadata8 MiB per ProjectRenderResources**다. device PacketRenderer의 기존 bookkeeping8 MiB와 별도이며 두 owner가 동시에 최대치를 예약하면 합산16 MiB다. catalog/mesh/image payload·upload scratch·전체 RSS는 별도다.
+
+공개 prepare signature와 PacketAssetLimits literal은 보존한다. 기존 prepare는 이 고정 ceiling의 private prepare 경로를 호출한다. prepared count/source-ID/selected-model stats를 borrowed 상태에서 checked 계산하고, binding/template/table/order의 최종 owned allocation·문자열 clone·geometry wrapper 준비 전에 admission한다. 사전 검사에 필요한 기존 bounded scratch와 최종 retained 자원을 구분한다. `prepared_metadata_bytes()->usize`와 상한 constant를 additive 공개해 실제 reservation을 조회한다. 오류는 기존 budget error에 resource `prepared CPU metadata`와 bytes/limit를 담는다.
+
+charge에는 entity binding record와 owned StableId, shared model-template backing(동일 Arc 한 번), model/sprite sidecar map의 key/value/load-factor 여유, painter ID array, source digest/camera state, 새 geometry/texture wrapper와 Arc header를 보수적으로 포함한다. catalog에서 이미 보관한 image/geometry payload를 metadata로 다시 전량 charge하지 않는다. legacy owned mesh payload는 기존 별도 geometry ceiling을 따른다. String/HashMap allowance와 checked rounding은 명시적 logical admission reservation이며 allocator/driver의 실제 물리 메모리 측정은 아니다. 입력 count 상한과 bytes 상한이 함께 적용되므로 최대 instance 수가 모든 조합의 admission을 보장하지 않는다.
+
+작은 private-budget seam을 통한 실제 prepare 거부/정상 준비, 동일 template/sidecar 공유와 reservation, 기존 model/legacy 준비 회귀를 확인한다. source를 만드는 사용자에게 새로운 범용 allocator·공통 memory framework를 요구하지 않는다.
 
 ## 실제 view·입력·보고
 
@@ -110,7 +120,7 @@ window의 pose와 projection을 하나의 private local view state로 취급한�
 
 Busy가 old-ready packet을 선택하면 실제 그 packet/projection을 submission record에서 가져온다. Camera-only override에 incoming rejected/pending packet의 projection을 섞지 않는다. full local RenderView override는 명시적 viewer 상태다. window는 queue submit와 surface present가 실제 실행된 뒤에만 PresentedView를 갱신한다. no-ready Busy는 surface drop/no-present이며 last-presented metadata를 갱신하지 않는다. batch capture report의 view도 실제 capture에 쓴 packet view다. source initial 값으로 zoom 결과를 덮어쓰지 않는다.
 
-CLI view/capture는 기존 공통 loader/packet path와 stats JSON 변환을 유지한다. same-session source watch/live capture/MCP라고 보고하지 않는다. 공통 `render_view_json` 변환을 사용한다. capture report의 `capture.render_view`, native `last_presented.render_view`와 `window.final_render_view`는 `{camera: 기존 Camera JSON, projection:{kind:"perspective"}}` 또는 `{camera:...,projection:{kind:"orthographic",vertical_size:...}}`다. 기존 camera/FOV key는 보존하고 새 projection이 실제 투영 의미를 밝힌다. 마지막 present가 없으면 last_presented는 기존처럼 null이다.
+CLI view/capture는 기존 공통 loader/packet path와 stats JSON 변환을 유지한다. same-session source watch/live capture/MCP라고 보고하지 않는다. 공통 `render_view_json` 변환을 사용한다. capture report의 `capture.render_view`, native `last_presented.render_view`와 `window.final_render_view`는 `{camera: 기존 Camera JSON, projection:{kind:"perspective"}}` 또는 `{camera:...,projection:{kind:"orthographic",vertical_size:...}}`다. 기존 camera/FOV key는 보존하고 새 projection이 실제 투영 의미를 밝힌다. `last_presented.render_view`만 실제 submit/present 근거이며 `final_render_view`는 종료 시 현재 viewer/local/candidate 상태여서 unpresented candidate나 마지막 입력을 포함할 수 있다. 두 값이 항상 같다고 약속하지 않는다. 마지막 present가 없으면 last_presented는 기존처럼 null이다.
 
 ## 검증과 분담·exit
 

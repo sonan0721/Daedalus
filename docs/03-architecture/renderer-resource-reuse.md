@@ -1,12 +1,12 @@
 # renderer의 불변 geometry·instance 갱신과 자원 예산
 
-상태: P02.2/DEV08 다음 구현 계약 초안·미구현 · 2026-10-16
+상태: P02.2/DEV08 native library·packet window API 구현, 작은 GPU 시험 통과·외부 live window 연결 검증 대기 · 2026-10-16
 
 ## 만든 이유와 실제 반복
 
 AI edit→관찰/capture 루프와 지속 실행 창이 매번 같은 mesh를 변환/업로드하면 CPU 작업·GPU allocation·frame 비용이 함께 반복된다. Luna xhigh의 로컬 source 감사는 현재 `PreparedScene::from_scene`의 world-space vertex 변환/flatten, `record_scene`의 vertex/index/material/global/depth resource 생성, project projection의 entity별 mesh 복제를 확인했다. window와 offscreen은 이 경로를 쓴다. CPU mesh 변환 cache만으로 이 반복이 모두 해결되지는 않는다.
 
-이 문서는 [같은 session service](session-control-service.md)의 표시 경로와 [asset cook/residency](asset-import-cook-and-residency.md) 사이에서 CPU geometry와 장치 자원 수명을 구체화한다. 코드 채택/계측 전이며 새 renderer나 성능 개선을 이미 구현한 것으로 표시하지 않는다. 고급 재질·texture/skin·2D·post/VFX·P05 품질 gate를 축소하지 않는다.
+이 문서는 [같은 session service](session-control-service.md)의 표시 경로와 [asset cook/residency](asset-import-cook-and-residency.md) 사이에서 CPU geometry와 장치 자원 수명을 구체화한다. 먼저 구현 계약을 고정한 뒤 native library와 작은 GPU 계측을 추가했다. 실제 검증 범위는 하단과 worklog에 구분한다. 고급 재질·texture/skin·2D·post/VFX·P05 품질 gate를 축소하지 않는다.
 
 ## 소유와 additive API
 
@@ -18,9 +18,9 @@ project resource registry는 한 prepared generation에서 필요한 renderer me
 
 renderer는 core/content의 owned 자료만 의존하고 runtime crate에 의존하지 않는다. runtime/session snapshot→packet mapping은 presentation bridge가 맡는다. offscreen/window는 같은 packet prepare/encode를 사용하며 다른 device 사이에서는 CPU handle/key만 공유한다. GPU buffer를 다른 Renderer/device에 가져다 쓰지 않는다.
 
-## 다음 구현에 고정할 API 경계
+## 첫 구현의 API 경계
 
-Luna xhigh의 read-only API 제안을 바탕으로 다음 경계를 채택한다. 아직 이 API를 구현하거나 검사한 결과는 아니다.
+Luna xhigh의 read-only API 제안을 바탕으로 다음 경계를 채택·구현했다. native library 검사와 실제 외부 window 연결 검사를 구분한다.
 
 | API | 입력·소유·출력 |
 | --- | --- |
@@ -40,9 +40,27 @@ CPU source file hash를 사용할 수도 있지만 공개 Rust procedural mesh�
 
 기존 public `WindowMessage` variant 추가는 외부 exhaustive match를 깨뜨릴 수 있으므로 별도 packet message/entrypoint를 사용한다. window 내부 event·input·resize·overlay·종료 처리는 공통으로 유지한다. 기존 `WindowOutcome.final_scene`를 packet→대용량 scene 복사로 frame마다 채우지 않는다. 새 packet outcome과 legacy outcome의 종료 자료를 구분한다. 이 window 연결은 cache library 구현 후 public 서명을 고정하고 실제 project/JSONL adapter와 함께 검증한다.
 
-## 첫 GPU layout 후보
+## packet 창·호환·실패 API
+
+초기 packet도 검증을 통과한 accepted 상태다. 창 생성 시 그 tick/sequence/generation을 title/report에 표시하고, 아직 surface 제출 전인 `last_presented`는 None으로 유지한다. manual tick 0을 영구 미확인 상태(`—`)로 표시하거나 초기 accepted identity를 GPU present 완료로 바꾸지 않는다.
+
+Luna xhigh의 window source 감사에 따라 별도 `PacketWindowMessage::{Present { packet: Arc<RenderPacket>, loading }, SetLoading(bool), Close, Abort(String)}`를 사용한다. `Close`는 AI/CLI의 정상 종료 요청이며 기존 `WindowExitReason::CloseRequested`로 처리한다. 오류용 Abort나 control transport의 EOF를 정상 종료로 대체하지 않는다. `run_packet_windowed_reported(initial_packet, receiver, WindowOptions, PacketRendererLimits)`는 새 `PacketWindowOutcome`을 반환한다. 기존 WindowMessage/WindowOptions/WindowInput/WindowOutcome의 필드나 variant를 바꾸지 않는다.
+
+새 outcome은 공통 WindowReport, 마지막 accepted packet의 Arc, 마지막으로 surface에 제출·present한 packet/view 정보와 resource 통계를 가진다. `PresentedPacket`은 session/tick/sequence/project generation/source digest identity와 그 frame에 사용한 camera·physical width/height를 함께 기록한다. surface 취득/encoding/submission/present 호출까지 진행한 경우만 갱신한다. GPU 완료나 실제 display scanout을 증명하는 표시는 아니다. accepted metadata와 실제 제출 정보를 혼동하지 않는다.
+
+window 내부는 하나의 ApplicationHandler와 private legacy/packet source/backend enum으로 초기화·bounded message drain·입력/focus reset·camera·resize·loading overlay·surface/disconnect·time/frame limit·종료를 공유한다. packet 모드는 같은 PacketRenderer를 계속 보유한다. local camera 입력 때문에 instance 배열/geometry를 clone하지 않고 draw 시 작은 camera override를 전달한다. 호환 scene의 flatten 경로와 packet의 불변 geometry 경로는 준비 방식이 다르지만 PBR fragment shading·frame pass/readback 공통 코드를 유지한다. layout별 vertex pipeline/entry point가 필요한 것은 독립 shading engine 두 개를 만든다는 뜻이 아니다.
+
+오류는 새 `PacketRenderError`/`PacketWindowError`에서 검증 실패·candidate 자체 working-set 초과·in-flight 때문에 일시적으로 불가능한 residency·기존 RendererError/device/window/capture 실패를 구분한다. 기존 RendererError enum에 variant를 몰래 추가하지 않는다. retry 가능한 압력에서는 마지막 ready packet을 유지하고 최신 candidate를 유한하게 합친다. invalid packet을 성공으로 채택하거나 오래된 packet을 새 identity로 표시하지 않는다. device loss 등 실제로 그릴 수 없는 실패는 정상 last-good 표시로 숨기지 않는다.
+
+outcome의 present 정보는 함수가 종료한 뒤의 근거다. 실행 중 실제 presented 상태/capture를 AI가 조회하는 bounded mailbox·readback API는 후속 P02.3 계약이며 이 함수만 추가해 live capture를 지원한다고 표시하지 않는다.
+
+## 첫 GPU layout
+
+packet window는 같은 session의 sequence/tick/project generation 역행과 동일 generation의 source digest 변경을 거부한다. 같은 sequence 재전송은 같은 packet의 idempotent 재전송만 허용하며 충돌하는 내용/identity를 새 화면으로 채택하지 않는다. local camera는 packet identity를 고쳐 쓰지 않는 view override다. model 값과 determinant가 유한해도 inverse 결과가 overflow할 수 있으므로 normal matrix 결과의 finite 검증까지 새 candidate의 cache/slot 변경 전에 수행한다.
 
 geometry는 local-space position/normal indexed buffer로 보존한다. instance record는 model mat4, padded inverse-transpose mat3, material index와 padding으로 128 bytes다. normal은 nonuniform scale에서도 올바르게 변환하며 finite inverse 검증을 유지한다. CPU는 instance가 바뀔 때만 해당 record를 준비한다. vertex마다 world transform을 다시 계산하지 않는다.
+
+content/legacy가 허용하는 작은 invertible scale도 같은 의미로 받아들인다. 예를 들어 uniform scale 0.001의 determinant는 약 1e-9지만 정상 finite inverse가 있다. 임의 determinant epsilon으로 이를 singular라 거부하지 않으며 실제 0/nonfinite determinant와 nonfinite inverse를 검사한다. 같은 normal-transform 검증 규칙을 private helper로 재사용할 수 있다.
 
 첫 instance-step vertex layout은 mesh attribute 2개와 instance attribute 8개를 사용한다. material index는 명시적 attribute이며 `instance_index == material array index`라는 결합을 없앤다. 첫 구현은 mesh별 indexed draw와 안정적인 instance slot을 사용하고, draw batching/indirect/meshlet은 실제 부하를 본 뒤 추가한다.
 
@@ -73,6 +91,10 @@ eviction은 active packet과 미완료 submission이 쓰는 자원을 보호한�
 [Queue::on_submitted_work_done](https://docs.rs/wgpu/27.0.1/wgpu/struct.Queue.html) callback에는 실제 poll/event-loop 진행이 필요하다. 첫 native 설계는 submission serial/completion watermark를 추적하고 nonwaiting poll로 retirement를 진행하는 안이다. window callback에서 매 frame GPU 완료를 동기 wait하지 않는다. offscreen blocking capture와 live async readback은 다른 실행 계약이다. [Buffer 수명](https://docs.rs/wgpu/27.0.1/wgpu/struct.Buffer.html)과 장치 손실/회수도 함께 검증한다. 위 API는 registry source 감사와 대조했으나 다이달로스 새 cache의 실행 근거는 아니다.
 
 ## 실패와 검증
+
+첫 구현은 immutable MeshHandle·prepare/extract·persistent PacketRenderer·공통 packet window API를 제공한다. 조정자의 all-feature CPU 33건·strict Clippy, 담당자의 실제 GPU reuse/parity 시험과 공통 capture helper 수정 후 재검사가 통과했다. 세부 수치/출력/source 경계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다. 위 설계 문단의 GPU/layout 세부가 모두 상용 품질이나 외부 project 실행 창의 완료를 뜻하지 않는다. 실제 같은 actor의 window/control·물리 입력·P02 전체 gate는 아직 미통과다.
+
+source 리뷰에서 legacy PNG capture와 packet PNG capture의 row alignment·copy/readback·map/poll·PNG 저장 코드가 중복된 것도 확인했다. 첫 synchronous capture는 renderer-private 공통 helper로 모아 같은 크기/byte 한도·finite timeout·오류 의미를 사용한다. legacy는 이미 기록한 render encoder에 copy를 추가하고 packet은 선행 render submission 뒤 copy를 수행할 수 있다. geometry의 in-flight 추적은 실제 geometry를 참조한 submission을 보호한다. 이 blocking helper를 window callback이나 후속 asynchronous live capture에 그대로 사용하지 않는다.
 
 packet 준비는 mesh/layout/indices·finite transform/material·instance ID 중복·예산을 검사하고 required geometry를 임의 cube로 바꾸지 않는다. 실패 후보를 complete packet으로 게시하지 않는다. surface/device/capture 실패는 원인을 구분하고 정상 cache hit로 계수하지 않는다.
 

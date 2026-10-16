@@ -24,6 +24,19 @@ struct MeshVertexInput {
     @location(1) normal: vec3<f32>,
 };
 
+struct PacketVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) model_0: vec4<f32>,
+    @location(3) model_1: vec4<f32>,
+    @location(4) model_2: vec4<f32>,
+    @location(5) model_3: vec4<f32>,
+    @location(6) normal_0: vec4<f32>,
+    @location(7) normal_1: vec4<f32>,
+    @location(8) normal_2: vec4<f32>,
+    @location(9) material_index: u32,
+};
+
 struct MeshVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -38,6 +51,19 @@ fn vs_main(input: MeshVertexInput, @builtin(instance_index) material_index: u32)
     output.world_normal = normalize(input.normal);
     output.clip_position = globals.view_projection * vec4<f32>(input.position, 1.0);
     output.material_index = material_index;
+    return output;
+}
+
+@vertex
+fn vs_packet(input: PacketVertexInput) -> MeshVertexOutput {
+    var output: MeshVertexOutput;
+    let model = mat4x4<f32>(input.model_0, input.model_1, input.model_2, input.model_3);
+    let normal_matrix = mat3x3<f32>(input.normal_0.xyz, input.normal_1.xyz, input.normal_2.xyz);
+    let world_position = model * vec4<f32>(input.position, 1.0);
+    output.world_position = world_position.xyz;
+    output.world_normal = normalize(normal_matrix * input.normal);
+    output.clip_position = globals.view_projection * world_position;
+    output.material_index = input.material_index;
     return output;
 }
 

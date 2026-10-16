@@ -134,3 +134,71 @@ terminal을 통지한 뒤 actor의 in-flight bookkeeping/완료 함수가 별도
 source 조사에서 ActiveRequest의 중복 credit Arc와 finish_cell의 terminal 통지 뒤 credit drop을 확인했다. Luna xhigh는 불필요한 actor lease를 제거하고 terminal 전의 bookkeeping 참조 반환으로 바꿨다. 실제 progress/reader lease는 유지한다. 2 MiB 예산과 유한 test-only actor pause로 terminal을 관찰한 직후 actor cleanup을 멈춘 상태에서 ack/마지막 reader 해제→다음 Step 수락을 검증했다. root의 수정 후 workspace **158건·check/fmt·strict Clippy**는 통과했다. 기존 ResultCapacity 오류 검사를 retry로 바꾸지 않았다. 이 시점은 로컬 검증이며 수정된 PR CI 통과나 병합 결과는 아니다.
 
 read-only credit 재감사에서는 실제 reader lease·pending/종료·panic correlation의 추가 finding이 없었다. abandoned payload가 폐기되는 동안 새 admission은 placeholder로만 존재하고 actor가 다음 결과를 병렬 생성하지 않는다는 aggregate-bound 근거를 source 계약에도 남겼다. 원래 failed head의 macOS/Linux package는 각각 3분4초/2분40초 통과했으나 이 결과를 수정된 head의 검증으로 대체하지 않는다.
+
+## PR #7 최종 통과와 다음 P02 연결
+
+수정 head `6ab114f0228ec7702be780338db8797c999a9567`은 docs 5초·Rust 1분4초·managed native integration 1분10초·macOS package 1분3초·Linux package 42초를 모두 통과했다. tag publish는 skipped다. 두 package는 실제 추출 CLI smoke를 실행했다. [PR #7](https://github.com/sonan0721/Daedalus/pull/7)은 그 head로 고정해 병합했고 main merge commit은 `5c2cefc05dc5f5b0123a1394cb2b7d53c125bbd2`다. 서로 다른 cache/환경의 소요 시간을 일반적인 성능 향상률로 사용하지 않는다.
+
+수정 head clean source의 로컬 package도 다시 만들었다. `dist/local/daedalus-0.1.0-aarch64-apple-darwin-6ab114f0228e-clean-20261016T012616Z-2e6be7fc9af7477f8b6357a1d9587837/`이며 dirty=false·release/window·동일 18-check extracted smoke가 통과했다. Cargo cached build는 5.76초다. binary SHA-256은 이전에 실제 Metal 창을 검증한 파일과 같은 `e0e124f70b556ac1a489b6fd950bfe0926fb5534a2c04c4d487727d1ae7ed6d4`였다. 새 service가 아직 CLI adapter에서 사용되지 않으므로 source 수정과 CLI executable identity를 같은 개념으로 취급하지 않는다. 같은 binary의 GPU 창을 불필요하게 다시 시험하지 않았고, library 수정은 별도 158건·Linux CI로 검증했다.
+
+다음 branch는 `feat/renderer-resource-reuse`다. renderer-owned immutable mesh handle·project prepare/extract·persistent GPU cache와 packet 창 API를 먼저 구현하고, 같은 service의 외부 project/JSONL control을 연결한다. window source 감사는 accepted metadata와 실제 surface submission identity의 차이, shared event handler와 camera override·in-flight 한도를 명세에 보완했다. 아직 이 새 renderer나 project window를 구현/검증한 결과는 아니다. 전체 D1/D2/D3는 계속 진행 중이다.
+
+## P02.2a 구현 전 연결 계약
+
+새 [project-view-control.md](../03-architecture/project-view-control.md)는 여러 frontend마다 source/state/command를 복제하는 개발 반복을 줄이기 위해 만들었다. 하나의 불변 source Arc, simulation을 실행하지 않는 실제 tick-0 게시, 같은 service의 protocol-2 ticket adapter, 유한 process I/O와 정상 Close를 명세한다. realtime viewer를 기본으로 두고 deterministic manual은 명시 선택이다. live capture/MCP나 정식 action system은 이 연결만으로 지원한다고 표시하지 않는다.
+
+Luna xhigh renderer 담당자는 renderer 전체·Cargo.lock·공유 Cargo target을 단독 소유한다. runtime 담당자는 disjoint project/session/lib의 shared source/tick-0와 테스트 source부터 작성하며 Cargo는 기다린다. 별도 Luna는 새 계약을 read-only 검토한다. root는 문서·리뷰·통합 검증을 맡는다. 새 범용 개발 도구나 cold target을 만들어 작업을 중복하지 않는다. 아직 새 코드의 최종 검증·개선 수치는 없다.
+
+read-only 계약 감사는 별도 input client가 session-wide Step reserve까지 분리한다는 문구 오류를 찾았다. 실제 native reserve는 한 lane이며 per-client quota와 다르다. 계약을 먼저 수락한 Step이 점유하고 다른 client는 ResultCapacity를 받는 것으로 바로잡았다. UI 입력 결과는 즉시 회수하되 protocol의 retained Step 결과는 ack/forget까지 보존한다. 추가 무제한 lane이나 hidden retry를 넣지 않는다.
+
+## P02.2 중간 library 검증과 남은 연결
+
+renderer owner의 첫 source handoff 뒤 root는 `cargo test -p daedalus-runtime --locked`의 unit 52건+integration 2건과 `cargo test -p daedalus-renderer --all-features --locked`의 CPU 33건을 통과했다. renderer hardware 2건은 해당 기본 실행에서 ignored다. 두 package all-target/all-feature strict Clippy도 통과했다. scoped format check는 runtime의 match 들여쓰기 차이로 실패해 담당자에게 수정 요청했으며, 이 시점을 전체 검사 통과로 표시하지 않는다.
+
+Luna xhigh의 별도 실제 native GPU 시험 `packet_gpu_reuse_matches_legacy_capture_and_dirty_counters`는 통과했고 root는 남긴 PNG의 foreground를 직접 확인했다. rotation/nonuniform scale을 포함한 legacy 대비 pixel 허용 오차·visible material 차이, unchanged/generation-only reuse, transform/material-only dirty, 변경 payload/resize·invalid 후보 보존을 검사한다. 첫 결과는 geometry upload 1회/84 bytes, instance 2행/256 bytes, material 2행/96 bytes였다. 마지막 누적 geometry upload는 실제 payload 변경을 포함한 2회, instance 3행, material 3행, depth 생성 2회(initial+resize), active 1/84 bytes와 retired 1/84 bytes다. capture는 `/var/folders/fm/9kct1n9d3lxc2dxqmwh_6jhr0000gn/T/daedalus-packet-initial-47374.png`와 같은 경로의 `daedalus-packet-legacy-47374.png`에 있다. 이는 작은 실제 GPU fixture이며 상용 화질/144fps/실행 창의 증거가 아니다.
+
+normal inverse overflow와 generation/source/sequence 충돌은 source 감사에서 수정했고 CPU 회귀를 추가했다. validated normal의 private memoization과 이전 transform 재사용으로 불필요한 inverse 반복을 피하며 GPU/cache mutation 전에 후보 slot을 준비한다. 다음 변경은 두 synchronous capture의 private readback helper 공통화다. 위 결과는 그 refactor 이전이며 refactor·CLI 연결 뒤 실제 검사를 별도로 기록한다. CLI protocol-2/project window adapter는 아직 작성 중이다. Cargo target은 renderer→root의 focused 검사→CLI 담당자 순서로 한 명씩 넘겼다. P02 전체/D1/D2/D3는 계속 진행 중이다.
+
+private readback 공통화 뒤 담당자는 renderer 기본-feature all-targets CPU 32건(새 GPU 시험 1건 ignored)·strict Clippy·실제 GPU reuse/parity 시험을 다시 통과했다. root가 앞서 추가로 켠 test-fixtures feature의 1건은 fixture validation이라 두 count의 feature 조건을 구분한다. 새 GPU artifact는 같은 temporary root의 `daedalus-packet-initial-96710.png`와 `daedalus-packet-legacy-96710.png`다. 별도 read-only closure 감사는 normal memoization·generation 검증·draw/copy 순서·geometry retirement의 잔여 finding이 없었다. legacy는 draw+copy 한 submission, packet은 draw 뒤 copy submission이며 공통 helper가 explicit blocking capture의 row alignment/map/wait/unpad/PNG를 소유한다. window callback이나 async live capture로 재사용한 결과는 아니다. Cargo는 renderer 재검사 후 CLI 담당자에게 반환했다.
+
+## 첫 외부 project 창과 실제 입력의 source 경계
+
+Luna가 window-enabled debug CLI를 빌드했고 root는 SHA-256 `4325b0ca1f7c970c591feeddd31b21dc0e002235941c750283a7c55dde134f4f`를 사용했다. 엔진 저장소 밖 temporary project는 source digest `sha256:6bf5b7cb409013ec26fb4a7f56d12714d78d3d0b44875fc407b36e9a8b40efb6`, 같은 3-vertex indexed mesh를 사용하는 두 instance와 서로 다른 material이다. source schema 1·scene revision 3과 runtime entity revision은 별개다. 게임 프로젝트나 외부 게임 asset을 엔진에 넣지 않았다.
+
+첫 `project view ... --stdio-control --clock realtime --controlled-entity entity:hero --width 800 --height 600 --seconds 120`은 실제 상태 query와 CloseRequested/exit 0을 확인했다. `dist/project-evidence/p02-project-physical-window.json`에는 authority tick 2948·surface presents 5801, geometry upload 1회/84 bytes·instance writes 2·material writes 2·종료 credit 0이 남았다. 첫 Close가 capacity-1 presentation queue의 QueueFull로 거부되고 명시 두 번째 요청이 성공했다. 이를 방치하거나 무조건 재시도하는 test로 가리지 않고 bounded close-intent flag·새 submit 거부·Present 중단·우선 Close 전달로 계약과 코드를 수정한다. 이 binary는 그 수정 전 근거다.
+
+Orca CLI는 `command not found: orca`로 사용할 수 없었다. 제공된 CUA native 도구도 bare executable은 app으로 선택하지 못해 ignored `dist/qa/Daedalus QA.app`에 **같은 hash의 executable**과 임시 Info.plist만 두고 앱 ID `dev.daedalus.engine.qa`로 연결했다. 이는 QA 대상 선택을 위한 wrapper이며 제품 `.app` 배포 지원이나 새 엔진 binary가 아니다. CUA가 실제 두 삼각형의 화면을 확인했다.
+
+두 번째 창에서 native Right를 누른 뒤 같은 session의 protocol-2 get으로 hero x가 -1.3→-1.05, entity revision 1·observed tick 1694임을 확인했다. W와 drag로 camera가 바뀌었고 native zoom으로 actual surface가 800×600→1859×1138로 바뀐 화면을 확인했다. 최소화/raise도 수행했으나 당시 report는 개별 focus counter를 직렬화하지 않아 그 callback count를 확인했다고 표시하지 않는다. Escape 뒤 CUA의 후속 AX 조회는 닫힌 창 때문에 timeout이었지만 child exit 0·report EscapePressed로 실제 종료를 확인했다.
+
+`dist/project-evidence/p02-bundle-physical-window.json`은 authority tick 6853·surface presents 13191·input events 187·local camera changes 41, geometry upload 1/84 bytes·instance writes 3·material writes 2·종료 result credit 0을 기록했다. accepted tick 6852와 last-presented tick 6851을 구분하며 마지막 authority tick과 동일하다고 고쳐 쓰지 않는다. 이 실행은 real input→same authority→packet 표시의 좁은 근거이며 로딩 중 UI·gameplay action system·live image capture·MCP나 144fps를 인증하지 않는다. concurrent build/test와의 통제된 성능 비교도 아니다.
+
+후속 source에는 close-intent, 기존 window/resource counter 전체 보고, fixture 전용 R/bridge 안내를 packet 창에서 제거하는 수정과 tiny-scale validity 공통화가 들어간다. 새 hash의 CPU/native smoke·패키지·PR 검사는 이어서 별도로 기록한다. 기존 saved hash를 이 수정들의 검증으로 대체하지 않는다. P02 전체와 D1/D2/D3는 계속 미통과다.
+
+## P02.2 최종 통합 source 검사
+
+조정자는 source freeze 후 workspace all-feature `check`·`fmt --check`·CPU **187건 통과, hardware 3건 기본 ignored**·all-target/all-feature strict Clippy와 fresh bridge build를 통과했다. pinned .NET 10.0.402 Release는 warning/error 0, 실제 Rust-backed self-test와 managed integration 2 scenario를 통과했다. Python 전체 regression은 49건 통과했다. test code/script/CI 변경은 모두 Luna xhigh가 작성했고 root는 문서·리뷰·실행·Git을 맡았다.
+
+최종 debug CLI SHA-256은 `a806dc13044ab10a39a180db0a69a3b2007723a3c35482795259cafd5ae17401`다. 이 hash의 `python3 scripts/smoke_project.py --cli target/debug/daedalus --view`가 기존 CPU 18개+native 2개 **20개 검사**를 통과했다. `dist/project-evidence/p02-project-view-smoke.json`에 binary identity·두 report·4.261689초 관찰이 남았다. 단일 manual viewer의 실제 command Applied/revision 1·authority tick 1·accepted/presented sequence 2·source/session이 일치했고 time limit 종료까지 311번 실제 surface present를 기록했다. GPU 초기화 전에 tick 0 packet이 tick 1로 coalesce될 수 있었으므로 이 실행의 instance write 1회를 transform-only 갱신 비용 증거로 과장하지 않는다. geometry는 1회/84 bytes만 upload했다. 별도 Close case는 tick 0에서 CloseRequested·exit 0·종료 credit 0을 확인하며 두 child 모두 stdin을 열린 채로 종료를 기다려 blocked reader join이 없음을 검사했다. blocked OS stdout은 이 실행의 검증 항목이 아니다.
+
+같은 hash의 기존 fixture `view --seconds 2 --work-iterations 10000`도 Metal에서 218 loading frame·final tick 124, terrain job 1개 시작/취소·active 0·time_limit/stop_requested로 종료했다. `p02-project-view-legacy-regression.json`은 새 common handler 변경 뒤 legacy 회귀이며 새 physical 입력 근거는 아니다. 새 viewer report는 focus/resize/key/pointer·frame interval과 resource count/bytes를 포함한다. title도 packet에서 fixture 전용 R/bridge 안내를 제거했다.
+
+회귀 테스트 작성 중 authored scene revision 37을 fresh entity revision으로 혼동한 기대값은 actual authority query 기준 0→1로 바로잡았다. production 의미를 테스트에 맞춰 바꾸지 않았다. 테스트는 실제 serde internally-tagged unit variant의 unknown-field 허용도 찾아냈다. 별도 수동 schema validator를 남기지 않고 empty struct variant로 derived DTO 규칙을 유지한 뒤 strict parsing을 검증했다. actor가 멈춰도 last frame이 남는 별도 lifecycle 문제는 atomic `is_stopping`과 coordinator 실패 전파·abnormal termination nonzero로 수정했고 retained-frame regression/분류 시험으로 확인했다. 실제 child panic 주입을 한 결과는 아니다.
+
+P02.2a.1의 같은 authority·native 창/JSONL·실제 Mac key/camera/resize/정상 종료와 P02.2b의 loaded-generation resource 재사용을 좁게 기록한다. 실제 process EOF 유지·막힌 stdout·manual F10와 Step 경합 등의 추가 극단 사례는 a.2로 남겨 a 전체는 닫지 않는다. live capture/condition/MCP/SDK·legacy credit migration·UI/reload/server 연결, P02 제품 gate와 D1/D2/D3는 계속 열려 있다. clean package/PR 결과는 이어서 기록한다.
+
+## P02.2 추가 OS·manual 입력 검증과 재사용 pipeline
+
+source `27be29f4ca08b65293c5bc38af17717e5dafbae7`의 clean release/window package는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-27be29f4ca08-clean-20261016T021539Z-688972eece9646a587dcc9c08865a1b9/`다. dirty=false·archive/notice/inventory/hash·extracted CPU18 smoke와 별도 packaged native20 smoke를 통과했다. binary SHA-256은 `3a51a11155ad5928f95266059e3fc31be20d980dfa0e9c8caf6cb2d4cbbb10e3`이며 cached Cargo build 8.21초를 일반 성능 개선율로 사용하지 않는다. 이 head의 PR8 초기 docs/rust/managed와 macOS/Linux package 다섯 job은 모두 성공했고 Publish는 skipped였다. 후속 수정 head의 CI 결과와는 구분한다.
+
+같은 release executable을 임시 QA app에 넣어 manual clock의 실제 Right→F10을 수행했다. entity x=-1.05·revision 1·tick 1을 query로 확인했고, protocol Step으로 tick 2에 도달한 결과를 ACK하지 않은 동안 native F10은 명시 실패하며 tick 2를 유지했다. ACK 후 다음 F10은 tick 3으로 진행했다. native minimize/raise/zoom·닫기 버튼 뒤 정상 exit 0/CloseRequested를 확인했다. 후속 AX 조회 timeout은 이미 닫힌 창의 조회 결과이며 process 종료 실패로 오인하지 않는다.
+
+`dist/project-evidence/p02-release-manual-physical.json`에는 accepted/presented tick 3·sequence 4, 실제 surface presents 14011·key events 8·focus events 4·resize count/events 43, manual Step 성공 2/실패 1·arrow 성공 1·protocol requests 6·errors 0, 모든 shutdown result credit 0이 남았다. geometry 1회/84 bytes, instance 3행/384 bytes, material 2행/96 bytes다. resize 43은 OS 확대 animation 중 실제 callback 수이며 매 프레임 resource 재생성의 근거가 아니다. 이 QA는 144fps benchmark가 아니다.
+
+manual tick-0 title/report에 accepted metadata가 비어 있던 작은 결함은 초기 packet으로 이를 seed하는 수정과 CPU 회귀 1건을 추가했다. 실제 surface 제출 전 `last_presented`는 계속 None이다. 이 수정 뒤 root workspace all-feature CPU **188건**, 기본 ignored hardware 3건, fmt·all-target/all-feature strict Clippy·window CLI build와 Python **52건**을 통과했다. runtime/bridge/managed source는 앞선 187건/.NET 통합 검증 이후 바뀌지 않아 managed를 불필요하게 반복하지 않았다.
+
+새 debug SHA-256 `920720d9172935134491613b82da3d31f0cb2c2e727fb6cc6040cdc7c808d3c1`로 같은 `scripts/smoke_project.py --cli target/debug/daedalus --view`를 실행해 CPU18+native4 **22개**를 통과했다. 관찰 wall time 8.832935초는 이전 native2 실행과 범위가 달라 속도 비교가 아니다. `p02-project-view-final-smoke.json`의 EOF case는 detach=stdin_eof·tick 0·224 surface presents·TimeLimit, blocked stdout case는 POSIX pipe를 65536 bytes로 채워 읽지 않은 채 capabilities 1요청·tick 0·225 surface presents·TimeLimit을 기록했다. 두 경우 accepted/presented source/session/tick 일치·정상 StopRequested·종료 credit 0을 직접 확인했다. stdin이 열린 Close case도 정상 종료했고 초기 accepted metadata는 tick 0으로 보고됐다.
+
+반복 개발 최적화의 실제 산출물은 별도 smoke framework를 늘리지 않고 같은 temporary project·bounded JSONL process·binary hash·report validation·FD/child cleanup을 재사용한 것이다. 기본 CPU18/package의 의미를 유지하고 OS/GPU 사례만 `--view`로 추가했다. P02.2a의 좁은 gate는 이 근거로 체크하며, legacy result migration·live capture/condition·MCP/SDK·UI/action/reload/server와 P02 전체·D1/D2/D3는 계속 미통과다. 다음 clean package와 PR 최종 head 검증은 별도로 기록한다.
+
+최종 code checkpoint `ab638ce29806ff783845ab7d2223771b7ef6b91d`의 clean release/window package는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-ab638ce29806-clean-20261016T022430Z-e2906b71d5d147bbbb70934cbb0ff3ef/`다. manifest dirty=false·exact commit, archive/notice/inventory/hash·extracted CPU18 smoke를 확인했다. binary SHA-256은 `515ef88b9b73d7e0809998a7de4d30313bd4f064a48c0b093243d6940326d5de`이며 Cargo release build는 6.92초였다. 같은 packaged executable의 opt-in native22도 통과했고 `p02-project-view-final-packaged-smoke.json`에 남겼다. EOF 226 surface presents, 가득 찬 65536-byte unread stdout pipe 225 presents와 정상 종료·credit 0을 확인했다. 관찰 7.850713초는 통제된 성능 비교가 아니다. 이후 evidence-only 문서 commit은 이 package의 source identity를 바꾸지 않는다.

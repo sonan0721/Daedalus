@@ -23,7 +23,9 @@ use crate::session_primitives::{
     CreditError, CreditLease, CreditLimits, CreditPool, LatestValueMailbox, MailboxError,
     StopSignal,
 };
-use crate::{EngineConfig, ProjectSession, ProjectSessionStartError, StepReport};
+use crate::{
+    EngineConfig, ProjectSession, ProjectSessionStartError, SnapshotPublication, StepReport,
+};
 
 const MAX_CONTROL_QUEUE: usize = 4_096;
 const MAX_CONTROL_CLIENTS: usize = 64;
@@ -475,6 +477,10 @@ pub enum SessionControlStartError {
     InvalidConfig(String),
     #[error(transparent)]
     Project(#[from] ProjectSessionStartError),
+    #[error("initial tick-zero snapshot could not be published: {0:?}")]
+    InitialSnapshot(SnapshotPublication),
+    #[error("initial tick-zero session frame could not be published: {0}")]
+    InitialFramePublication(String),
     #[error("could not start project session actor: {0}")]
     ThreadSpawn(String),
     #[error("project actor stopped before startup completed")]
@@ -994,6 +1000,14 @@ pub struct SessionControlService {
 impl SessionControlService {
     pub fn start(
         prepared: PreparedProject,
+        config: SessionControlConfig,
+    ) -> Result<Self, SessionControlStartError> {
+        Self::start_shared(Arc::new(prepared), config)
+    }
+
+    /// Start the actor with the same immutable prepared-project allocation held by the caller.
+    pub fn start_shared(
+        prepared: Arc<PreparedProject>,
         mut config: SessionControlConfig,
     ) -> Result<Self, SessionControlStartError> {
         config.limits.validate(&config.engine)?;
@@ -1061,7 +1075,7 @@ impl SessionControlService {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 let _ = join.join();
-                return Err(error.into());
+                return Err(error);
             }
             Err(_) => {
                 let _ = join.join();
@@ -1180,6 +1194,13 @@ impl SessionControlClient {
     #[must_use]
     pub fn id(&self) -> SessionClientId {
         self.attachment.id
+    }
+
+    /// Whether the session has closed request admission or stopped. A retained latest frame may
+    /// still be readable after this returns true; frame availability is not a liveness signal.
+    #[must_use]
+    pub fn is_stopping(&self) -> bool {
+        !self.shared.accepting.load(Ordering::Acquire)
     }
 
     pub fn try_submit(
@@ -1375,16 +1396,16 @@ struct ControlActor {
 }
 
 fn run_control_actor(
-    prepared: PreparedProject,
+    prepared: Arc<PreparedProject>,
     config: SessionControlConfig,
     shared: Arc<ControlShared>,
-    startup_sender: std::sync::mpsc::SyncSender<Result<(), ProjectSessionStartError>>,
+    startup_sender: std::sync::mpsc::SyncSender<Result<(), SessionControlStartError>>,
 ) -> SessionShutdownReport {
-    let session = match ProjectSession::new(prepared, config.engine.clone()) {
+    let mut session = match ProjectSession::new_shared(prepared, config.engine.clone()) {
         Ok(session) => session,
         Err(error) => {
             shared.request_stop();
-            let _ = startup_sender.send(Err(error));
+            let _ = startup_sender.send(Err(SessionControlStartError::Project(error)));
             return shutdown_report(
                 &shared,
                 SessionTermination::EngineError("project session startup failed".to_owned()),
@@ -1392,7 +1413,21 @@ fn run_control_actor(
             );
         }
     };
-    let _ = startup_sender.send(Ok(()));
+    let initial_snapshot = session.engine_mut().publish_current_snapshot();
+    if !matches!(initial_snapshot, SnapshotPublication::Published { .. }) {
+        shared.request_stop();
+        let _ = startup_sender.send(Err(SessionControlStartError::InitialSnapshot(
+            initial_snapshot,
+        )));
+        let _ = session.engine().shutdown();
+        return shutdown_report(
+            &shared,
+            SessionTermination::EngineError(
+                "project session could not publish its tick-zero snapshot".to_owned(),
+            ),
+            Tick(0),
+        );
+    }
     let mut actor = ControlActor {
         session,
         config,
@@ -1406,6 +1441,21 @@ fn run_control_actor(
         replay_order: VecDeque::new(),
         active_request: None,
     };
+    if let Err(error) = actor.publish_latest_frame() {
+        shared.request_stop();
+        let _ = startup_sender.send(Err(SessionControlStartError::InitialFramePublication(
+            error,
+        )));
+        let _ = actor.session.engine().shutdown();
+        return shutdown_report(
+            &shared,
+            SessionTermination::EngineError(
+                "project session could not publish its initial tick-zero frame".to_owned(),
+            ),
+            Tick(0),
+        );
+    }
+    let _ = startup_sender.send(Ok(()));
 
     let termination = match catch_unwind(AssertUnwindSafe(|| actor.run_loop())) {
         Ok(Ok(())) => SessionTermination::StopRequested,
@@ -1507,7 +1557,7 @@ impl ControlActor {
                     .map_err(|error| error.to_string())?;
                 for report in reports {
                     self.process_step_report(&report);
-                    self.publish_latest_frame();
+                    let _ = self.publish_latest_frame();
                 }
             }
         }
@@ -1928,7 +1978,7 @@ impl ControlActor {
                     }
                     self.process_step_report(&report);
                     reports.push(report);
-                    self.publish_latest_frame();
+                    let _ = self.publish_latest_frame();
                 }
                 Err(error) => {
                     self.finish_cell(
@@ -2032,15 +2082,16 @@ impl ControlActor {
             .store(false, Ordering::Release);
     }
 
-    fn publish_latest_frame(&mut self) {
-        let snapshot = match self.session.latest_snapshot() {
-            Ok(Some(snapshot)) => snapshot,
-            Ok(None) => return,
-            Err(_) => return,
-        };
+    fn publish_latest_frame(&mut self) -> Result<(), String> {
+        let snapshot = self
+            .session
+            .latest_snapshot()
+            .map_err(|error| format!("snapshot read failed: {error}"))?
+            .ok_or_else(|| "no Engine snapshot has been published".to_owned())?;
         if snapshot.sequence <= self.last_published_sequence {
-            return;
+            return Ok(());
         }
+        let sequence = snapshot.sequence;
         let prepared = self.session.project();
         let frame = SessionFrame {
             session: self.session.engine().world().session(),
@@ -2053,8 +2104,7 @@ impl ControlActor {
         };
         let snapshot = Arc::downgrade(&frame.snapshot);
         let entities = Arc::downgrade(&frame.snapshot.entities);
-        match self
-            .shared
+        self.shared
             .frames
             .try_publish_with_backing_probe(frame, move || {
                 let snapshot = snapshot.upgrade();
@@ -2063,18 +2113,10 @@ impl ControlActor {
                     let internal_and_probe = 1 + usize::from(snapshot.is_some());
                     Arc::strong_count(&entities) > internal_and_probe
                 })
-            }) {
-            Ok(()) => {
-                self.last_published_sequence = self
-                    .session
-                    .latest_snapshot()
-                    .ok()
-                    .flatten()
-                    .map_or(self.last_published_sequence, |snapshot| snapshot.sequence)
-            }
-            Err(MailboxError::AtCapacity | MailboxError::Busy) => {}
-            Err(MailboxError::Poisoned) => {}
-        }
+            })
+            .map_err(|error| format!("session frame mailbox rejected publication: {error:?}"))?;
+        self.last_published_sequence = sequence;
+        Ok(())
     }
 }
 
@@ -2181,6 +2223,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -2301,6 +2344,28 @@ mod tests {
     }
 
     #[test]
+    fn client_stop_signal_is_distinct_from_retained_latest_frame_availability() {
+        let service = start(default_config());
+        let client = service.attach().expect("attach session client");
+        assert!(!client.is_stopping());
+
+        let initial = wait_for_frame(&client);
+        assert_eq!(initial.tick(), Tick(0));
+        service.request_stop();
+        assert!(client.is_stopping());
+
+        let retained = client
+            .try_latest_frame()
+            .expect("latest frame mailbox should remain readable")
+            .expect("last good frame remains available after stop");
+        assert!(Arc::ptr_eq(&initial, &retained));
+        assert_eq!(retained.tick(), Tick(0));
+
+        let report = service.shutdown();
+        assert_eq!(report.termination, SessionTermination::StopRequested);
+    }
+
+    #[test]
     fn manual_set_acceptance_precedes_step_and_reads_snapshot_from_the_same_engine() {
         let service = start(default_config());
         let client = service.attach().unwrap();
@@ -2376,6 +2441,69 @@ mod tests {
         before.acknowledge().unwrap();
         step.acknowledge().unwrap();
         set.acknowledge().unwrap();
+        assert_eq!(service.shutdown().final_tick, Tick(1));
+    }
+
+    #[test]
+    fn shared_service_publishes_actual_tick_zero_before_start_returns() {
+        let source = Arc::new(prepared(ONE_ENTITY_SCENE));
+        let service = SessionControlService::start_shared(Arc::clone(&source), default_config())
+            .expect("start shared project service");
+        assert_eq!(
+            Arc::strong_count(&source),
+            2,
+            "service shares the source Arc"
+        );
+
+        let client = service.attach().unwrap();
+        let first_frame = wait_for_frame(&client);
+        assert_eq!(first_frame.tick(), Tick(0));
+        assert_eq!(first_frame.sequence(), 1);
+        assert_eq!(first_frame.project_generation(), 1);
+        assert_eq!(first_frame.source_digest(), source.digest());
+        assert_eq!(first_frame.source_scene_revision(), source.scene().revision);
+        assert_eq!(first_frame.snapshot().tick, Tick(0));
+        assert_eq!(first_frame.snapshot().entities.len(), 1);
+        assert_eq!(
+            first_frame.snapshot().entities[0].transform.translation,
+            [2.0, 3.0, 4.0]
+        );
+
+        let mut before = submit_after_busy(
+            &client,
+            SessionOperation::GetTransform {
+                target: SessionEntityTarget::StableId(stable_id("entity:hero")),
+            },
+        );
+        let before_state = wait_terminal(&before);
+        let SessionRequestResult::Transform(transform) =
+            before_state.terminal().unwrap().as_ref().unwrap()
+        else {
+            panic!("initial transform query returned a different result")
+        };
+        assert_eq!(transform.observed_tick, Tick(0));
+        assert_eq!(transform.entity.revision, Revision(0));
+        assert_eq!(transform.entity.transform.translation, [2.0, 3.0, 4.0]);
+
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        let step_state = wait_terminal(&step);
+        let SessionRequestResult::Step(reports) = step_state.terminal().unwrap().as_ref().unwrap()
+        else {
+            panic!("initial manual step returned a different result")
+        };
+        assert_eq!(reports[0].tick, Tick(1));
+        assert!(matches!(
+            &reports[0].snapshot,
+            crate::SnapshotPublication::Published { sequence: 2 }
+        ));
+        let next_frame = wait_for_frame(&client);
+        assert_eq!(next_frame.tick(), Tick(1));
+        assert_eq!(next_frame.sequence(), 2);
+
+        before.acknowledge().unwrap();
+        step.acknowledge().unwrap();
+        drop(first_frame);
+        drop(next_frame);
         assert_eq!(service.shutdown().final_tick, Tick(1));
     }
 

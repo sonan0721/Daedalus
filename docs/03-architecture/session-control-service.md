@@ -130,6 +130,8 @@ retained-frame 상한은 mailbox 안의 값만이 아니라 client가 보유한 
 
 ## visible project와 제어 adapter
 
+P02.2a의 구체적인 CLI·shared source·tick-0·protocol-2·process I/O 계약은 [project 실행 창 명세](project-view-control.md)에 둔다. blocking process I/O만 분리해 종료 시 join하지 않는 첫 CLI 선택과, 반드시 회수하는 engine worker를 구분한다. 아래 장기 adapter 요구를 cancellable transport까지 이미 구현한 것으로 표시하지 않는다.
+
 후보 CLI는 `project view <directory>`이며 기존 `view` fixture는 진단용으로 보존한다. startup은 project load/검증→Host start→window/control attach 순서다. 빈 project는 빈 scene을 표시하고 실행 창에 default terrain/entity를 주입하지 않는다. camera 조작과 authored/gameplay entity의 action을 구분한다. 선택 대상 stable ID·action binding이 없는데 arrow key를 임의 첫 entity 이동으로 연결하지 않는다.
 
 stdin JSONL을 붙이는 경우 OS event loop와 별도 I/O thread를 사용하고 stdout에는 해당 protocol 응답만 출력한다. window/report 진단은 stderr 또는 명시 파일이다. window가 먼저 닫히는 경우에도 blocking stdin thread를 join하느라 프로세스가 종료되지 않는 문제를 해결해야 한다. fd-ready/비동기 transport 또는 명시적으로 종료 가능한 I/O 수명을 선택한다. timeout/EOF/창 종료의 host stop 정책도 표시한다.
@@ -177,6 +179,6 @@ attachment는 inspect/input/mutate/manual-step/capture/shutdown capability를 �
 
 `daedalus-runtime/src/session_control.rs`가 실제 ProjectSession 한 개를 소유하고, `session_primitives.rs`가 atomic credit lease·bounded latest-value mailbox·stop signal을 제공한다. `daedalus-world`의 transform page는 ECS iterator에서 skip/take 후 작은 Vec만 만든다. source metadata는 result size를 계산한 뒤 복사한다. query/Step의 처리 중 panic도 ticket을 terminal로 만들고, 적용 여부가 불명확한 command는 OutcomeUnknown으로 남긴다.
 
-조정자의 최신 로컬 all-feature workspace 검사는 CPU 158건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 첫 Linux PR 검사의 terminal/credit 회수 경쟁과 수정 후 CI는 별도로 추적한다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 별도 회귀로 확인한다. 세부 입력·binary identity·각 실행 시점과 한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
+P02.1 종료 시 조정자의 로컬 all-feature workspace 검사는 CPU 158건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 첫 Linux PR 검사의 terminal/credit 회수 경쟁과 수정 후 CI는 별도로 추적한다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 별도 회귀로 확인한다. 세부 입력·binary identity·각 실행 시점과 한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
 
-legacy `LiveSession`은 같은 mailbox/stop primitive를 사용하지만 count-only AtomicUsize result credit와 기존 단일 result receiver는 유지한다. owned ticket 서비스와 accounting 의미가 달라 강제로 통합하지 않았다. 이 남은 migration은 P02.1c/DEV01 미완료이며 두 path의 테스트를 유지한다. CLI protocol 2·실제 project window·MCP·SDK attach는 아직 이 service의 adapter로 구현되지 않았다.
+legacy `LiveSession`은 같은 mailbox/stop primitive를 사용하지만 count-only AtomicUsize result credit와 기존 단일 result receiver는 유지한다. owned ticket 서비스와 accounting 의미가 달라 강제로 통합하지 않았다. 이 남은 migration은 P02.1c/DEV01 미완료이며 두 path의 테스트를 유지한다. CLI protocol 2와 실제 project window는 후속 P02.2 adapter로 연결·검증했다. MCP·SDK attach와 P02 전체 제품 gate는 계속 열려 있다. process I/O 극단 사례는 후속 native22 smoke에서 별도로 통과했으며 실제 F10/Step 경합도 release physical 입력으로 확인했다.

@@ -91,7 +91,7 @@ pub enum ProjectSessionCommandError {
 
 /// Owns one prepared project, one real Engine and the authored-ID mapping for that session.
 pub struct ProjectSession {
-    project: PreparedProject,
+    project: Arc<PreparedProject>,
     engine: Engine,
     entity_handles: BTreeMap<StableId, EntityHandle>,
     stable_ids_by_handle: HashMap<EntityHandle, StableId>,
@@ -101,6 +101,14 @@ impl ProjectSession {
     /// Validate the complete prepared projection before building an Engine or spawning entities.
     pub fn new(
         prepared: PreparedProject,
+        config: EngineConfig,
+    ) -> Result<Self, ProjectSessionStartError> {
+        Self::new_shared(Arc::new(prepared), config)
+    }
+
+    /// Construct a session that shares the caller's immutable prepared source without cloning it.
+    pub fn new_shared(
+        prepared: Arc<PreparedProject>,
         config: EngineConfig,
     ) -> Result<Self, ProjectSessionStartError> {
         prepared.validate()?;
@@ -183,8 +191,8 @@ impl ProjectSession {
     }
 
     #[must_use]
-    pub const fn project(&self) -> &PreparedProject {
-        &self.project
+    pub fn project(&self) -> &PreparedProject {
+        self.project.as_ref()
     }
 
     #[must_use]
@@ -269,6 +277,7 @@ impl ProjectSession {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use daedalus_content::project::{ProjectLimits, prepare_project_from_bytes};
     use daedalus_world::{CommandError, CommandOutcome};
@@ -332,6 +341,17 @@ mod tests {
             session.entity_handle(&report.entities[0].id),
             Some(report.entities[0].handle)
         );
+    }
+
+    #[test]
+    fn shared_constructor_keeps_the_callers_prepared_project_arc() {
+        let prepared = Arc::new(prepared_project(ONE_TRANSFORM_SCENE));
+        let session =
+            ProjectSession::new_shared(Arc::clone(&prepared), EngineConfig::default()).unwrap();
+
+        assert!(std::ptr::eq(session.project(), prepared.as_ref()));
+        assert_eq!(Arc::strong_count(&prepared), 2);
+        assert!(session.latest_snapshot().unwrap().is_none());
     }
 
     #[test]

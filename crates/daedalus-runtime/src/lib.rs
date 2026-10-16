@@ -46,8 +46,8 @@ pub use session_control::{
     ProjectInfoPage, RequestAckError, RequestPhase, RequestProgress, RequestReadError,
     RequestTicket, RequestTicketId, RequestWaitError, SessionAttachError, SessionCapabilities,
     SessionClientId, SessionClockMode, SessionControlClient, SessionControlConfig,
-    SessionControlLimits, SessionControlService, SessionEntityState, SessionEntityTarget,
-    SessionFrame, SessionOperation, SessionRequestError, SessionRequestResult,
+    SessionControlLimits, SessionControlService, SessionControlStartError, SessionEntityState,
+    SessionEntityTarget, SessionFrame, SessionOperation, SessionRequestError, SessionRequestResult,
     SessionShutdownReport, SessionStatus, SessionSubmitError, SessionTermination, TransformPage,
     TransformState, WaitStage,
 };
@@ -308,6 +308,14 @@ impl Engine {
         self.snapshot_consumer.clone()
     }
 
+    /// Publish the world's current state without advancing the clock or running a tick.
+    ///
+    /// This is used by session startup to make the authored tick-zero state observable. It does
+    /// not begin a world tick, apply queued commands, run gameplay systems, or refresh revisions.
+    pub(crate) fn publish_current_snapshot(&mut self) -> SnapshotPublication {
+        self.publish_snapshot_at(self.clock.current_tick())
+    }
+
     pub fn spawn_transform(
         &mut self,
         transform: Transform,
@@ -363,38 +371,41 @@ impl Engine {
         self.world.ecs_mut().insert_resource(CurrentTick(tick));
         self.schedule.run(self.world.ecs_mut());
         self.world.refresh_changed_transform_revisions();
-        let entity_count = self.world.render_entity_count();
-        let entity_limit = self.snapshot_entity_capacity;
-        let world = &mut self.world;
-        let publication =
-            match self
-                .snapshot_publisher
-                .try_publish_with(tick, entity_count, entity_limit, || {
-                    world.render_entities_bounded(entity_limit)
-                }) {
-                Ok(daedalus_core::PublicationStatus::Published { sequence }) => {
-                    SnapshotPublication::Published { sequence }
-                }
-                Ok(daedalus_core::PublicationStatus::SkippedAtCapacity) => {
-                    SnapshotPublication::SkippedAtCapacity
-                }
-                Ok(daedalus_core::PublicationStatus::SkippedAtEntityLimit {
-                    entity_count,
-                    limit,
-                }) => SnapshotPublication::SkippedAtEntityLimit {
-                    entity_count,
-                    limit,
-                },
-                Err(daedalus_core::SnapshotPublishError::Busy) => SnapshotPublication::Busy,
-                Err(daedalus_core::SnapshotPublishError::Poisoned) => SnapshotPublication::Poisoned,
-                Err(daedalus_core::SnapshotPublishError::SequenceExhausted) => {
-                    SnapshotPublication::SequenceExhausted
-                }
-            };
+        let publication = self.publish_snapshot_at(tick);
         StepReport {
             tick,
             commands,
             snapshot: publication,
+        }
+    }
+
+    fn publish_snapshot_at(&mut self, tick: Tick) -> SnapshotPublication {
+        let entity_count = self.world.render_entity_count();
+        let entity_limit = self.snapshot_entity_capacity;
+        let world = &mut self.world;
+        match self
+            .snapshot_publisher
+            .try_publish_with(tick, entity_count, entity_limit, || {
+                world.render_entities_bounded(entity_limit)
+            }) {
+            Ok(daedalus_core::PublicationStatus::Published { sequence }) => {
+                SnapshotPublication::Published { sequence }
+            }
+            Ok(daedalus_core::PublicationStatus::SkippedAtCapacity) => {
+                SnapshotPublication::SkippedAtCapacity
+            }
+            Ok(daedalus_core::PublicationStatus::SkippedAtEntityLimit {
+                entity_count,
+                limit,
+            }) => SnapshotPublication::SkippedAtEntityLimit {
+                entity_count,
+                limit,
+            },
+            Err(daedalus_core::SnapshotPublishError::Busy) => SnapshotPublication::Busy,
+            Err(daedalus_core::SnapshotPublishError::Poisoned) => SnapshotPublication::Poisoned,
+            Err(daedalus_core::SnapshotPublishError::SequenceExhausted) => {
+                SnapshotPublication::SequenceExhausted
+            }
         }
     }
 }
@@ -493,6 +504,68 @@ mod tests {
             }
         );
         assert_eq!(engine.world().transform(entity).unwrap().1, Revision(1));
+    }
+
+    #[test]
+    fn current_state_snapshot_does_not_advance_clock_apply_commands_or_run_schedule() {
+        let mut builder = EngineBuilder::default();
+        builder.add_gameplay_systems(move_transform);
+        let mut engine = builder.build().unwrap();
+        let entity = engine.spawn_transform(Transform::IDENTITY).unwrap();
+        engine
+            .try_command(WorldCommand {
+                command_id: CommandId::from_raw(88),
+                target: entity,
+                expected_revision: Revision(0),
+                apply_at: Tick(1),
+                kind: WorldCommandKind::SetTransform(Transform {
+                    translation: [5.0, 0.0, 0.0],
+                    ..Transform::IDENTITY
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(
+            engine.publish_current_snapshot(),
+            SnapshotPublication::Published { sequence: 1 }
+        );
+        let snapshot = engine
+            .snapshot_consumer()
+            .try_latest()
+            .unwrap()
+            .expect("tick-zero state is published");
+        assert_eq!(snapshot.tick, Tick(0));
+        assert_eq!(snapshot.entities[0].entity, entity);
+        assert_eq!(snapshot.entities[0].transform, Transform::IDENTITY);
+        assert_eq!(engine.clock().current_tick(), Tick(0));
+        assert_eq!(engine.world().pending_command_count(), 1);
+        assert_eq!(
+            engine.world().transform(entity).unwrap(),
+            (Transform::IDENTITY, Revision(0))
+        );
+        assert_eq!(
+            engine
+                .world()
+                .ecs()
+                .get_resource::<CurrentTick>()
+                .unwrap()
+                .0,
+            Tick(0)
+        );
+
+        let step = engine.step_tick().unwrap();
+        assert_eq!(step.tick, Tick(1));
+        assert_eq!(
+            step.commands[0].outcome,
+            CommandOutcome::Applied {
+                revision: Revision(1)
+            }
+        );
+        assert_eq!(
+            engine.world().transform(entity).unwrap().0.translation[0],
+            6.0,
+            "the queued command and gameplay system first run on tick one"
+        );
     }
 
     #[test]

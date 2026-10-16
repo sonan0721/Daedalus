@@ -18,9 +18,15 @@ from typing import Any, Sequence
 
 
 PROTOCOL_VERSION = 1
+VIEW_PROTOCOL_VERSION = 2
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 300.0
 MAX_JSONL_RESPONSE_BYTES = 1024 * 1024
+NATIVE_VIEW_SECONDS = 3
+NATIVE_OBSERVER_SECONDS = 2
+NATIVE_VIEW_WIDTH = 640
+NATIVE_VIEW_HEIGHT = 360
+MAX_STDOUT_PIPE_FILL_BYTES = 8 * 1024 * 1024
 ENTITY_ID = "entity:smoke-mesh"
 PROJECT_NAME = "smoke-mesh-project"
 TRANSFORM_AFTER_COMMAND = {
@@ -206,29 +212,48 @@ def _write_project(directory: Path, *, unsupported_component: bool = False) -> N
 
 
 class _JsonlProjectServer:
-    """One bounded project serve process with request-ID and response validation."""
+    """One bounded project JSONL process with request-ID and response validation."""
 
-    def __init__(self, binary: Path, project: Path, *, cwd: Path, timeout: float) -> None:
+    def __init__(
+        self,
+        binary: Path,
+        project: Path,
+        *,
+        cwd: Path,
+        timeout: float,
+        command: Sequence[str] | None = None,
+        protocol_version: int = PROTOCOL_VERSION,
+        process_label: str = "project serve",
+        stdin_target: Any = subprocess.PIPE,
+        stdout_target: int | None = None,
+    ) -> None:
         self.timeout = timeout
+        self.protocol_version = protocol_version
+        self.process_label = process_label
         self.process_stderr = tempfile.TemporaryFile(mode="w+b")
+        process_arguments = command or ("project", "serve", os.fspath(project))
         try:
             self.process = subprocess.Popen(
-                [os.fspath(binary), "project", "serve", os.fspath(project)],
+                [os.fspath(binary), *process_arguments],
                 cwd=cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                stdin=stdin_target,
+                stdout=subprocess.PIPE if stdout_target is None else stdout_target,
                 stderr=self.process_stderr,
                 bufsize=0,
             )
         except OSError as error:
             self.process_stderr.close()
-            raise SmokeError(f"could not start project serve: {error}") from error
-        assert self.process.stdin is not None
-        assert self.process.stdout is not None
-        self._stdout = self.process.stdout
+            raise SmokeError(f"could not start {self.process_label}: {error}") from error
         self._stdin = self.process.stdin
-        self._selector = selectors.DefaultSelector()
-        self._selector.register(self._stdout, selectors.EVENT_READ)
+        if stdin_target == subprocess.PIPE:
+            assert self._stdin is not None
+        self._stdout = self.process.stdout
+        if stdout_target is None:
+            assert self._stdout is not None
+            self._selector: selectors.BaseSelector | None = selectors.DefaultSelector()
+            self._selector.register(self._stdout, selectors.EVENT_READ)
+        else:
+            self._selector = None
         self._buffer = bytearray()
         self._closed = False
 
@@ -240,9 +265,11 @@ class _JsonlProjectServer:
         except OSError:
             return ""
 
-    def request(self, request_id: str, operation: dict[str, Any]) -> dict[str, Any]:
+    def send_only(self, request_id: str, operation: dict[str, Any]) -> None:
+        if self._stdin is None:
+            raise SmokeError(f"{self.process_label} has no writable stdin")
         envelope = {
-            "protocol": PROTOCOL_VERSION,
+            "protocol": self.protocol_version,
             "request_id": request_id,
             "request": operation,
         }
@@ -252,95 +279,137 @@ class _JsonlProjectServer:
             self._stdin.flush()
         except (BrokenPipeError, OSError) as error:
             raise SmokeError(
-                f"project serve closed while sending request {request_id!r}; "
+                f"{self.process_label} closed while sending request {request_id!r}; "
                 f"{self._server_diagnostic()}"
             ) from error
 
-        deadline = time.monotonic() + self.timeout
+    def request(
+        self,
+        request_id: str,
+        operation: dict[str, Any],
+        *,
+        timeout: float | None = None,
+        allow_error: bool = False,
+    ) -> dict[str, Any]:
+        if self._stdout is None or self._selector is None:
+            raise SmokeError(f"{self.process_label} stdout is intentionally not captured")
+        self.send_only(request_id, operation)
+        wait_timeout = self.timeout if timeout is None else min(timeout, self.timeout)
+        deadline = time.monotonic() + wait_timeout
         while True:
             newline = self._buffer.find(b"\n")
             if newline >= 0:
                 if newline > MAX_JSONL_RESPONSE_BYTES:
                     raise SmokeError(
-                        f"project serve response exceeded {MAX_JSONL_RESPONSE_BYTES} bytes"
+                        f"{self.process_label} response exceeded {MAX_JSONL_RESPONSE_BYTES} bytes"
                     )
                 raw = bytes(self._buffer[:newline])
                 del self._buffer[: newline + 1]
-                return self._validate_response(raw, request_id)
+                return self._validate_response(raw, request_id, allow_error=allow_error)
             if len(self._buffer) > MAX_JSONL_RESPONSE_BYTES:
                 raise SmokeError(
-                    f"project serve response exceeded {MAX_JSONL_RESPONSE_BYTES} bytes"
+                    f"{self.process_label} response exceeded {MAX_JSONL_RESPONSE_BYTES} bytes"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise SmokeError(
-                    f"timed out after {self.timeout:g}s waiting for project serve request "
+                    f"timed out after {wait_timeout:g}s waiting for {self.process_label} request "
                     f"{request_id!r}; {self._server_diagnostic()}"
                 )
             ready = self._selector.select(remaining)
             if not ready:
                 raise SmokeError(
-                    f"timed out after {self.timeout:g}s waiting for project serve request "
+                    f"timed out after {wait_timeout:g}s waiting for {self.process_label} request "
                     f"{request_id!r}; {self._server_diagnostic()}"
                 )
             try:
                 chunk = os.read(self._stdout.fileno(), 64 * 1024)
             except OSError as error:
-                raise SmokeError(f"could not read project serve response: {error}") from error
+                raise SmokeError(f"could not read {self.process_label} response: {error}") from error
             if not chunk:
                 raise SmokeError(
-                    f"project serve exited before responding to {request_id!r} "
+                    f"{self.process_label} exited before responding to {request_id!r} "
                     f"(exit {self.process.poll()}); {self._server_diagnostic()}"
                 )
             self._buffer.extend(chunk)
 
-    def _validate_response(self, raw: bytes, request_id: str) -> dict[str, Any]:
+    def _validate_response(
+        self, raw: bytes, request_id: str, *, allow_error: bool = False
+    ) -> dict[str, Any]:
         try:
             response = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SmokeError(
-                f"project serve returned invalid JSON for {request_id!r}: "
+                f"{self.process_label} returned invalid JSON for {request_id!r}: "
                 f"{raw[:2000]!r}; {self._server_diagnostic()}"
             ) from error
         _expect(isinstance(response, dict), "project serve response must be an object", response)
         _expect(
-            response.get("protocol") == PROTOCOL_VERSION,
-            f"project serve response has unsupported protocol for {request_id!r}",
+            response.get("protocol") == self.protocol_version,
+            f"{self.process_label} response has unsupported protocol for {request_id!r}",
             response,
         )
         _expect(
             response.get("request_id") == request_id,
-            f"project serve response request ID does not match {request_id!r}",
+            f"{self.process_label} response request ID does not match {request_id!r}",
             response,
         )
         _expect(
             type(response.get("ok")) is bool,
-            f"project serve response has no boolean success flag for {request_id!r}",
+            f"{self.process_label} response has no boolean success flag for {request_id!r}",
             response,
         )
-        _expect(response["ok"], f"project serve rejected request {request_id!r}", response)
-        _expect(
-            isinstance(response.get("result"), dict),
-            f"project serve response has no result object for {request_id!r}",
-            response,
-        )
+        if response["ok"]:
+            _expect(
+                isinstance(response.get("result"), dict),
+                f"{self.process_label} response has no result object for {request_id!r}",
+                response,
+            )
+        else:
+            _expect(
+                isinstance(response.get("error"), dict),
+                f"{self.process_label} error response has no error object for {request_id!r}",
+                response,
+            )
+            _expect(
+                allow_error,
+                f"{self.process_label} rejected request {request_id!r}",
+                response,
+            )
         return response
+
+    def wait_for_exit(self, *, timeout: float | None = None) -> int:
+        """Wait for the child while leaving stdin open, proving it exits independently of EOF."""
+
+        wait_timeout = self.timeout if timeout is None else min(timeout, self.timeout)
+        try:
+            return_code = self.process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired as error:
+            raise SmokeError(
+                f"{self.process_label} did not exit within {wait_timeout:g}s; "
+                f"{self._server_diagnostic()}"
+            ) from error
+        if return_code != 0:
+            raise SmokeError(
+                f"{self.process_label} exited with code {return_code}; {self._server_diagnostic()}"
+            )
+        return return_code
 
     def finish(self) -> None:
         if self._closed:
             return
         try:
-            self._stdin.close()
+            self._close_stdin()
             try:
                 return_code = self.process.wait(timeout=self.timeout)
             except subprocess.TimeoutExpired as error:
                 raise SmokeError(
-                    f"project serve did not exit within {self.timeout:g}s after exit request; "
+                    f"{self.process_label} did not exit within {self.timeout:g}s after input closed; "
                     f"{self._server_diagnostic()}"
                 ) from error
             if return_code != 0:
                 raise SmokeError(
-                    f"project serve exited with code {return_code}; {self._server_diagnostic()}"
+                    f"{self.process_label} exited with code {return_code}; {self._server_diagnostic()}"
                 )
         finally:
             self._terminate_if_running()
@@ -357,20 +426,30 @@ class _JsonlProjectServer:
             try:
                 self.process.wait(timeout=min(self.timeout, 2.0))
             except subprocess.TimeoutExpired as error:
-                raise SmokeError("could not reap terminated project serve process") from error
+                raise SmokeError(f"could not reap terminated {self.process_label} process") from error
 
     def _close_streams(self) -> None:
         if self._closed:
             return
         self._closed = True
-        try:
-            self._selector.unregister(self._stdout)
-        except (KeyError, ValueError):
-            pass
-        self._selector.close()
-        self._stdin.close()
-        self._stdout.close()
+        if self._selector is not None:
+            try:
+                self._selector.unregister(self._stdout)
+            except (KeyError, ValueError):
+                pass
+            self._selector.close()
+        self._close_stdin()
+        if self._stdout is not None:
+            self._stdout.close()
         self.process_stderr.close()
+
+    def _close_stdin(self) -> None:
+        if self._stdin is None:
+            return
+        try:
+            self._stdin.close()
+        except OSError:
+            pass
 
     def __enter__(self) -> _JsonlProjectServer:
         return self
@@ -612,11 +691,808 @@ def _run_jsonl_lifecycle(binary: Path, project: Path, *, cwd: Path, timeout: flo
     return checks
 
 
+def _v2_result(
+    server: _JsonlProjectServer,
+    request_id: str,
+    request: dict[str, Any],
+    *,
+    kind: str | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    response = server.request(request_id, request, timeout=timeout)
+    _expect(response.get("ok") is True, f"project view rejected {request_id!r}", response)
+    result = response["result"]
+    if kind is not None:
+        _expect(result.get("kind") == kind, f"{request_id!r} returned the wrong result kind", response)
+    data = result.get("data")
+    _expect(isinstance(data, dict), f"{request_id!r} returned no result data object", response)
+    return data
+
+
+def _v2_submit(
+    server: _JsonlProjectServer,
+    request_id: str,
+    operation: dict[str, Any],
+) -> tuple[str, bool]:
+    deadline = time.monotonic() + server.timeout
+    attempt = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out submitting {request_id!r}")
+        response = server.request(
+            request_id,
+            {"op": "submit", "operation": operation},
+            timeout=remaining,
+            allow_error=True,
+        )
+        if not response.get("ok"):
+            error = response.get("error", {})
+            if error.get("code") == "busy":
+                attempt += 1
+                time.sleep(min(0.01, max(0.0, remaining)))
+                continue
+            raise SmokeError(f"project view rejected submit {request_id!r}; {json.dumps(response, sort_keys=True)}")
+        result = response["result"]
+        _expect(result.get("kind") == "submitted", f"{request_id!r} returned the wrong result kind", response)
+        data = result.get("data")
+        _expect(isinstance(data, dict), "submit returned no result data object", response)
+        _expect(attempt <= int(server.timeout * 100) + 1, f"submit {request_id!r} exceeded its bounded retry count")
+        break
+    ticket = data.get("ticket")
+    _expect(isinstance(ticket, str) and ticket, "submit returned no ticket", data)
+    _expect(type(data.get("request_id_reused")) is bool, "submit returned no reuse flag", data)
+    return ticket, data["request_id_reused"]
+
+
+def _v2_poll_until(
+    server: _JsonlProjectServer,
+    ticket: str,
+    *,
+    request_prefix: str,
+    phase: str,
+    timeout: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    for attempt in range(int(timeout * 100) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out waiting for ticket {ticket!r} to reach {phase}")
+        response = server.request(
+            f"{request_prefix}-{attempt}",
+            {"op": "poll", "ticket": ticket},
+            timeout=remaining,
+            allow_error=True,
+        )
+        if not response.get("ok"):
+            error = response.get("error", {})
+            if error.get("code") == "busy":
+                time.sleep(min(0.01, max(0.0, remaining)))
+                continue
+            raise SmokeError(f"project view poll failed for {ticket!r}; {json.dumps(response, sort_keys=True)}")
+        result = response["result"]
+        _expect(result.get("kind") == "poll", f"{request_prefix!r} returned the wrong result kind", response)
+        data = result.get("data")
+        _expect(isinstance(data, dict), "poll returned no result data object", response)
+        current_phase = data.get("phase")
+        _expect(
+            current_phase in {"queued", "authority_accepted", "terminal"},
+            f"poll returned an unknown phase for {ticket!r}",
+            data,
+        )
+        if current_phase == phase:
+            return data
+        if current_phase == "terminal":
+            raise SmokeError(
+                f"ticket {ticket!r} became terminal before reaching {phase}; "
+                f"poll: {json.dumps(data, sort_keys=True)}"
+            )
+        time.sleep(min(0.01, max(0.0, remaining)))
+    raise SmokeError(f"ticket {ticket!r} exceeded the bounded poll count while waiting for {phase}")
+
+
+def _v2_terminal_result(poll: dict[str, Any], *, context: str) -> dict[str, Any]:
+    terminal = poll.get("terminal")
+    _expect(isinstance(terminal, dict), f"{context} poll has no terminal outcome", poll)
+    _expect(terminal.get("ok") is True, f"{context} operation failed", poll)
+    result = terminal.get("result")
+    _expect(isinstance(result, dict), f"{context} terminal result is missing", poll)
+    _expect(isinstance(result.get("kind"), str), f"{context} result has no kind", result)
+    return result
+
+
+def _v2_ack(server: _JsonlProjectServer, request_id: str, ticket: str) -> None:
+    deadline = time.monotonic() + server.timeout
+    for attempt in range(int(server.timeout * 100) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError(f"timed out acknowledging ticket {ticket!r}")
+        response = server.request(
+            f"{request_id}-{attempt}",
+            {"op": "ack", "ticket": ticket},
+            timeout=remaining,
+            allow_error=True,
+        )
+        if not response.get("ok"):
+            if response.get("error", {}).get("code") == "busy":
+                time.sleep(min(0.01, max(0.0, remaining)))
+                continue
+            raise SmokeError(f"ack request failed for {ticket!r}; {json.dumps(response, sort_keys=True)}")
+        _expect(response.get("result", {}).get("kind") == "acked", "ack returned another result kind", response)
+        return
+    raise SmokeError(f"ticket {ticket!r} exceeded its bounded acknowledgement retry count")
+
+
+def _v2_latest_frame(server: _JsonlProjectServer, *, timeout: float) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    for attempt in range(int(timeout * 100) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SmokeError("timed out waiting for latest_frame")
+        response = server.request(
+            f"view-latest-frame-{attempt}",
+            {"op": "latest_frame"},
+            timeout=remaining,
+            allow_error=True,
+        )
+        if not response.get("ok"):
+            code = response.get("error", {}).get("code")
+            if code in {"busy", "frame_unavailable"}:
+                time.sleep(min(0.01, max(0.0, remaining)))
+                continue
+            raise SmokeError(f"latest_frame request failed; {json.dumps(response, sort_keys=True)}")
+        result = response["result"]
+        _expect(result.get("kind") == "latest_frame", "latest_frame returned another result kind", response)
+        data = result.get("data")
+        _expect(isinstance(data, dict), "latest_frame returned no frame identity", response)
+        return data
+    raise SmokeError("latest_frame exceeded its bounded retry count")
+
+
+def _read_native_report(path: Path) -> dict[str, Any]:
+    try:
+        size = path.stat().st_size
+        _expect(size <= MAX_JSONL_RESPONSE_BYTES, "native project view report exceeded 1 MiB", size)
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise SmokeError(f"native project view did not write its report at {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise SmokeError(f"native project view report is invalid JSON at {path}: {error}") from error
+    _expect(isinstance(report, dict), "native project view report must be an object", report)
+    return report
+
+
+def _packet_identity(packet: dict[str, Any], *, context: str) -> dict[str, str]:
+    keys = ("session", "tick", "sequence", "project_generation", "source_digest")
+    identity: dict[str, str] = {}
+    for key in keys:
+        value = packet.get(key)
+        _expect(isinstance(value, str) and value, f"{context} has invalid {key}", packet)
+        identity[key] = value
+    return identity
+
+
+def _validate_native_view_report(
+    report: dict[str, Any],
+    *,
+    expected_session: str,
+    expected_source_digest: str,
+    expected_tick: str,
+    expected_exit_reason: str,
+    latest_frame: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    _expect(report.get("command") == "project_view", "native report is from another command", report)
+    _expect(report.get("session") == expected_session, "native report belongs to another session", report)
+    _expect(
+        report.get("source_digest") == expected_source_digest,
+        "native report source digest differs from the authored project",
+        report,
+    )
+    _expect(
+        report.get("authority_final_tick") == expected_tick,
+        "native report has an unexpected final authority tick",
+        report,
+    )
+    window = report.get("window")
+    _expect(isinstance(window, dict), "native report has no window summary", report)
+    _expect(
+        window.get("exit_reason") == expected_exit_reason,
+        f"native window exited for {window.get('exit_reason')!r}, expected {expected_exit_reason}",
+        report,
+    )
+    coordinator = report.get("coordinator")
+    _expect(isinstance(coordinator, dict), "native report has no coordinator counters", report)
+    _expect(
+        type(coordinator.get("protocol_requests")) is int and coordinator["protocol_requests"] >= 1,
+        "native report did not record protocol requests",
+        coordinator,
+    )
+    if expected_exit_reason == "TimeLimit":
+        _expect(
+            type(coordinator.get("duplicate_submissions")) is int
+            and coordinator["duplicate_submissions"] >= 1
+            and type(coordinator.get("protocol_errors")) is int
+            and coordinator["protocol_errors"] >= 1,
+            "native report did not record the duplicate and retained-ID collision checks",
+            coordinator,
+        )
+
+    accepted = report.get("accepted_packet")
+    presented = report.get("last_presented")
+    _expect(isinstance(accepted, dict), "native report has no accepted packet identity", report)
+    _expect(isinstance(presented, dict), "native viewer never reported an actually presented packet", report)
+    accepted_identity = _packet_identity(accepted, context="accepted packet")
+    presented_identity = _packet_identity(presented, context="last presented packet")
+    _expect(
+        accepted_identity == presented_identity,
+        "last presented packet does not match the final accepted packet",
+        {"accepted_packet": accepted_identity, "last_presented": presented_identity},
+    )
+    _expect(
+        presented_identity["session"] == expected_session
+        and presented_identity["source_digest"] == expected_source_digest
+        and presented_identity["tick"] == expected_tick,
+        "presented packet does not match the final authority/session state",
+        presented_identity,
+    )
+    _expect(
+        type(presented.get("physical_width")) is int
+        and presented["physical_width"] > 0
+        and type(presented.get("physical_height")) is int
+        and presented["physical_height"] > 0
+        and isinstance(presented.get("camera"), dict),
+        "presented packet has invalid surface dimensions or camera metadata",
+        presented,
+    )
+
+    if expected_exit_reason == "TimeLimit":
+        _expect(isinstance(latest_frame, dict), "latest-frame identity was not supplied", report)
+        _expect(
+            _packet_identity(latest_frame, context="latest frame") == accepted_identity,
+            "latest runtime frame differs from the packet presented by the window",
+            {"latest_frame": latest_frame, "accepted_packet": accepted_identity},
+        )
+        resources = report.get("resources")
+        _expect(isinstance(resources, dict), "native report has no resource counters", report)
+        for counter in (
+            "active_bytes",
+            "active_entries",
+            "geometry_upload_count",
+            "geometry_upload_bytes",
+            "instance_write_count",
+            "material_write_count",
+            "cache_hit_count",
+            "cache_miss_count",
+            "cache_eviction_count",
+        ):
+            value = resources.get(counter)
+            _expect(type(value) is int and value >= 0, f"invalid native resource counter {counter}", resources)
+        _expect(
+            resources["geometry_upload_count"] == 1 and resources["geometry_upload_bytes"] > 0,
+            "the single authored mesh was not uploaded exactly once",
+            resources,
+        )
+        _expect(
+            type(window.get("rendered_frames")) is int and window["rendered_frames"] >= 1,
+            "native window did not report a rendered frame",
+            window,
+        )
+    return report
+
+
+def _project_view_command(project: Path, report: Path, *, seconds: int) -> list[str]:
+    return [
+        "project",
+        "view",
+        os.fspath(project),
+        "--stdio-control",
+        "--clock",
+        "manual",
+        "--seconds",
+        str(seconds),
+        "--report",
+        os.fspath(report),
+        "--width",
+        str(NATIVE_VIEW_WIDTH),
+        "--height",
+        str(NATIVE_VIEW_HEIGHT),
+    ]
+
+
+def _run_native_project_view(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    report_path = root / "native-view-report.json"
+    command = _project_view_command(project, report_path, seconds=NATIVE_VIEW_SECONDS)
+    server = _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="project view",
+    )
+    with server:
+        info_ticket, reused = _v2_submit(
+            server,
+            "view-info",
+            {"op": "project_info", "offset": 0, "limit": 10},
+        )
+        _expect(not reused, "initial project_info submit was unexpectedly reused")
+        info_poll = _v2_poll_until(
+            server,
+            info_ticket,
+            request_prefix="view-info-poll",
+            phase="terminal",
+            timeout=timeout,
+        )
+        info_result = _v2_terminal_result(info_poll, context="project_info")
+        _expect(info_result.get("kind") == "project_info", "project_info returned another result kind", info_result)
+        info = info_result.get("data")
+        _expect(isinstance(info, dict), "project_info terminal result has no data", info_result)
+        session = info.get("session")
+        _expect(isinstance(session, str) and session, "project_info returned no decimal session ID", info)
+        _expect(info.get("tick") == "0", "native view did not start at authority tick zero", info)
+        _expect(
+            info.get("source_digest") == expected_source_digest,
+            "native project view loaded a different source digest",
+            info,
+        )
+        _v2_ack(server, "view-info-ack", info_ticket)
+
+        get_operation = {"op": "get_transform", "target": {"stable_id": ENTITY_ID}}
+        get_ticket, reused = _v2_submit(server, "view-get-zero", get_operation)
+        _expect(not reused, "initial transform submit was unexpectedly reused")
+        duplicate_ticket, was_reused = _v2_submit(server, "view-get-zero", get_operation)
+        _expect(
+            was_reused and duplicate_ticket == get_ticket,
+            "retained duplicate submit did not reuse its original ticket",
+            {"first": get_ticket, "duplicate": duplicate_ticket, "reused": was_reused},
+        )
+        collision = server.request(
+            "view-get-zero",
+            {"op": "submit", "operation": {"op": "status"}},
+            allow_error=True,
+        )
+        _expect(
+            collision.get("ok") is False
+            and collision.get("error", {}).get("code") == "request_id_collision",
+            "retained request ID collision was not rejected",
+            collision,
+        )
+        get_poll = _v2_poll_until(
+            server,
+            get_ticket,
+            request_prefix="view-get-zero-poll",
+            phase="terminal",
+            timeout=timeout,
+        )
+        get_result = _v2_terminal_result(get_poll, context="tick-zero get_transform")
+        _expect(get_result.get("kind") == "transform", "get_transform returned another result kind", get_result)
+        initial_state = get_result.get("data")
+        _expect(isinstance(initial_state, dict), "get_transform returned no state", get_result)
+        _expect(initial_state.get("observed_tick") == "0", "get_transform did not observe tick zero", initial_state)
+        initial_entity = initial_state.get("entity")
+        _expect(isinstance(initial_entity, dict), "get_transform returned no entity", initial_state)
+        _expect(initial_entity.get("stable_id") == ENTITY_ID, "get_transform returned another stable entity", initial_entity)
+        _expect(initial_entity.get("revision") == "0", "authored transform did not begin at revision zero", initial_entity)
+        _expect(initial_entity.get("handle", {}).get("session") == session, "get_transform handle belongs to another session", initial_entity)
+        _expect(
+            initial_entity.get("transform")
+            == {
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": [1.0, 1.0, 1.0],
+            },
+            "tick-zero get_transform did not contain the authored transform",
+            initial_entity,
+        )
+        _v2_ack(server, "view-get-zero-ack", get_ticket)
+
+        set_ticket, reused = _v2_submit(
+            server,
+            "view-set-transform",
+            {
+                "op": "set_transform",
+                "target": {"stable_id": ENTITY_ID},
+                "expected_revision": "0",
+                "transform": TRANSFORM_AFTER_COMMAND,
+            },
+        )
+        _expect(not reused, "set_transform submit was unexpectedly reused")
+        accepted_poll = _v2_poll_until(
+            server,
+            set_ticket,
+            request_prefix="view-set-poll",
+            phase="authority_accepted",
+            timeout=timeout,
+        )
+        authority = accepted_poll.get("authority")
+        _expect(
+            isinstance(authority, dict)
+            and authority.get("submission") == "enqueued"
+            and authority.get("apply_tick") == "1",
+            "set_transform was not accepted for authority tick one",
+            accepted_poll,
+        )
+
+        step_ticket, reused = _v2_submit(server, "view-step-one", {"op": "step", "count": 1})
+        _expect(not reused, "step submit was unexpectedly reused")
+        step_poll = _v2_poll_until(
+            server,
+            step_ticket,
+            request_prefix="view-step-one-poll",
+            phase="terminal",
+            timeout=timeout,
+        )
+        step_result = _v2_terminal_result(step_poll, context="manual Step")
+        _expect(step_result.get("kind") == "step", "manual Step returned another result kind", step_result)
+        steps = step_result.get("data")
+        _expect(isinstance(steps, list) and len(steps) == 1, "manual Step did not return one tick", step_result)
+        _expect(steps[0].get("tick") == "1", "manual Step did not reach authority tick one", steps)
+        step_commands = steps[0].get("commands")
+        _expect(isinstance(step_commands, list) and len(step_commands) == 1, "manual Step did not resolve one command", steps[0])
+        _expect(
+            step_commands[0].get("outcome") == {"kind": "applied", "data": {"revision": "1"}},
+            "manual Step did not apply the transform at revision one",
+            step_commands[0],
+        )
+        _v2_ack(server, "view-step-one-ack", step_ticket)
+
+        command_poll = _v2_poll_until(
+            server,
+            set_ticket,
+            request_prefix="view-set-terminal-poll",
+            phase="terminal",
+            timeout=timeout,
+        )
+        command_result = _v2_terminal_result(command_poll, context="set_transform")
+        _expect(command_result.get("kind") == "command", "set_transform returned another terminal kind", command_result)
+        command_data = command_result.get("data")
+        _expect(
+            isinstance(command_data, dict)
+            and command_data.get("outcome") == {"kind": "applied", "data": {"revision": "1"}}
+            and command_data.get("resolve_tick") == "1",
+            "set_transform terminal outcome did not confirm Applied at tick one",
+            command_result,
+        )
+        _v2_ack(server, "view-set-transform-ack", set_ticket)
+
+        final_get_ticket, reused = _v2_submit(
+            server,
+            "view-get-final",
+            {"op": "get_transform", "target": {"stable_id": ENTITY_ID}},
+        )
+        _expect(not reused, "final transform submit was unexpectedly reused")
+        final_get_poll = _v2_poll_until(
+            server,
+            final_get_ticket,
+            request_prefix="view-get-final-poll",
+            phase="terminal",
+            timeout=timeout,
+        )
+        final_get_result = _v2_terminal_result(final_get_poll, context="final get_transform")
+        final_state = final_get_result.get("data")
+        _expect(
+            final_get_result.get("kind") == "transform"
+            and isinstance(final_state, dict)
+            and final_state.get("observed_tick") == "1"
+            and final_state.get("entity", {}).get("revision") == "1"
+            and final_state.get("entity", {}).get("stable_id") == ENTITY_ID
+            and final_state.get("entity", {}).get("handle", {}).get("session") == session
+            and final_state.get("entity", {}).get("transform") == TRANSFORM_AFTER_COMMAND,
+            "final get_transform does not contain the authoritative tick-one state",
+            final_get_result,
+        )
+        _v2_ack(server, "view-get-final-ack", final_get_ticket)
+
+        latest_frame = _v2_latest_frame(server, timeout=timeout)
+        _expect(
+            latest_frame.get("session") == session
+            and latest_frame.get("tick") == "1"
+            and latest_frame.get("source_digest") == expected_source_digest,
+            "latest_frame does not reflect the authority/session state",
+            latest_frame,
+        )
+        # LatestFrame is runtime metadata only. The viewer report must separately
+        # identify the packet that actually reached the native surface.
+        server.wait_for_exit(timeout=timeout)
+
+    report = _read_native_report(report_path)
+    return _validate_native_view_report(
+        report,
+        expected_session=session,
+        expected_source_digest=expected_source_digest,
+        expected_tick="1",
+        expected_exit_reason="TimeLimit",
+        latest_frame=latest_frame,
+    )
+
+
+def _run_native_project_close(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    report_path = root / "native-close-report.json"
+    command = _project_view_command(project, report_path, seconds=NATIVE_VIEW_SECONDS)
+    server = _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="project view close case",
+    )
+    with server:
+        server.send_only("native-close", {"op": "close"})
+        # Do not wait for or consume the CloseRequested JSONL receipt. A successful
+        # exit is established by the report written after the window handles Close.
+        server.wait_for_exit(timeout=timeout)
+
+    report = _read_native_report(report_path)
+    _expect(report.get("command") == "project_view", "native close report is from another command", report)
+    _expect(
+        isinstance(report.get("session"), str) and report["session"],
+        "native close report has no session identity",
+        report,
+    )
+    _expect(
+        report.get("source_digest") == expected_source_digest,
+        "native close report source digest differs from the authored project",
+        report,
+    )
+    window = report.get("window")
+    _expect(isinstance(window, dict), "native close report has no window summary", report)
+    _expect(window.get("exit_reason") == "CloseRequested", "explicit Close did not close the project window", report)
+    coordinator = report.get("coordinator")
+    _expect(
+        isinstance(coordinator, dict)
+        and type(coordinator.get("protocol_requests")) is int
+        and coordinator["protocol_requests"] >= 1
+        and coordinator.get("protocol_detach_reason") is None,
+        "Close case detached before the window handled its request",
+        coordinator,
+    )
+    return report
+
+
+def _validate_native_liveness_report(
+    report: dict[str, Any],
+    *,
+    expected_source_digest: str,
+    expected_detach_reason: str | None,
+    expected_protocol_requests: int,
+) -> dict[str, Any]:
+    _expect(report.get("command") == "project_view", "native liveness report is from another command", report)
+    session = report.get("session")
+    _expect(isinstance(session, str) and session, "native liveness report has no session", report)
+    _expect(report.get("source_digest") == expected_source_digest, "native liveness source digest changed", report)
+    _expect(report.get("authority_final_tick") == "0", "native liveness case advanced authority", report)
+    _expect(report.get("termination") == "StopRequested", "native liveness session did not shut down normally", report)
+
+    window = report.get("window")
+    _expect(isinstance(window, dict), "native liveness report has no window summary", report)
+    _expect(window.get("exit_reason") == "TimeLimit", "native liveness viewer did not reach its time limit", report)
+    _expect(
+        type(window.get("rendered_frames")) is int and window["rendered_frames"] > 0,
+        "native liveness viewer presented no surface frames",
+        window,
+    )
+
+    accepted = report.get("accepted_packet")
+    presented = report.get("last_presented")
+    _expect(isinstance(accepted, dict) and isinstance(presented, dict), "native liveness report has no packet presentation", report)
+    accepted_identity = _packet_identity(accepted, context="liveness accepted packet")
+    presented_identity = _packet_identity(presented, context="liveness presented packet")
+    _expect(accepted_identity == presented_identity, "liveness packet was accepted but not presented", report)
+    _expect(
+        presented_identity["session"] == session
+        and presented_identity["tick"] == "0"
+        and presented_identity["source_digest"] == expected_source_digest,
+        "liveness presentation does not match the initial authority state",
+        presented_identity,
+    )
+    _expect(
+        type(presented.get("physical_width")) is int
+        and presented["physical_width"] > 0
+        and type(presented.get("physical_height")) is int
+        and presented["physical_height"] > 0,
+        "liveness presentation has invalid surface dimensions",
+        presented,
+    )
+
+    coordinator = report.get("coordinator")
+    _expect(isinstance(coordinator, dict), "native liveness report has no coordinator summary", report)
+    _expect(
+        coordinator.get("protocol_detach_reason") == expected_detach_reason,
+        "native liveness control detach reason did not match the transport case",
+        coordinator,
+    )
+    _expect(
+        coordinator.get("protocol_requests") == expected_protocol_requests
+        and coordinator.get("protocol_errors") == 0,
+        "native liveness protocol counters did not match the transport case",
+        coordinator,
+    )
+
+    resources = report.get("resources")
+    _expect(isinstance(resources, dict), "native liveness report has no resource counters", report)
+    _expect(
+        resources.get("geometry_upload_count") == 1
+        and type(resources.get("geometry_upload_bytes")) is int
+        and resources["geometry_upload_bytes"] > 0,
+        "native liveness viewer did not retain the one authored mesh resource",
+        resources,
+    )
+    return report
+
+
+def _fill_stdout_pipe(write_fd: int) -> int:
+    """Fill a POSIX pipe without blocking, restoring its original write mode afterward."""
+
+    if os.name != "posix":
+        raise SmokeError("the native stdout-backpressure case requires POSIX pipes")
+    try:
+        import fcntl
+    except ImportError as error:
+        raise SmokeError("the native stdout-backpressure case requires fcntl") from error
+
+    try:
+        original_flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+        fcntl.fcntl(write_fd, fcntl.F_SETFL, original_flags | os.O_NONBLOCK)
+    except OSError as error:
+        raise SmokeError(f"could not configure native stdout pipe: {error}") from error
+
+    written = 0
+    pipe_is_full = False
+    chunk = b"d" * (64 * 1024)
+    try:
+        while written < MAX_STDOUT_PIPE_FILL_BYTES:
+            try:
+                count = os.write(
+                    write_fd,
+                    chunk[: min(len(chunk), MAX_STDOUT_PIPE_FILL_BYTES - written)],
+                )
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                pipe_is_full = True
+                break
+            if count <= 0:
+                raise SmokeError("native stdout pipe accepted no bytes before its capacity check")
+            written += count
+    except OSError as error:
+        raise SmokeError(f"could not fill native stdout pipe: {error}") from error
+    finally:
+        try:
+            fcntl.fcntl(write_fd, fcntl.F_SETFL, original_flags)
+        except OSError as error:
+            raise SmokeError(f"could not restore native stdout pipe mode: {error}") from error
+
+    if not pipe_is_full or written == 0:
+        raise SmokeError(
+            f"could not fill native stdout pipe within the {MAX_STDOUT_PIPE_FILL_BYTES}-byte bound"
+        )
+    return written
+
+
+def _close_fd(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _run_native_project_eof(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    report_path = root / "native-eof-report.json"
+    command = _project_view_command(project, report_path, seconds=NATIVE_OBSERVER_SECONDS)
+    server = _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="project view stdin EOF case",
+        stdin_target=subprocess.DEVNULL,
+    )
+    with server:
+        server.wait_for_exit(timeout=timeout)
+
+    report = _read_native_report(report_path)
+    return _validate_native_liveness_report(
+        report,
+        expected_source_digest=expected_source_digest,
+        expected_detach_reason="stdin_eof",
+        expected_protocol_requests=0,
+    )
+
+
+def _run_native_project_blocked_stdout(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    if os.name != "posix":
+        raise SmokeError("the native stdout-backpressure case requires POSIX pipes")
+
+    report_path = root / "native-blocked-stdout-report.json"
+    command = _project_view_command(project, report_path, seconds=NATIVE_OBSERVER_SECONDS)
+    read_fd, write_fd = os.pipe()
+    server: _JsonlProjectServer | None = None
+    fill_bytes = 0
+    try:
+        fill_bytes = _fill_stdout_pipe(write_fd)
+        server = _JsonlProjectServer(
+            binary,
+            project,
+            cwd=cwd,
+            timeout=timeout,
+            command=command,
+            protocol_version=VIEW_PROTOCOL_VERSION,
+            process_label="project view blocked stdout case",
+            stdout_target=write_fd,
+        )
+        os.close(write_fd)
+        write_fd = None
+        try:
+            with server:
+                server.send_only("blocked-stdout-capabilities", {"op": "capabilities"})
+                # Keep the pipe read end open and unread while the finite viewer exits.
+                server.wait_for_exit(timeout=timeout)
+        finally:
+            if not server._closed:
+                try:
+                    server._terminate_if_running()
+                finally:
+                    server._close_streams()
+    finally:
+        _close_fd(write_fd)
+        _close_fd(read_fd)
+
+    report = _read_native_report(report_path)
+    validated = _validate_native_liveness_report(
+        report,
+        expected_source_digest=expected_source_digest,
+        expected_detach_reason=None,
+        expected_protocol_requests=1,
+    )
+    return {"stdout_pipe_bytes_filled": fill_bytes, "report": validated}
+
+
 def run_project_smoke(
     cli_binary: str | Path,
     *,
     cwd: str | Path | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    view: bool = False,
 ) -> dict[str, Any]:
     """Exercise empty and authored external projects using an existing CLI binary."""
 
@@ -747,7 +1623,52 @@ def run_project_smoke(
         )
         checks.append("unsupported_component_explicit_failure")
 
-    return {
+        view_results: dict[str, Any] | None = None
+        if view:
+            timed_view = _run_native_project_view(
+                binary,
+                project,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+                expected_source_digest=validated["source_digest"],
+            )
+            checks.append("native_view_presented_authority_state")
+            close_view = _run_native_project_close(
+                binary,
+                project,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+                expected_source_digest=validated["source_digest"],
+            )
+            checks.append("native_view_explicit_close_exit")
+            eof_view = _run_native_project_eof(
+                binary,
+                project,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+                expected_source_digest=validated["source_digest"],
+            )
+            checks.append("native_view_eof_detaches_without_stopping_window")
+            blocked_stdout_view = _run_native_project_blocked_stdout(
+                binary,
+                project,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+                expected_source_digest=validated["source_digest"],
+            )
+            checks.append("native_view_blocked_stdout_does_not_block_shutdown")
+            view_results = {
+                "time_limit_report": timed_view,
+                "close_report": close_view,
+                "eof_report": eof_view,
+                "blocked_stdout": blocked_stdout_view,
+            }
+
+    result = {
         "schema_version": 1,
         "smoke": "external_project_cpu",
         "status": "passed",
@@ -760,11 +1681,14 @@ def run_project_smoke(
         "check_count": len(checks),
         "wall_time_seconds": round(time.monotonic() - started, 6),
     }
+    if view_results is not None:
+        result["native_view"] = view_results
+    return result
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary."
+        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view adds native GPU/window checks."
     )
     parser.add_argument("--cli", type=Path, required=True, help="already-built daedalus executable")
     parser.add_argument(
@@ -773,13 +1697,18 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=DEFAULT_TIMEOUT_SECONDS,
         help=f"timeout per process/JSONL response in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
     )
+    parser.add_argument(
+        "--view",
+        action="store_true",
+        help="also open the authored project in an already-built native-window CLI and verify presentation/Close reports",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parse_args(argv)
     try:
-        result = run_project_smoke(arguments.cli, timeout=arguments.timeout)
+        result = run_project_smoke(arguments.cli, timeout=arguments.timeout, view=arguments.view)
         print(json.dumps(result, sort_keys=True))
         return 0
     except SmokeError as error:

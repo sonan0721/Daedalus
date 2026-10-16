@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from contextlib import redirect_stderr
 from io import StringIO
+import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -11,9 +13,15 @@ from pathlib import Path
 
 from smoke_project import (
     MAX_JSONL_RESPONSE_BYTES,
+    MAX_STDOUT_PIPE_FILL_BYTES,
     SmokeError,
     _JsonlProjectServer,
+    _fill_stdout_pipe,
     _parse_args,
+    _v2_poll_until,
+    _v2_submit,
+    _validate_native_view_report,
+    _validate_native_liveness_report,
     _validate_timeout,
 )
 
@@ -43,6 +51,9 @@ class ProjectSmokeProcessTests(unittest.TestCase):
     def test_argparse_accepts_positive_timeout_and_rejects_invalid_values(self) -> None:
         arguments = _parse_args(["--cli", "/bin/true", "--timeout", "1"])
         self.assertEqual(arguments.timeout, 1.0)
+        self.assertFalse(arguments.view)
+        view_arguments = _parse_args(["--cli", "/bin/true", "--view"])
+        self.assertTrue(view_arguments.view)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])
@@ -91,6 +102,379 @@ class ProjectSmokeProcessTests(unittest.TestCase):
 
         self.assertIsNotNone(server.process.poll())
         self.assertTrue(server._stdin.closed)
+
+    def test_protocol_two_request_and_exit_wait_keep_stdin_open(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys, time\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "assert request['protocol'] == 2\n"
+            "assert request['request'] == {'op': 'poll', 'ticket': 't1'}\n"
+            "print(json.dumps({'protocol': 2, 'request_id': request['request_id'], 'ok': True, "
+            "'result': {'kind': 'poll', 'data': {'phase': 'terminal'}}}), flush=True)\n"
+            "time.sleep(0.05)"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=1.0,
+            command=["project", "view", str(self.project)],
+            protocol_version=2,
+            process_label="project view",
+        )
+        with server:
+            response = server.request("p2-poll", {"op": "poll", "ticket": "t1"})
+            self.assertEqual(response["result"]["data"]["phase"], "terminal")
+            self.assertEqual(server.wait_for_exit(timeout=1.0), 0)
+            self.assertFalse(server._stdin.closed)
+        self.assertTrue(server._stdin.closed)
+        self.assertEqual(server.process.returncode, 0)
+
+    def test_default_server_preserves_protocol_one_envelope(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "assert request == {'protocol': 1, 'request_id': 'legacy-info', "
+            "'request': {'op': 'project_info', 'offset': 0, 'limit': 10}}\n"
+            "print(json.dumps({'protocol': 1, 'request_id': request['request_id'], 'ok': True, "
+            "'result': {'project_name': 'legacy'}}), flush=True)"
+        )
+        server = _JsonlProjectServer(binary, self.project, cwd=self.root, timeout=1.0)
+        with server:
+            response = server.request(
+                "legacy-info",
+                {"op": "project_info", "offset": 0, "limit": 10},
+            )
+            self.assertEqual(response["protocol"], 1)
+            self.assertEqual(response["result"]["project_name"], "legacy")
+
+    def test_error_envelopes_are_available_only_when_requested(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys, time\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'protocol': 2, 'request_id': request['request_id'], 'ok': False, "
+            "'error': {'code': 'request_id_collision', 'message': 'collision'}}), flush=True)\n"
+            "time.sleep(0.05)"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=1.0,
+            protocol_version=2,
+            process_label="project view",
+        )
+        with server:
+            response = server.request(
+                "collision",
+                {"op": "submit", "operation": {"op": "status"}},
+                allow_error=True,
+            )
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"]["code"], "request_id_collision")
+
+    def test_protocol_two_submit_retries_a_bounded_busy_response(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "for attempt in range(2):\n"
+            "    request = json.loads(sys.stdin.readline())\n"
+            "    assert request['protocol'] == 2 and request['request_id'] == 'submit-id'\n"
+            "    if attempt == 0:\n"
+            "        response = {'protocol': 2, 'request_id': 'submit-id', 'ok': False, "
+            "'error': {'code': 'busy', 'message': 'try again', 'retryable': True}}\n"
+            "    else:\n"
+            "        response = {'protocol': 2, 'request_id': 'submit-id', 'ok': True, "
+            "'result': {'kind': 'submitted', 'data': {'ticket': 't9-1-1', 'request_id_reused': False}}}\n"
+            "    print(json.dumps(response), flush=True)"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=1.0,
+            protocol_version=2,
+            process_label="project view",
+        )
+        with server:
+            ticket, reused = _v2_submit(server, "submit-id", {"op": "status"})
+            self.assertEqual(ticket, "t9-1-1")
+            self.assertFalse(reused)
+
+    def test_protocol_two_poll_retries_busy_without_losing_ticket(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "for attempt in range(2):\n"
+            "    request = json.loads(sys.stdin.readline())\n"
+            "    assert request['protocol'] == 2 and request['request']['ticket'] == 'ticket-1'\n"
+            "    if attempt == 0:\n"
+            "        response = {'protocol': 2, 'request_id': request['request_id'], 'ok': False, "
+            "'error': {'code': 'busy', 'message': 'try again', 'retryable': True}}\n"
+            "    else:\n"
+            "        response = {'protocol': 2, 'request_id': request['request_id'], 'ok': True, "
+            "'result': {'kind': 'poll', 'data': {'phase': 'terminal', 'authority': None, "
+            "'terminal': {'ok': True, 'result': {'kind': 'status', 'data': {}}, 'error': None}}}}\n"
+            "    print(json.dumps(response), flush=True)"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=1.0,
+            protocol_version=2,
+            process_label="project view",
+        )
+        with server:
+            result = _v2_poll_until(
+                server,
+                "ticket-1",
+                request_prefix="poll",
+                phase="terminal",
+                timeout=1.0,
+            )
+            self.assertEqual(result["phase"], "terminal")
+            self.assertTrue(result["terminal"]["ok"])
+
+    def test_close_can_exit_without_consuming_or_requiring_jsonl_ack(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys, time\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "assert request['protocol'] == 2 and request['request']['op'] == 'close'\n"
+            "time.sleep(0.05)"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=1.0,
+            command=["project", "view", str(self.project)],
+            protocol_version=2,
+            process_label="project view close case",
+        )
+        with server:
+            server.send_only("explicit-close", {"op": "close"})
+            self.assertEqual(server.wait_for_exit(timeout=1.0), 0)
+            self.assertFalse(server._stdin.closed)
+        self.assertEqual(server.process.returncode, 0)
+
+    def test_exit_wait_timeout_still_terminates_and_reaps_child(self) -> None:
+        binary = self.create_server_stub("import time\ntime.sleep(30)")
+        server = _JsonlProjectServer(binary, self.project, cwd=self.root, timeout=1.0)
+        started = time.monotonic()
+        with self.assertRaisesRegex(SmokeError, "did not exit"):
+            with server:
+                server.wait_for_exit(timeout=0.1)
+        self.assertIsNotNone(server.process.poll())
+        self.assertTrue(server._stdin.closed)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_devnull_eof_and_uncaptured_stdout_server_cleanup(self) -> None:
+        read_fd, write_fd = os.pipe()
+        binary = self.create_server_stub("import sys\nassert sys.stdin.read() == ''")
+        server = None
+        try:
+            server = _JsonlProjectServer(
+                binary,
+                self.project,
+                cwd=self.root,
+                timeout=1.0,
+                stdin_target=subprocess.DEVNULL,
+                stdout_target=write_fd,
+            )
+            os.close(write_fd)
+            write_fd = -1
+            with server:
+                self.assertIsNone(server._stdin)
+                self.assertIsNone(server._stdout)
+                self.assertIsNone(server._selector)
+                self.assertEqual(server.wait_for_exit(timeout=1.0), 0)
+        finally:
+            if server is not None and not server._closed:
+                try:
+                    server._terminate_if_running()
+                finally:
+                    server._close_streams()
+            for fd in (read_fd, write_fd):
+                if fd >= 0:
+                    os.close(fd)
+
+    def test_filled_stdout_pipe_stays_unread_while_child_exits(self) -> None:
+        if os.name != "posix":
+            self.skipTest("native stdout backpressure uses POSIX pipes")
+        import fcntl
+
+        read_fd, write_fd = os.pipe()
+        server = None
+        try:
+            original_flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+            filled = _fill_stdout_pipe(write_fd)
+            self.assertGreater(filled, 0)
+            self.assertLessEqual(filled, MAX_STDOUT_PIPE_FILL_BYTES)
+            restored_flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+            self.assertEqual(restored_flags & os.O_NONBLOCK, original_flags & os.O_NONBLOCK)
+
+            binary = self.create_server_stub(
+                "import json, os, sys, threading, time\n"
+                "request = json.loads(sys.stdin.readline())\n"
+                "assert request['request']['op'] == 'capabilities'\n"
+                "def exit_after_timeout():\n"
+                "    time.sleep(0.1)\n"
+                "    os._exit(0)\n"
+                "threading.Thread(target=exit_after_timeout, daemon=True).start()\n"
+                "os.write(1, b'x' * (1024 * 1024))"
+            )
+            server = _JsonlProjectServer(
+                binary,
+                self.project,
+                cwd=self.root,
+                timeout=2.0,
+                protocol_version=2,
+                process_label="blocked stdout stub",
+                stdout_target=write_fd,
+            )
+            os.close(write_fd)
+            write_fd = -1
+            with server:
+                server.send_only("capabilities", {"op": "capabilities"})
+                self.assertEqual(server.wait_for_exit(timeout=2.0), 0)
+                self.assertFalse(server._stdin.closed)
+                self.assertIsNone(server._stdout)
+            self.assertEqual(server.process.returncode, 0)
+        finally:
+            if server is not None and not server._closed:
+                try:
+                    server._terminate_if_running()
+                finally:
+                    server._close_streams()
+            for fd in (read_fd, write_fd):
+                if fd >= 0:
+                    os.close(fd)
+
+    def test_native_report_requires_presented_identity_to_match_authority_and_latest_frame(self) -> None:
+        identity = {
+            "session": "9",
+            "tick": "1",
+            "sequence": "2",
+            "project_generation": "3",
+            "source_digest": "a" * 64,
+        }
+        report = {
+            "command": "project_view",
+            "session": "9",
+            "source_digest": "a" * 64,
+            "authority_final_tick": "1",
+            "accepted_packet": dict(identity),
+            "last_presented": {
+                **identity,
+                "camera": {},
+                "physical_width": 640,
+                "physical_height": 360,
+            },
+            "window": {"exit_reason": "TimeLimit", "rendered_frames": 1},
+            "coordinator": {"protocol_requests": 5, "duplicate_submissions": 1, "protocol_errors": 1},
+            "resources": {
+                "active_bytes": 12,
+                "active_entries": 1,
+                "geometry_upload_count": 1,
+                "geometry_upload_bytes": 12,
+                "instance_write_count": 1,
+                "material_write_count": 1,
+                "cache_hit_count": 1,
+                "cache_miss_count": 1,
+                "cache_eviction_count": 0,
+            },
+        }
+        validated = _validate_native_view_report(
+            report,
+            expected_session="9",
+            expected_source_digest="a" * 64,
+            expected_tick="1",
+            expected_exit_reason="TimeLimit",
+            latest_frame=identity,
+        )
+        self.assertIs(validated, report)
+
+        mismatched = {**report, "last_presented": {**report["last_presented"], "tick": "0"}}
+        with self.assertRaisesRegex(SmokeError, "does not match the final accepted packet"):
+            _validate_native_view_report(
+                mismatched,
+                expected_session="9",
+                expected_source_digest="a" * 64,
+                expected_tick="1",
+                expected_exit_reason="TimeLimit",
+                latest_frame=identity,
+            )
+
+        mismatched_latest = {**identity, "sequence": "1"}
+        with self.assertRaisesRegex(SmokeError, "latest runtime frame differs"):
+            _validate_native_view_report(
+                report,
+                expected_session="9",
+                expected_source_digest="a" * 64,
+                expected_tick="1",
+                expected_exit_reason="TimeLimit",
+                latest_frame=mismatched_latest,
+            )
+
+    def test_native_liveness_report_requires_normal_time_limit_and_transport_identity(self) -> None:
+        identity = {
+            "session": "11",
+            "tick": "0",
+            "sequence": "1",
+            "project_generation": "2",
+            "source_digest": "b" * 64,
+        }
+        report = {
+            "command": "project_view",
+            "session": "11",
+            "source_digest": "b" * 64,
+            "authority_final_tick": "0",
+            "termination": "StopRequested",
+            "accepted_packet": dict(identity),
+            "last_presented": {
+                **identity,
+                "physical_width": 640,
+                "physical_height": 360,
+            },
+            "window": {"exit_reason": "TimeLimit", "rendered_frames": 2},
+            "coordinator": {
+                "protocol_detach_reason": "stdin_eof",
+                "protocol_requests": 0,
+                "protocol_errors": 0,
+            },
+            "resources": {"geometry_upload_count": 1, "geometry_upload_bytes": 12},
+        }
+        validated = _validate_native_liveness_report(
+            report,
+            expected_source_digest="b" * 64,
+            expected_detach_reason="stdin_eof",
+            expected_protocol_requests=0,
+        )
+        self.assertIs(validated, report)
+
+        blocked_stdout = {
+            **report,
+            "coordinator": {
+                "protocol_detach_reason": None,
+                "protocol_requests": 1,
+                "protocol_errors": 0,
+            },
+        }
+        validated_blocked = _validate_native_liveness_report(
+            blocked_stdout,
+            expected_source_digest="b" * 64,
+            expected_detach_reason=None,
+            expected_protocol_requests=1,
+        )
+        self.assertIs(validated_blocked, blocked_stdout)
+
+        not_presented = {**report, "window": {"exit_reason": "TimeLimit", "rendered_frames": 0}}
+        with self.assertRaisesRegex(SmokeError, "presented no surface frames"):
+            _validate_native_liveness_report(
+                not_presented,
+                expected_source_digest="b" * 64,
+                expected_detach_reason="stdin_eof",
+                expected_protocol_requests=0,
+            )
 
 
 if __name__ == "__main__":

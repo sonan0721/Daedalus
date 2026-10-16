@@ -12,14 +12,14 @@
 
 | ID | 반복되는 작업 | 공통화할 책임 | 정확성 조건 | 현재 |
 | --- | --- | --- | --- | --- |
-| DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. legacy credit migration·visible/MCP/bridge attach 미완료 |
+| DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit migration·MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
 | DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | 미구현 |
-| DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | 일부 JSONL 제어만 구현 |
+| DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 제한된 root mesh project의 공통 parser·불변 PreparedProject·native/byte adapter 검증. 일반 importer/실행 중 patch 후속 |
-| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU smoke를 로컬/추출 package에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
+| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
-| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 한 청크 CPU conversion 일부만 재사용 |
+| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh handle·native GPU cache·dirty instance/material 검증, cook/reload·texture/skin 후속 |
 
 위 표는 backlog다. `제안/미구현`을 기존 기능으로 홍보하지 않는다. 현재 코드 근거와 우선순위는 readiness 감사에 보완한다.
 
@@ -63,10 +63,14 @@ AI 루프는 GUI automation만 반복하는 방식에 의존하지 않는다. CL
 
 ## DEV01/DEV08 후속 설계
 
+P02.2의 실제 적용 결과는 `project view`/protocol 2가 같은 session을 쓰고 source Arc·mesh handle을 공유하며, window redraw는 geometry를 재변환/업로드하지 않는 것이다. explicit native smoke는 기존 `scripts/smoke_project.py --cli ... --view` 한 invocation으로 CPU 18개+native 4개 검사를 수행한다. 최초 연결 run은 20개 통과·4.261689초였고, EOF/blocked stdout 추가 후 같은 entrypoint가 22개 통과·8.832935초를 기록했다. 두 실행은 검사 범위가 달라 속도 비교가 아니며, 이전 수동 루프와 통제된 wall-time 비교가 없어 배율을 주장하지 않는다. 첫 GPU 표시 전에 여러 snapshot이 합쳐질 수 있어 이 한 실행의 instance-write 1회를 transform dirty-update의 증거로 쓰지 않는다. 별도 실제 키 입력 run과 GPU library 시험이 변경 행/세대 재사용을 확인했다. native actor stop을 last frame 존재와 분리하고, Close는 별도 bounded intent를 우선 전달해 caller의 반복 Close 조립을 줄였다. DEV01 전체·DEV04 live capture/trace·DEV08 asset reload는 계속 미완료다.
+
+P02.2 adapter 다음 DEV06 작업은 기존 `scripts/smoke_project.py`의 opt-in `--view` 확장이다. 기본 CPU 18-check/package 검증 의미를 유지하고 빌드·GPU 초기화를 자동 강제하지 않는다. native viewer 모드는 같은 외부 임시 project·binary hash·유한 JSONL 읽기·cleanup을 재사용하며 protocol 2 manual submit→authority poll→Step→terminal→get/latest_frame과 report를 대조한다. 실제 표시의 확인은 window가 time limit으로 종료한 report의 presented identity와 state를 비교하고, 별도 짧은 Close 요청 사례로 정상 종료를 검사할 수 있다. latest_frame metadata만 보고 presented/capture 성공이라 판정하지 않는다. stderr는 임시 파일로 흘려 pipe deadlock을 피하고 모든 대기/child 종료에는 deadline을 둔다. 실제 GPU/display가 필요한 opt-in이며 CPU CI/package의 기존 smoke를 이 모드로 바꾸지 않는다. 이 문단은 착수 전 계약을 보존한 것이며 실제 native 결과는 아래 후속 결과와 worklog에서 구분한다.
+
 P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 typed 요청·owned 결과·clock·포화/종료를 먼저 고정했다. 계약 감사에서 Manual Step admission deadlock, client-held frame retention, 유한 replay의 의미를 보완한 뒤 Luna xhigh가 runtime/world를 구현했다. root는 backing 회수 수정 후 workspace CPU 157건을 통과했고 기존 control/managed/fixture window는 별도 회귀로 확인한다. actor panic 때 in-flight ticket이 남는 문제와 중복 ticket의 종료 통계도 regression으로 막았다.
 
 실제 공통화는 native service와 legacy mailbox/stop까지다. legacy count-only result guard/receiver, JSONL·visible project·MCP·SDK attach는 남아 있다. 따라서 DEV01 전체 완료나 제작 속도 배율을 주장하지 않는다. 새 frontend는 이 kernel을 사용하고 adapter-specific envelope·동기/비동기 수명만 추가하는 것이 다음 검증 대상이다.
 
 같은 작업에서 테스트의 정상 admission/frame 조회가 합법적인 Busy를 곧바로 실패 처리하는 경로를 점검했다. 정상 성공 검사는 기존 bounded retry helper(제출 2초·frame 조회 3초)를 사용하고 의도한 Busy/ResultCapacity/권한/clock 오류 검사는 그대로 실패를 대조한다. 실제 flaky 발생률을 측정한 것은 아니며 무조건 retry로 오류를 숨기지 않는다. 마지막 helper 수정은 test-only라 focused 23건을 재검증하고 GPU/package 검사를 불필요하게 반복하지 않았다.
 
-별도 [renderer resource 재사용](../03-architecture/renderer-resource-reuse.md) 문서는 로컬 source 감사에서 확인한 per-frame flatten/buffer 생성과 project entity별 mesh 복제를 없애기 위한 다음 계약이다. CPU mesh handle/instance 갱신·GPU cache·in-flight retirement를 함께 다루고 upload count/bytes로 검증한다. 현재는 미구현이며 cache 속도 향상이나 전체 DEV08 완료를 뜻하지 않는다.
+별도 [renderer resource 재사용](../03-architecture/renderer-resource-reuse.md) 문서는 로컬 source 감사에서 확인한 per-frame flatten/buffer 생성과 project entity별 mesh 복제를 없애기 위한 다음 계약이다. CPU mesh handle/instance 갱신·GPU cache·in-flight retirement를 함께 다루고 upload count/bytes로 검증한다. native packet library와 실제 project window의 reuse 검증을 추가했으며, asset cook/reload나 전체 DEV08 완료를 뜻하지 않는다.

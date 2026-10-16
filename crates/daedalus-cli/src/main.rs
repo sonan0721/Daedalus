@@ -10,6 +10,10 @@ use serde_json::json;
 mod control;
 mod project;
 #[cfg(feature = "window")]
+mod project_view;
+#[cfg(feature = "window")]
+mod project_view_control;
+#[cfg(feature = "window")]
 mod view;
 
 const MAX_CLI_ENTITIES: u32 = 16_384;
@@ -96,6 +100,9 @@ enum ProjectCommands {
     },
     /// Serve the project session through the bounded JSON Lines control protocol.
     Serve { directory: PathBuf },
+    /// Open the external project with a native window and optional protocol-2 control.
+    #[cfg(feature = "window")]
+    View(project_view::ProjectViewArgs),
     /// Render the external project's actual mesh and snapshot to PNG (requires `--features capture`).
     #[cfg(feature = "capture")]
     Capture {

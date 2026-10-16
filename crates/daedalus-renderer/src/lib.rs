@@ -6,6 +6,8 @@
 //! term and ACES-style tone mapping; shadows, transparency, texture sampling,
 //! temporal effects, and asset residency are future work.
 
+mod packet;
+mod packet_renderer;
 mod project;
 mod renderer;
 mod scene;
@@ -15,6 +17,11 @@ mod window;
 #[cfg(feature = "test-fixtures")]
 pub mod test_fixtures;
 
+pub use packet::{
+    MeshHandle, MeshResourceLimits, PacketRenderError, PacketRendererLimits,
+    ProjectRenderResources, RenderInstance, RenderInstanceId, RenderPacket,
+};
+pub use packet_renderer::{PacketRenderer, PacketResourceStats};
 pub use project::{
     ProjectProjection, ProjectProjectionError, ProjectProjectionLimits, project_snapshot,
     project_snapshot_with_limits,
@@ -25,7 +32,8 @@ pub use scene::{Camera, DirectionalLight, Material, Mesh, RenderObject, RenderSc
 pub use window::{
     FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervalStats, MAX_WINDOW_SCENE_GEOMETRY_BYTES,
     MAX_WINDOW_SCENE_INDICES, MAX_WINDOW_SCENE_OBJECTS, MAX_WINDOW_SCENE_VERTICES,
-    PresentationMetadata, WindowExitReason, WindowInput, WindowInputSink, WindowKeyCode,
-    WindowMessage, WindowOptions, WindowOutcome, WindowReport, run_windowed, run_windowed_reported,
-    window_input_channel,
+    PacketWindowError, PacketWindowMessage, PacketWindowOutcome, PresentationMetadata,
+    PresentedPacket, WindowExitReason, WindowInput, WindowInputSink, WindowKeyCode, WindowMessage,
+    WindowOptions, WindowOutcome, WindowReport, run_packet_windowed_reported, run_windowed,
+    run_windowed_reported, window_input_channel,
 };

@@ -102,8 +102,12 @@ P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 
 - [x] P02.1a: typed operation/result·attachment별 소유권·admission/outcome credit·clock mode의 public API 고정.
 - [x] P02.1b: 실제 ProjectSession의 generic host/client·manual/realtime·frame·stop/shutdown과 복수 attachment 검증.
 - [ ] P02.1c: 기존 fixture LiveSession의 공통 kernel 재사용·호환 검사, migration 중 임시 중복의 명시/제거.
-- [ ] P02.2a: 외부 project view와 같은 session의 JSONL 제어, 입력/창 종료/포화 실패 처리.
-- [ ] P02.2b: source generation별 CPU/GPU resource 재사용과 transform-only update 계측.
+- [x] P02.2a: 외부 project view와 같은 session의 JSONL 제어, 입력/창 종료/포화 실패 처리.
+- [x] P02.2a.1: shared source·실제 tick 0·같은 actor의 native 창/JSONL·실제 Mac 입력과 정상 종료·단위 수준 포화/실패 검증.
+- [x] P02.2a.2: 실제 process의 EOF 후 viewer 유지·의도적으로 막힌 stdout·manual F10/일반 입력과 reserved Step 경합 검증. native 22-check smoke와 별도 release physical 입력/report로 확인.
+- [x] P02.2b: 불변 loaded generation의 CPU/GPU resource 재사용과 transform-only update 계측. 실제 source watch/reload·asset generation 교체는 P01.2/P03로 남는다.
 - [ ] P02.3: live capture/조건/입력·실제 MCP·SDK attach·trace, 필요한 2D/UI/서버 연결까지 제품 인수.
 
-P02.1a/b의 native library 로컬 검증은 수정 후 workspace CPU 158건·check/fmt/strict Clippy와 별도 기존 JSONL·managed·fixture window 회귀로 확인한다. 첫 PR CI의 회수 경쟁 수정과 재검사는 worklog에 별도 기록하며, 실패한 head를 병합하지 않는다. `LiveSession`은 mailbox/stop만 공유하고 count-only result guard/receiver migration이 남아 P02.1c는 미체크다. 새 service에 CLI/window/MCP를 연결한 결과가 아니며 P02 전체/D1은 계속 열려 있다. [구체 근거](../06-worklog/2026-10-16-product-readiness-audit.md).
+P02.1a/b의 native library 로컬 검증은 수정 후 workspace CPU 158건·check/fmt/strict Clippy와 별도 기존 JSONL·managed·fixture window 회귀로 확인한다. 첫 PR CI의 회수 경쟁 수정과 재검사는 worklog에 별도 기록하며, 실패한 head를 병합하지 않는다. `LiveSession`은 mailbox/stop만 공유하고 count-only result guard/receiver migration이 남아 P02.1c는 미체크다. 그 158건은 frontend 연결 전 근거이며 P02.2의 실제 창/JSONL 검증은 worklog에 별도로 둔다. MCP/SDK·P02 전체/D1은 계속 열려 있다. [구체 근거](../06-worklog/2026-10-16-product-readiness-audit.md).
+
+P02 내부 의존성에서 P02.2의 native project 표시 경로는 P02.1a/b kernel을 사용한다. P02.1c의 나머지 legacy migration과 결과 소유권 정리는 P02 전체 exit 전까지 추적한다. P02.2의 resource library·window API를 먼저 고정하고 그 위에 CLI adapter를 연결하며, full P02 gate 전에 P03 전체 구현으로 건너뛰지 않는다.

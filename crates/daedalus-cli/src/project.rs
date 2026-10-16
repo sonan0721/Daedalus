@@ -59,6 +59,8 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
                 info,
             )?;
         }
+        #[cfg(feature = "window")]
+        ProjectCommands::View(args) => super::project_view::run(args)?,
         #[cfg(feature = "capture")]
         ProjectCommands::Capture {
             directory,

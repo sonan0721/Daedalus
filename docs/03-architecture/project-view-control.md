@@ -1,0 +1,81 @@
+# 외부 project 실행 창과 JSONL protocol 2
+
+상태: P02.2a native 창·protocol 2·process I/O와 실제 manual 입력 검증 · 2026-10-16
+
+## 목적과 범위
+
+외부 project를 한 번 읽고 같은 권한 session을 사람이 보는 창과 AI 제어가 함께 사용한다. 매 실행 경로마다 project를 복제하거나 fixture용 state/command 처리를 다시 만드는 반복을 줄이는 DEV01/DEV04/DEV05 작업이다. [공통 service](session-control-service.md)와 [packet renderer](renderer-resource-reuse.md)를 연결하는 CLI adapter이며 새 simulation/renderer를 만들지 않는다.
+
+`daedalus project view <directory>`는 기존 `window` feature 아래 추가한다. 기본 clock은 realtime이며 `--clock manual`로만 명시적 Step 모드를 선택한다. `--stdio-control`, 선택적인 `--controlled-entity <StableId>`, 크기·시간/프레임 제한·report 경로를 제공한다. 기존 top-level fixture `view`, protocol-1 `project serve`와 batch `project capture` 의미는 유지한다. 빈 project는 빈 scene이며 임의 terrain/entity를 주입하지 않는다. live capture·MCP·gameplay action·UI tree 지원은 이 단계의 기능이 아니다.
+
+## 불변 source와 실제 tick 0
+
+CLI가 `Arc<PreparedProject>` 한 개를 보유하고 additive `ProjectSession::new_shared`·`SessionControlService::start_shared`에 전달한다. 기존 by-value constructor는 Arc로 감싸 같은 구현에 위임한다. actor와 renderer 준비가 같은 불변 source를 공유하며 수십 MiB mesh를 복제하지 않는다. 현재 `ProjectSession::project() -> &PreparedProject`의 호출 형태·반환형은 유지하되 Arc 역참조 때문에 const 함수 표시는 제거한다. 아직 공개 release 전인 alpha API의 작은 source 호환 변경으로 기록한다.
+
+service startup 성공 전에 현재 ECS의 tick-0 snapshot/frame을 게시한다. 별도의 current-state extraction은 clock 증가·begin_tick·command 적용·gameplay schedule·revision 변경을 실행하지 않는다. 기존 tick snapshot 추출의 entity/retention/sequence 한도를 재사용하고 실패를 typed startup error로 돌려준다. direct ProjectSession 생성자가 즉시 snapshot을 만드는 것으로 의미를 몰래 바꾸지 않는다. Step/bootstrap tick으로 초기 표시를 위조하지 않는다.
+
+CLI는 bounded ProjectInfo page로 실제 stable ID→EntityHandle binding을 얻고 같은 source Arc로 ProjectRenderResources를 준비한다. binding/frame/result 대기에는 유한 deadline이 있고 Busy만 한도 안에서 재시도한다. source 파일 I/O·driver 초기화 전체에 강제 취소 보장을 더한 것은 아니다. renderer prepare/extract는 실제 frame session/sequence/generation/source digest를 보존한다. 이전 frame Arc를 불필요하게 보유하지 않는다. packet은 불변 geometry handle과 작은 instance 데이터만 보유한다.
+
+## 스레드·소유권과 표시
+
+OS/window는 main thread, service actor는 authority, presentation/control coordinator는 별도 worker다. coordinator가 service owner와 client·ticket book을 관리한다. window callback은 bounded input/message try-send·local camera·GPU 제출만 처리하며 actor·stdin/stdout·worker 완료를 기다리지 않는다. presentation은 최신 complete frame을 coalesce하고 bounded packet channel이 차면 최신 한 candidate만 유지한다. resource 오류는 Abort로 전파하며 오래된 identity를 새 화면처럼 표시하지 않는다.
+
+window와 packet backend는 기존 ApplicationHandler의 event/input/resize/camera/overlay/종료를 공유한다. 정상 `close`는 PacketWindowMessage::Close로 전달해 CloseRequested를 기록한다. window가 닫히면 coordinator stop→service pending 결과 마감→actor/presentation worker 회수→report 순서로 종료한다. window/render 실패는 nonzero exit다. report는 source/session, 실제 authority 종료 tick, accepted와 presented identity, 사용한 camera/physical 크기, 자원 통계와 control detach 사유를 구분한다. surface present 호출 성공은 GPU 완료/display scanout 증명이 아니다.
+
+## Protocol 2 envelope와 결과
+
+최신 frame의 존재를 actor 생존 확인으로 사용하지 않는다. actor가 멈춘 뒤에도 마지막 frame은 남을 수 있다. client의 nonblocking stop/admission 상태로 coordinator가 종료를 감지하고 window를 실패로 마감한다. 예상한 local window 종료와 engine failure를 구분하며, 최종 shutdown termination이 정상 StopRequested가 아니면 report를 남겨도 CLI exit는 nonzero다. 데이터 queue가 차도 producer disconnect의 fatal 처리로 실패를 숨기지 않는다.
+
+`--stdio-control`에서만 stdout은 UTF-8 JSONL 응답이다. 요청은 `protocol: 2`, ASCII 비제어 문자 1~128 byte `request_id`, 명시적 operation을 가진다. 알 수 없는 version/field/operation·잘못된 target·비유한 숫자는 구조화한 오류다. tick/revision/session/client/sequence/command ID와 handle의 정수 필드는 decimal string으로 encode/decode해 JavaScript 정밀도를 잃지 않는다. offset/limit/count/크기는 고정 상한 내 JSON number다. native와 wire DTO를 검증하되 protocol 1의 DTO를 바꾸지 않는다.
+
+envelope는 `{"protocol":2,"request_id":"q1","request":{"op":"submit","operation":{"op":"get_transform","target":{"stable_id":"entity.hero"}}}}` 형태다. handle target은 `{"handle":{"session":"1","index":"0","generation":"1"}}`이며 실제 조회한 값만 사용한다. poll/ack/forget은 `request`에 `op`와 `ticket`을 넣는다. 응답은 protocol/request_id/ok와 result 또는 code/message/details 오류를 가지며 startup 안내·diagnostics를 stdout에 섞지 않는다. 최종 schema는 CLI 구현과 conformance 시험으로 대조한다.
+
+| 요청 | 의미 |
+| --- | --- |
+| capabilities | 실제 protocol/clock·native/transport 한도·지원 operation, 미지원 live capture/MCP를 반환 |
+| submit | project_info/get_transform/list_transforms/set_transform/spawn_transform/status/step을 SessionOperation으로 제출하고 ticket receipt를 즉시 반환 |
+| poll | 이 attachment의 ticket에서 Queued/AuthorityAccepted/Terminal·native result/typed error 조회. terminal 실패를 적용 성공으로 표시하지 않음 |
+| ack | terminal ticket/result reader 해제. 아직 terminal이 아니면 오류 |
+| forget | 결과 소유권 포기. accepted mutation의 취소·rollback을 뜻하지 않음 |
+| latest_frame | 같은 service의 complete snapshot identity metadata. presented 화면이나 image/capture 결과가 아님 |
+| close | bounded window Close 요청 수락. 실제 종료는 최종 report/exit로 확인 |
+
+Close receipt는 queued/best-effort다. window 종료가 async stdout flush보다 빠르거나 stdout이 막히면 응답 line이 전달되기 전에 process가 끝날 수 있다. UI를 flush 대기로 붙잡지 않으며 실제 CloseRequested report와 정상 exit를 종료 확인으로 사용한다. 자동 검증도 close 응답 도착을 필수로 가정하지 않는다.
+
+첫 실제 realtime 창 시험에서 presentation queue가 차면 Close까지 QueueFull이 되는 경쟁을 확인했다. adapter는 Close를 하나의 bounded pending flag로 수락하고 새 submit을 거부한다. coordinator는 이 flag가 있으면 새 Present 생산을 멈추고 Close를 우선 try-send한다. 이미 찬 한 packet을 window가 drain하면 종료가 진행되며 protocol EOF/detach가 그 pending Close를 지우지 않는다. caller가 frame traffic과 경쟁하며 Close JSON을 반복 조립하지 않게 한다. window callback은 여전히 대기하지 않으며 native 결과/command queue의 capacity 실패를 숨겨 재시도하는 정책과 구분한다.
+
+target은 stable ID 또는 session/index/generation handle 중 정확히 하나다. command_id는 request_id와 별개이며 native replay/high-water 규칙을 그대로 적용한다. manual mutation은 AuthorityAccepted 후 Step이 있어야 적용되고 submit/poll이 Step을 숨겨 실행하지 않는다. Step은 reserved admission을 유지하며 realtime에서 거부한다. Busy는 finite retry가 가능하지만 QueueFull/ResultCapacity를 숨겨 반복하지 않는다.
+
+ticket token은 session/client/sequence를 포함하는 opaque string이며 이 coordinator의 book과 정확히 대조한다. 다른 client/session token은 거부한다. book은 native client 기본 최대 8개(일반 최대 7개+reserved Step 1개) 이내이며 일반 요청으로 Step 여유를 점유하지 않는다. ack/forget 때 receipt도 제거한다. retained submit request_id의 같은 payload 재전송은 같은 ticket을 반환하고 다른 payload는 collision 오류다. ack/forget 후 transport replay 보장은 끝나며 재실행 방지가 필요한 mutation은 명시 command_id를 사용한다. poll 등의 correlation ID를 무제한 ledger에 쌓지 않는다.
+
+## 유한 process I/O와 detach
+
+첫 portable CLI 구현은 bounded blocking stdin reader와 stdout writer를 각각 process-owned thread로 둔다. 입력은 newline 전에 64 KiB를 검사하고 초과·request queue 16개 포화 때 control을 detach한다. 응답은 serialize 중 1 MiB 상한을 적용하고 output queue는 4개다. writer의 현재 응답·coordinator의 한 encoding scratch·reader의 한 line은 별도 유한 메모리다. 이 transport 임시 메모리를 native 32 MiB result budget에 포함한 것처럼 표시하지 않는다. 결과가 wire 한도를 넘으면 response_too_large이며 전체 JSON allocation을 먼저 만들지 않는다.
+
+EOF·oversize·request/output queue 포화·broken stdout은 protocol만 detach하고 창을 유지한다. detach는 새 protocol admission을 막고 book/result 참조를 포기한다. 이미 actor에 수락한 command를 되돌리거나 미적용이라 단정하지 않는다. diagnostics는 stderr, 최종 근거는 report 파일에 남긴다.
+
+blocking reader/writer는 사용자 pipe가 닫히지 않으면 portable std API만으로 취소할 수 없다. 창 종료 시 두 thread를 join하지 않으며 service owner/Engine/packet/frame/result lease를 이들 thread에 넣지 않는다. thread는 bounded raw line/encoded response·I/O handle만 소유하고 CLI process return 때 종료된다. 이는 CLI process에 한정한 수명 계약이며 embedded library·서버의 cancellable transport로 재사용하지 않는다. actor/coordinator/presentation 등 엔진 worker는 함께 detached 처리하지 않는다. fully cancellable native transport는 후속 adapter다.
+
+## 입력 경계
+
+packet 창 title은 camera/Escape처럼 실제 공통 조작만 안내하고 fixture 전용 R regeneration이나 내부 bridge 용어를 노출하지 않는다. 최종 report는 key/pointer/wheel/focus/resize event·카메라·bounded frame interval과 packet resource의 count/bytes·depth 재생성을 남겨 반복 physical QA 때 별도 임시 계측을 추가하지 않게 한다. counter는 실제 사건을 센 값이며 screenshot이나 OS event 전달 전체를 대신하지 않는다.
+
+WASDQE·pointer camera와 Escape/resize/focus는 공통 window 경로다. controlled entity가 없으면 camera-only이며 첫 entity를 임의 선택하지 않는다. 지정 ID가 없으면 startup 오류다. 첫 entity 조작은 arrow press별 작은 translation 명령을 정상 query→expected revision→SetTransform으로 보낸다. bounded observer가 press/release를 drop할 수 있어 held movement의 권한 상태로 사용하지 않는다. 누락·충돌·포화는 진단하고 continuous action system 지원이라 표시하지 않는다. UI callback에서 재시도 대기하지 않는다.
+
+manual 모드의 F10은 명시 Step 1 요청이다. 자동 tick/implicit apply는 없고 realtime에서는 Step을 보내지 않는다. 입력 ticket은 별도 client로 per-client 한도를 분리하지만 session-wide reserved Step lane은 1개를 공유한다. 먼저 수락한 요청이 이를 점유하며 다른 client의 Step은 ResultCapacity를 명시 반환한다. F10 결과는 즉시 관찰·회수하고 protocol terminal Step은 사용자의 ack/forget까지 유효하다. UI callback에서 lane을 기다리거나 reserve를 몰래 추가하지 않는다. 이 제한된 조작은 연결 검증이며 정식 gameplay action·AI device injection은 P02.3 후속이다.
+
+## 검증과 완료 조건
+
+실제 2026-10-16 Mac 검증은 workspace CPU 188건·Python 52건·opt-in native smoke 22개를 통과했다. EOF/blocked stdout은 time-limit까지 실제 frame과 정상 shutdown을 확인했고, 별도 release physical 입력은 retained protocol Step과 F10의 경합·ACK 후 진행을 확인했다. initial accepted metadata 회귀도 수정했다. 정확한 binary hash·count·패키지 경계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
+
+추가 native process 검증은 같은 smoke의 opt-in 모드에서 수행한다. EOF case는 stdin을 닫아도 time-limit까지 실제 frame을 제출해야 한다. blocked-stdout case는 POSIX pipe를 bounded nonblocking write로 미리 채운 뒤 blocking stdout으로 child에 전달하고 읽지 않는다. 작은 capabilities 응답 하나의 writer가 막힌 동안에도 window가 실제 frame을 제출하고 stdin이 열린 채 time-limit/정상 shutdown으로 끝나야 한다. pipe fill·child wait·FD cleanup은 유한하며 setup 불가를 통과로 위조하지 않는다. raw IO thread만 process 수명에 남기는 계약을 실제 OS pipe로 검증하는 시험이지 renderer frame-rate benchmark가 아니다.
+
+Luna xhigh가 runtime shared source/tick-0와 CLI adapter/test를 작성하며 renderer 담당자와 파일 소유권·API·단일 Cargo.lock/target 소유를 맞춘다. 새 의존성 없이 기존 std/serde 경로로 시작한다. focused 검사 후 stable source에서 workspace·managed·패키지 회귀를 수행한다.
+
+- 실제 tick 0: authored transform/handle/source 동일, schedule/clock/revision/queued command 미실행, 첫 Step은 tick 1.
+- source Arc 공유, 기존 by-value/프로토콜1/fixture 동작 유지, startup 실패·snapshot/entity 한도.
+- 같은 process의 submit→poll authority→manual Step→terminal→get/latest_frame 대조. wrong-session/revision/clock/version·중복 receipt·ack/forget·queue/result/line/output 한도.
+- EOF/blocked stdin/blocked stdout·invalid input·window Close·renderer/startup 실패가 UI/엔진 종료를 멈추지 않음. 실제 child는 finite timeout/cleanup 적용.
+- 실제 외부 project Metal 창의 authority 변경·accepted/presented identity·resource write 계측. native key/focus/resize/close와 state 대조는 CPU 시험과 별도.
+
+live capture·MCP/SDK·UI/action/reload/server 등 P02 전체 인수는 열려 있다. 새 창/JSONL 연결만으로 P02/D1 또는 3D·2D 게임 목표를 완료 처리하지 않는다.

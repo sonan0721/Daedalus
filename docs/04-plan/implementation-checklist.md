@@ -139,6 +139,7 @@ P03.1 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있
 - [ ] P03.3b/c: [세대 전환 초안](../03-architecture/project-asset-activation.md)의 topology-preserving staged commit·actual presented generation·old audio voice/bank·GPU/CPU retirement와 실행 중 실패/취소·정상 세대 유지. 선행 a를 인수했고 source gap을 확인했다. payload lease·aggregate 수치·public API/consumer handshake를 리뷰한 뒤 구현한다.
 - [x] P03.3b.1 로컬 선행 검증: [authored 호환성 계약](../03-architecture/asset-replacement-compatibility.md)의 공통 content 비교기·deterministic bounded 진단·source 변경 허용/scene state 변경 거부. focused10/content84·strict Clippy·content Wasm/fmt·조정자 source review. b의 선행 CPU 작업이며 실제 activation/후속 통합·PR 인수는 아님.
 - [ ] P03.3b.2: [native headless CPU 세대 계약](../03-architecture/headless-asset-generation.md)의 consuming owner·같은 Engine Stage/Commit·공통 replay·worker final drop/합산 장부·같은 snapshot의 새 frame publication. 창/audio 전환은 후속 consumer 게이트.
+- [ ] P03.3b.3: [render staged 세대 상세 초안](../03-architecture/staged-render-asset-generation.md)의 같은 device 제한 업로드·old-ready/staged pin·consumer ready/actor commit·실제 present ACK·prepared CPU/GPU 회수. b.2 인수 후 API/예산 동결을 마쳐야 구현 착수.
 - [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.
 
 전체 P03/D1은 최종 제작 경로를 인수할 때만 통과한다. P05/P07/P09와 함께 필요한 2D/audio/animation 소비를 검증하며 P번호를 별도 숫자 순서 phase로 해석하지 않는다.

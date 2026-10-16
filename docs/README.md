@@ -59,6 +59,7 @@
 | [에셋 세대 전환·회수](03-architecture/project-asset-activation.md) | P03.3b/c의 live state 보존·consumer staging·actor commit·실제 표시·old audio/GPU 회수를 동결하기 위한 상세 초안 |
 | [에셋 교체 authored 호환성](03-architecture/asset-replacement-compatibility.md) | P03.3b.1의 단일 content 비교기·허용 field/revision/order·유한 오류/임시 index를 먼저 동결해 consumer별 중복 판정을 방지 |
 | [Headless CPU 세대 commit](03-architecture/headless-asset-generation.md) | P03.3b.2의 동일 authority·Stage/Commit/replay·초기 source consume·worker 회수·frame identity를 장치 연결 전에 검증 |
+| [Render 세대 staged 준비·표시](03-architecture/staged-render-asset-generation.md) | P03.3b.3의 제한된 GPU 업로드·last-good pin·native lease/CPU 회수·실제 present ACK를 동결하기 위한 source 기반 상세 초안 |
 | [모델·텍스처 실행 계약](03-architecture/model-texture-runtime.md) | P03.2a의 실제 project binding·공통 창/capture·cache pin 해제·GPU 한도/색/수명·회귀 기준 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |

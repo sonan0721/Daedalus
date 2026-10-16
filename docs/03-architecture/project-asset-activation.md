@@ -10,6 +10,8 @@
 
 현재 구체 구현 범위는 [authored 비교기](asset-replacement-compatibility.md)와 그 다음 [headless CPU 세대 계약](headless-asset-generation.md)이다. headless의 같은 Engine commit/worker 회수를 먼저 검증하고, 실제 renderer/audio consumer의 장치 준비·표시·voice 수명을 이어서 연결한다. 아래 render/audio 상세 미결을 headless factory가 지원한 것으로 우회하지 않는다.
 
+renderer의 source 확인·작업 단위·pin/종료 owner graph와 미결 API는 [b.3 상세 초안](staged-render-asset-generation.md)에 모았다. b.2 인수와 상세 동결 전에는 renderer/consumer 코드를 배정하지 않는다.
+
 ## 확인한 현재 경계
 
 | source | 현재 동작 | 필요한 변경 |

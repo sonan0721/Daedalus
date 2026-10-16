@@ -110,4 +110,18 @@ default-feature focused attempt01은 gate release/wait helper가 audio feature�
 
 작업자는 runtime 다섯 파일의 scoped rustfmt/diff 뒤 source를 잠시 동결했다. 이 동작 가능한 일반 경로와 adapter/helper·검증 기록을 중간 feature commit으로 남기고 lifecycle/stress를 이어 간다. b.2 체크/PR/main 인수나 전체 목표 완료를 뜻하지 않는다. renderer/audio 세대 전환·SDK/MCP/제품 인수는 그대로 남는다.
 
+중간 feature source는 `66f190c`로 commit/push했고 clean tree를 확인한 뒤 runtime 담당에게 edit/Cargo lease를 돌려줬다. 별도 renderer GPU 상세 조사 두 명은 read-only로 진행했다. [b.3 상세 초안](../03-architecture/staged-render-asset-generation.md)은 whole-record/texture-row upload 단위·old-ready/staged pin·source token과 별도 CPU 복사본·final window outcome을 유지한 join의 순환 대기 위험을 정리한다. 공통 planner/ledger를 확장하고 새 renderer를 만들지 않기 위한 문서다. API/수치와 b.2 predecessor 인수 전이라 source를 배정하지 않는다. S87 공식 자료 확인으로 auto-trait-only Arc에 공유 marker trait가 문법상 필수라는 리뷰 가정도 바로잡았다. pinned1.94 구현 검증은 후속이다.
+
+## b.2 lifecycle 집중 검증 계속
+
+실제 worker가 current 확인과 StageResult 계산을 마친 뒤 send 직전에 test-only gate로 멈추게 했다. Cancel을 가로지른 Ready가 다시 staged되지 않고, 새 Prepare를 가로지른 incompatible 오류가 최신 failure를 덮지 않으며 epoch2가 실제 CpuPrepared/Staged에 도달한다. attempt01 delayed2/2·0.03초, raw `p03-generation-focused-lifecycle-luna-attempt01.log` SHA-256 `6a8043bdc4281cd941af1d50b277b0b08833d54488d932b8e56744b7d19890b0`다. 고정 Staged 응답이나 가짜 worker로 대체하지 않았다.
+
+Commit source/counter 효과 뒤 result cache 전에 actor panic을 넣은 실제 service test는 ticket의 해당 caller OutcomeUnknown·worker cleanup 완료·반복 ActorFailed를 확인했다. attempt02의1/1·0.01초, raw SHA-256 `679b6edc9e1e5f9033402b3a9044076df6318e06469e8013af488f35bf01ac52`다. applied 효과를 unapplied로 보고하거나 rollback하지 않는다.
+
+낮춘 catalog ceiling을 initial cooked bytes의 정확한2배로 둔 test는 pending promotion 동안 Prepare Busy→promotion 뒤 held old source의 retired charge 때문에 Capacity→reader Arc release/worker 실제 회수 뒤 같은 Prepare ID의 epoch2 성공을 확인했다. attempt03은 이 test의 borrowed Result assertion 두 곳 타입 불일치로 compile 실패했다. assertion 형식을 수정한 attempt04는1/1·0.04초로 통과했고 raw SHA-256 `8a669236b893b90893cc5faf2399c6d902df289915d7ece0611ca7c58dfb6562`다. 모든 attempt raw를 보존하며 전체 post-edit/default/CI 통과로 확대하지 않는다.
+
+activation consuming owner 자체의 worker-panic test는 attempt05에서 종료한 actor에 Status를 다시 제출하려다 Stopped로 실패했다. attempt06은 actor 종료가 반드시 worker-panic EngineError라고 가정해 실패했다. owner try_shutdown의 Stop 요청과 actor의 panic 감지 중 먼저 진행한 경로에 따라 StopRequested도 정상이다. attempt07은 통과했으나 반대 순서를 가정한 assertion이 남은 것을 root가 발견했다. 두 정당한 termination만 허용하고 EngineError의 원인 문자열을 확인하는 attempt09는1/1·0.05초로 통과했다. 외부 owner의 오류는 어느 순서든 반복 WorkerPanicked를 유지한다. 이들은 test 관찰 조건의 수정이며 임의 termination을 허용해 실패를 숨기지 않는다.
+
+owner Drop을 import gate 동안 실행한 attempt08도1/1로 통과했다. Drop은 join하지 않고 반환했고 실제 worker가 gate/정리를 마치기 전 cache lock은 Busy, 이후 reopen은 성공했다. raw SHA-256은 `ae5fd7880cf68bb51336641936e1f11fb870c3c13f2c848b293868e24af2b0b8`다. 이어 runtime default84+integration2·all-feature96+integration2·strict all-target Clippy가 통과했지만 held frame/held source의 종료 검사를 추가 중이므로 최종 source 인수가 아니다. raw는 `p03-generation-runtime-{default,allfeatures,clippy}-luna-attemptNN.log`다.
+
 audio read-only 리뷰도 마쳤다. pinned Kira0.12.5의 render-owned sound가 실제 Frame Arc를 잡고 있고 handle reap은 이를 증명하지 않는다. weak observer만으로 callback의 마지막 큰 free를 막을 수 없어 실제 leaf 공유 store·generation alias/voice·cleanup strong sentinel과 정확한 owner baseline이 필요하다. project-audio/service source map은 명세에 반영했으며 audio 새 API·multibank/실제 회수는 아직 구현하지 않았다. 리뷰 담당은 source 수정과 tests를 실행하지 않았다.

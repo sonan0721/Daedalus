@@ -17,6 +17,7 @@ from collect_cli_notices import (
     SPDX_LICENSE_REPOSITORY,
     NoticeCollectionError,
     _validate_package_path_in_vcs,
+    _spdx_license_ids,
     collect_cli_notices,
 )
 
@@ -76,7 +77,13 @@ class NoticeCollectorTests(unittest.TestCase):
             "manifest_path": str(self.cli_manifest),
         }
         packages = [root_package]
-        nodes = [{"id": root_id, "features": ["capture", "default", "window"], "deps": []}]
+        nodes = [
+            {
+                "id": root_id,
+                "features": ["audio", "capture", "default", "native-audio", "window"],
+                "deps": [],
+            }
+        ]
         for name in ("foo_bar", "foo-bar", "unreachable"):
             package_id = f"registry+https://github.com/rust-lang/crates.io-index#{name}@1.0.0"
             package = {
@@ -119,7 +126,10 @@ class NoticeCollectorTests(unittest.TestCase):
         inventory = json.loads(artifacts.inventory_path.read_text(encoding="utf-8"))
         self.assertEqual(inventory["dependency_count"], 2)
         self.assertEqual(inventory["target_triple"], TARGET)
-        self.assertEqual(inventory["requested_features"], ["daedalus-cli/window"])
+        self.assertEqual(
+            inventory["requested_features"],
+            ["daedalus-cli/native-audio", "daedalus-cli/window"],
+        )
         self.assertIn("conservative-workspace-feature-unified-superset", inventory["feature_resolution"])
         dependencies = inventory["dependencies"]
         self.assertEqual({item["name"] for item in dependencies}, {"foo_bar", "foo-bar"})
@@ -291,15 +301,16 @@ class NoticeCollectorTests(unittest.TestCase):
         with self.assertRaisesRegex(NoticeCollectionError, "escapes its directory"):
             self.collect(metadata)
 
-    def test_declared_spdx_reference_includes_labeled_canonical_text(self) -> None:
+    def test_triple_spdx_reference_is_allowed_and_unknown_identifier_stays_rejected(self) -> None:
         metadata = self.metadata(("foo_bar",))
         package = next(item for item in metadata["packages"] if item["name"] == "foo_bar")
         package["repository"] = "https://github.com/example/foo_bar"
+        package["license"] = "Zlib OR Apache-2.0 OR MIT"
         crate_root = self.package_roots["foo_bar"]
         (crate_root / "LICENSE-MIT").unlink()
         commit = "2" * 40
         declaration = (
-            '[package]\nname = "foo_bar"\nversion = "1.0.0"\nlicense = "MIT OR Apache-2.0"\n'
+            '[package]\nname = "foo_bar"\nversion = "1.0.0"\nlicense = "Zlib OR Apache-2.0 OR MIT"\n'
         ).encode()
         (crate_root / ".cargo_vcs_info.json").write_text(
             json.dumps({"git": {"sha1": commit}, "path_in_vcs": ""}),
@@ -307,12 +318,14 @@ class NoticeCollectorTests(unittest.TestCase):
         )
         spdx_text = b"Canonical SPDX MIT reference text.\n"
         apache_text = b"Canonical SPDX Apache reference text.\n"
+        zlib_text = b"Canonical SPDX Zlib reference text.\n"
         override_root = self.root / "third_party" / "license-overrides"
         (override_root / "evidence").mkdir(parents=True)
         (override_root / "references").mkdir()
         (override_root / "evidence" / "Cargo.toml").write_bytes(declaration)
         (override_root / "references" / "MIT.txt").write_bytes(spdx_text)
         (override_root / "references" / "Apache-2.0.txt").write_bytes(apache_text)
+        (override_root / "references" / "Zlib.txt").write_bytes(zlib_text)
         package_source = "https://github.com/example/foo_bar"
         spdx_source = SPDX_LICENSE_REPOSITORY
         manifest = {
@@ -321,7 +334,7 @@ class NoticeCollectorTests(unittest.TestCase):
                 {
                     "name": "foo_bar",
                     "version": "1.0.0",
-                    "license_expression": "MIT OR Apache-2.0",
+                    "license_expression": "Zlib OR Apache-2.0 OR MIT",
                     "source_checksum_sha256": "a" * 64,
                     "source_repository": package_source,
                     "source_commit": commit,
@@ -350,6 +363,12 @@ class NoticeCollectorTests(unittest.TestCase):
                                 "source_url": f"https://raw.githubusercontent.com/spdx/license-list-data/{SPDX_LICENSE_COMMIT}/text/Apache-2.0.txt",
                                 "sha256": hashlib.sha256(apache_text).hexdigest(),
                             },
+                            {
+                                "path": "references/Zlib.txt",
+                                "upstream_path": "text/Zlib.txt",
+                                "source_url": f"https://raw.githubusercontent.com/spdx/license-list-data/{SPDX_LICENSE_COMMIT}/text/Zlib.txt",
+                                "sha256": hashlib.sha256(zlib_text).hexdigest(),
+                            },
                         ],
                     },
                 }
@@ -362,10 +381,18 @@ class NoticeCollectorTests(unittest.TestCase):
         self.assertEqual(inventory["missing_license_text_count"], 0)
         self.assertEqual(inventory["reference_only_license_count"], 1)
         self.assertEqual(dependency["license_evidence"]["kind"], "declared_spdx_reference")
-        self.assertEqual({item["provenance"]["spdx_id"] for item in dependency["reference_texts"]}, {"MIT", "Apache-2.0"})
+        self.assertEqual(
+            {item["provenance"]["spdx_id"] for item in dependency["reference_texts"]},
+            {"MIT", "Apache-2.0", "Zlib"},
+        )
         notices = artifacts.notices_path.read_text(encoding="utf-8")
         self.assertIn("Canonical SPDX reference text", notices)
         self.assertIn("not the crate's original license file", notices)
+        with self.assertRaisesRegex(
+            NoticeCollectionError,
+            "supports only MIT, Apache-2.0, CC0-1.0, and Zlib expressions",
+        ):
+            _spdx_license_ids("MIT OR Apache-2.0 OR Zlib OR Unknown-License-1.0")
 
     def test_license_file_size_limit_is_enforced(self) -> None:
         (self.package_roots["foo_bar"] / "LICENSE-MIT").write_bytes(

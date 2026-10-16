@@ -1,7 +1,7 @@
-//! Bounded protocol-2 adapter for one live project view session.
+//! Renderer-neutral bounded protocol-2 adapter for one live project session.
 //!
-//! The transport workers own raw bytes and process I/O only. The window/control
-//! coordinator owns this adapter, its native client, and every retained ticket.
+//! The transport workers own raw bytes and process I/O only. The session owner
+//! controls Close handling; this adapter owns the client and retained tickets.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
@@ -12,12 +12,16 @@ use std::thread;
 
 use daedalus_content::scene::StableId;
 use daedalus_core::{CommandId, EntityHandle, Revision, SessionId, Tick, Transform};
-use daedalus_renderer::PacketWindowMessage;
 use daedalus_runtime::{
     AuthorityAdmission, FrameReadError, ProjectInfoPage, RequestAckError, RequestPhase,
     RequestProgress, RequestReadError, RequestTicket, SessionClockMode, SessionControlClient,
     SessionControlLimits, SessionOperation, SessionRequestError, SessionRequestResult,
     SessionStatus, SessionSubmitError,
+};
+#[cfg(feature = "audio")]
+use daedalus_runtime::{
+    OfflineAudioSummary, SessionAudioBackend, SessionAudioCommandOutcome, SessionAudioOperation,
+    SessionAudioResult, SessionAudioVoiceId, SessionAudioVoiceState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +32,29 @@ const MAX_PROTOCOL_NORMAL_TICKETS: usize = 7;
 const MAX_PROTOCOL_QUEUE: usize = 16;
 const MAX_PROTOCOL_OUTPUT_QUEUE: usize = 4;
 const PROTOCOL: u32 = 2;
+const BASE_OPERATIONS: [&str; 7] = [
+    "project_info",
+    "get_transform",
+    "list_transforms",
+    "set_transform",
+    "spawn_transform",
+    "step",
+    "status",
+];
+const AUDIO_OPERATIONS: [&str; 12] = [
+    "project_info",
+    "get_transform",
+    "list_transforms",
+    "set_transform",
+    "spawn_transform",
+    "step",
+    "status",
+    "audio_status",
+    "audio_clips",
+    "audio_voice",
+    "audio_voices",
+    "audio_command",
+];
 
 const TRANSPORT_RUNNING: u8 = 0;
 const TRANSPORT_EOF: u8 = 1;
@@ -50,15 +77,17 @@ impl StdioTransport {
         let (output, output_rx) = mpsc::sync_channel(MAX_PROTOCOL_OUTPUT_QUEUE);
         let state = Arc::new(AtomicU8::new(TRANSPORT_RUNNING));
         let reader_state = Arc::clone(&state);
-        thread::Builder::new()
-            .name("daedalus-project-view-stdin".into())
-            .spawn(move || read_jsonl(std::io::stdin(), request_tx, reader_state))?;
-
         let writer_failed = Arc::new(AtomicU8::new(0));
         let writer_status = Arc::clone(&writer_failed);
         thread::Builder::new()
             .name("daedalus-project-view-stdout".into())
             .spawn(move || write_responses(std::io::stdout(), output_rx, writer_status))?;
+
+        // Spawn the potentially blocking stdin worker last. If its spawn fails, dropping the
+        // only output sender disconnects the already-started writer so it can exit on its own.
+        thread::Builder::new()
+            .name("daedalus-project-view-stdin".into())
+            .spawn(move || read_jsonl(std::io::stdin(), request_tx, reader_state))?;
 
         Ok(Self {
             requests,
@@ -243,6 +272,25 @@ enum WireOperation {
         count: u32,
     },
     Status,
+    AudioStatus,
+    AudioClips {
+        #[serde(default)]
+        offset: usize,
+        limit: Option<usize>,
+    },
+    AudioVoice {
+        voice: WireVoiceId,
+    },
+    AudioVoices {
+        #[serde(default)]
+        offset: usize,
+        limit: Option<usize>,
+    },
+    AudioCommand {
+        #[serde(default)]
+        command_id: Option<DecimalU128>,
+        mutation: WireAudioMutation,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -260,8 +308,40 @@ struct WireHandle {
     generation: DecimalU32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireVoiceId {
+    session: DecimalU64,
+    sequence: DecimalU64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum WireAudioMutation {
+    Play {
+        clip: StableId,
+        volume: f32,
+        pan: f32,
+        looping: bool,
+    },
+    Stop {
+        voice: WireVoiceId,
+    },
+    SetVolume {
+        voice: WireVoiceId,
+        volume: f32,
+    },
+    SetPan {
+        voice: WireVoiceId,
+        pan: f32,
+    },
+    RenderOffline {
+        frames: usize,
+    },
+}
+
 impl WireOperation {
-    fn native(&self) -> Result<SessionOperation, ProtocolError> {
+    fn native(&self, audio_enabled: bool) -> Result<SessionOperation, ProtocolError> {
         let operation = match self {
             Self::ProjectInfo { offset, limit } => {
                 if *offset > 16_384 || limit.is_some_and(|value| !(1..=1024).contains(&value)) {
@@ -332,8 +412,155 @@ impl WireOperation {
                 ));
             }
             Self::Status => SessionOperation::Status,
+            Self::AudioStatus => audio_operation(audio_enabled, AudioWireOperation::Status)?,
+            Self::AudioClips { offset, limit } => audio_operation(
+                audio_enabled,
+                AudioWireOperation::Clips {
+                    offset: *offset,
+                    limit: *limit,
+                },
+            )?,
+            Self::AudioVoice { voice } => {
+                audio_operation(audio_enabled, AudioWireOperation::Voice { voice: *voice })?
+            }
+            Self::AudioVoices { offset, limit } => audio_operation(
+                audio_enabled,
+                AudioWireOperation::Voices {
+                    offset: *offset,
+                    limit: *limit,
+                },
+            )?,
+            Self::AudioCommand {
+                command_id,
+                mutation,
+            } => audio_operation(
+                audio_enabled,
+                AudioWireOperation::Command {
+                    command_id: *command_id,
+                    mutation: mutation.clone(),
+                },
+            )?,
         };
         Ok(operation)
+    }
+}
+
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
+enum AudioWireOperation {
+    Status,
+    Clips {
+        offset: usize,
+        limit: Option<usize>,
+    },
+    Voice {
+        voice: WireVoiceId,
+    },
+    Voices {
+        offset: usize,
+        limit: Option<usize>,
+    },
+    Command {
+        command_id: Option<DecimalU128>,
+        mutation: WireAudioMutation,
+    },
+}
+
+fn audio_operation(
+    audio_enabled: bool,
+    operation: AudioWireOperation,
+) -> Result<SessionOperation, ProtocolError> {
+    if !audio_enabled {
+        return Err(ProtocolError::new(
+            "audio_unavailable",
+            "audio operations require an audio-enabled session",
+        ));
+    }
+    #[cfg(feature = "audio")]
+    {
+        let native_voice = |voice: WireVoiceId| {
+            SessionAudioVoiceId::from_parts(SessionId::from_raw(voice.session.0), voice.sequence.0)
+        };
+        let operation = match operation {
+            AudioWireOperation::Status => SessionAudioOperation::Status,
+            AudioWireOperation::Clips { offset, limit } => {
+                if limit.is_some_and(|limit| limit == 0 || limit > 1_024) {
+                    return Err(ProtocolError::new(
+                        "invalid_request",
+                        "audio clip page limit must be in 1..=1024",
+                    ));
+                }
+                SessionAudioOperation::Clips { offset, limit }
+            }
+            AudioWireOperation::Voice { voice } => SessionAudioOperation::Voice {
+                voice: native_voice(voice),
+            },
+            AudioWireOperation::Voices { offset, limit } => {
+                if limit.is_some_and(|limit| limit == 0 || limit > 1_024) {
+                    return Err(ProtocolError::new(
+                        "invalid_request",
+                        "audio voice page limit must be in 1..=1024",
+                    ));
+                }
+                SessionAudioOperation::Voices { offset, limit }
+            }
+            AudioWireOperation::Command {
+                command_id,
+                mutation,
+            } => {
+                let mutation = match mutation {
+                    WireAudioMutation::Play {
+                        clip,
+                        volume,
+                        pan,
+                        looping,
+                    } => daedalus_runtime::SessionAudioMutation::Play {
+                        clip,
+                        volume,
+                        pan,
+                        looping,
+                    },
+                    WireAudioMutation::Stop { voice } => {
+                        daedalus_runtime::SessionAudioMutation::Stop {
+                            voice: native_voice(voice),
+                        }
+                    }
+                    WireAudioMutation::SetVolume { voice, volume } => {
+                        daedalus_runtime::SessionAudioMutation::SetVolume {
+                            voice: native_voice(voice),
+                            volume,
+                        }
+                    }
+                    WireAudioMutation::SetPan { voice, pan } => {
+                        daedalus_runtime::SessionAudioMutation::SetPan {
+                            voice: native_voice(voice),
+                            pan,
+                        }
+                    }
+                    WireAudioMutation::RenderOffline { frames } => {
+                        if !(1..=4_096).contains(&frames) {
+                            return Err(ProtocolError::new(
+                                "invalid_request",
+                                "offline render frames must be in 1..=4096",
+                            ));
+                        }
+                        daedalus_runtime::SessionAudioMutation::RenderOffline { frames }
+                    }
+                };
+                SessionAudioOperation::Command {
+                    command_id: command_id.map(|id| CommandId::from_raw(id.0)),
+                    mutation,
+                }
+            }
+        };
+        Ok(SessionOperation::Audio(operation))
+    }
+    #[cfg(not(feature = "audio"))]
+    {
+        let _ = operation;
+        Err(ProtocolError::new(
+            "audio_unavailable",
+            "audio support is not compiled into this CLI",
+        ))
     }
 }
 
@@ -409,7 +636,7 @@ struct EnvelopeOut {
 enum WireResult {
     Capabilities(Capabilities),
     Submitted(Submitted),
-    Poll(PollResponse),
+    Poll(Box<PollResponse>),
     Acked,
     Forgotten,
     LatestFrame(LatestFrame),
@@ -419,7 +646,8 @@ enum WireResult {
 #[derive(Serialize)]
 struct Capabilities {
     clock: &'static str,
-    operations: [&'static str; 7],
+    operations: &'static [&'static str],
+    audio_enabled: bool,
     max_line_bytes: usize,
     max_response_bytes: usize,
     max_retained_tickets: usize,
@@ -478,6 +706,8 @@ enum OperationResult {
     Command(WireCommandResult),
     Step(Vec<StepOut>),
     Status(StatusOut),
+    #[cfg(feature = "audio")]
+    Audio(AudioResultOut),
 }
 
 #[derive(Serialize)]
@@ -604,6 +834,130 @@ struct StatusOut {
     stopping: bool,
 }
 
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum AudioResultOut {
+    Status(AudioStatusOut),
+    Clips(AudioClipPageOut),
+    Voice(AudioVoiceOut),
+    Voices(AudioVoicePageOut),
+    Command(AudioCommandOut),
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum AudioBackendOut {
+    Offline { sample_rate: u32 },
+    Native,
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+struct AudioStatusOut {
+    session: DecimalU64,
+    backend: AudioBackendOut,
+    alias_count: usize,
+    unique_clip_count: usize,
+    converted_clip_count: usize,
+    converted_frame_bytes: DecimalU64,
+    active_voice_count: usize,
+    offline_progressed_frames: DecimalU64,
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+struct AudioClipOut {
+    asset_id: String,
+    leaf_key: String,
+    sample_rate: u32,
+    channels: u16,
+    frames: DecimalU64,
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+struct AudioClipPageOut {
+    observed_tick: DecimalU64,
+    total: usize,
+    offset: usize,
+    limit: usize,
+    next_offset: Option<usize>,
+    clips: Vec<AudioClipOut>,
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+struct AudioVoiceOut {
+    voice: WireVoiceId,
+    state: &'static str,
+    clip_id: Option<String>,
+    requested_volume: Option<f32>,
+    requested_pan: Option<f32>,
+    looping: Option<bool>,
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+struct AudioVoicePageOut {
+    observed_tick: DecimalU64,
+    total: usize,
+    offset: usize,
+    limit: usize,
+    next_offset: Option<usize>,
+    voices: Vec<AudioVoiceOut>,
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+struct AudioCommandOut {
+    command_id: DecimalU128,
+    observed_tick: DecimalU64,
+    outcome: AudioCommandTerminalOut,
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum AudioCommandTerminalOut {
+    Played {
+        voice: WireVoiceId,
+    },
+    StopRequested {
+        voice: WireVoiceId,
+    },
+    VolumeSet {
+        voice: WireVoiceId,
+        requested_volume: f32,
+    },
+    PanSet {
+        voice: WireVoiceId,
+        requested_pan: f32,
+    },
+    Offline(OfflineAudioSummaryOut),
+    Error {
+        code: &'static str,
+        message: &'static str,
+    },
+}
+
+#[cfg(feature = "audio")]
+#[derive(Serialize)]
+struct OfflineAudioSummaryOut {
+    frames: usize,
+    sample_rate: u32,
+    channels: u16,
+    peak: f32,
+    rms: f32,
+    left_peak: f32,
+    left_rms: f32,
+    right_peak: f32,
+    right_rms: f32,
+    nonzero_samples: usize,
+    cumulative_frames: DecimalU64,
+}
+
 #[derive(Serialize)]
 struct LatestFrame {
     session: DecimalU64,
@@ -685,9 +1039,9 @@ struct TicketEntry {
 pub(crate) struct ProtocolController {
     transport: StdioTransport,
     client: SessionControlClient,
-    window: SyncSender<PacketWindowMessage>,
     clock: SessionClockMode,
     native_limits: SessionControlLimits,
+    audio_enabled: bool,
     tickets: HashMap<String, TicketEntry>,
     submit_ids: HashMap<String, String>,
     detached_reason: Option<String>,
@@ -695,23 +1049,22 @@ pub(crate) struct ProtocolController {
     duplicate_submissions: u64,
     errors: u64,
     closing: bool,
-    close_pending: bool,
 }
 
 impl ProtocolController {
     pub(crate) fn new(
         transport: StdioTransport,
         client: SessionControlClient,
-        window: SyncSender<PacketWindowMessage>,
         clock: SessionClockMode,
         native_limits: SessionControlLimits,
+        audio_enabled: bool,
     ) -> Self {
         Self {
             transport,
             client,
-            window,
             clock,
             native_limits,
+            audio_enabled,
             tickets: HashMap::new(),
             submit_ids: HashMap::new(),
             detached_reason: None,
@@ -719,13 +1072,11 @@ impl ProtocolController {
             duplicate_submissions: 0,
             errors: 0,
             closing: false,
-            close_pending: false,
         }
     }
 
     /// Process a bounded batch. No blocking IO, runtime wait, or renderer callback occurs here.
     pub(crate) fn pump(&mut self) {
-        self.flush_pending_close();
         if self.detached_reason.is_some() {
             return;
         }
@@ -743,7 +1094,6 @@ impl ProtocolController {
             if !response.ok {
                 self.errors = self.errors.saturating_add(1);
             }
-            self.flush_pending_close();
             let encoded = encode_response(&request_id, response);
             match encoded {
                 Ok(bytes) => match self.transport.send(bytes) {
@@ -780,32 +1130,28 @@ impl ProtocolController {
         {
             self.detach(reason);
         }
-        self.flush_pending_close();
     }
 
     pub(crate) fn closing(&self) -> bool {
         self.closing
     }
 
-    fn flush_pending_close(&mut self) {
-        if !self.close_pending {
-            return;
-        }
-        match self.window.try_send(PacketWindowMessage::Close) {
-            Ok(()) | Err(TrySendError::Disconnected(_)) => self.close_pending = false,
-            Err(TrySendError::Full(_)) => {}
-        }
+    pub(crate) fn session_stopping(&self) -> bool {
+        self.client.is_stopping()
     }
 
     pub(crate) fn detach_reason(&self) -> Option<&str> {
         self.detached_reason.as_deref()
     }
+    #[cfg(feature = "window")]
     pub(crate) fn accepted_requests(&self) -> u64 {
         self.accepted_requests
     }
+    #[cfg(feature = "window")]
     pub(crate) fn duplicate_submissions(&self) -> u64 {
         self.duplicate_submissions
     }
+    #[cfg(feature = "window")]
     pub(crate) fn errors(&self) -> u64 {
         self.errors
     }
@@ -826,15 +1172,12 @@ impl ProtocolController {
         match request {
             ClientRequest::Capabilities {} => Ok(WireResult::Capabilities(Capabilities {
                 clock: clock_name(self.clock),
-                operations: [
-                    "project_info",
-                    "get_transform",
-                    "list_transforms",
-                    "set_transform",
-                    "spawn_transform",
-                    "step",
-                    "status",
-                ],
+                operations: if self.audio_enabled {
+                    &AUDIO_OPERATIONS
+                } else {
+                    &BASE_OPERATIONS
+                },
+                audio_enabled: self.audio_enabled,
                 max_line_bytes: MAX_PROTOCOL_LINE_BYTES,
                 max_response_bytes: MAX_PROTOCOL_RESPONSE_BYTES,
                 max_retained_tickets: MAX_PROTOCOL_TICKETS,
@@ -863,10 +1206,9 @@ impl ProtocolController {
             ClientRequest::Close {} => {
                 if !self.closing {
                     self.closing = true;
-                    self.close_pending = true;
                 }
-                // This receipt means the close intent entered its one-slot local mailbox. The
-                // final report's WindowExitReason remains the confirmation of actual exit.
+                // This receipt records a bounded local intent. The owning serve/view loop
+                // performs its own shutdown or renderer-message handoff.
                 Ok(WireResult::CloseRequested)
             }
         }
@@ -955,7 +1297,7 @@ impl ProtocolController {
             )
         })?;
         let progress = entry.ticket.try_state().map_err(read_error)?;
-        Ok(WireResult::Poll(poll_response(&progress)))
+        Ok(WireResult::Poll(Box::new(poll_response(&progress))))
     }
 
     fn ack_ticket(&mut self, token: &str) -> Result<WireResult, ProtocolError> {
@@ -1033,7 +1375,7 @@ impl ProtocolController {
                 } else {
                     match envelope.request {
                         ClientRequest::Submit { operation } => {
-                            operation.native().and_then(|operation| {
+                            operation.native(self.audio_enabled).and_then(|operation| {
                                 self.submit_with_id(request_id.clone(), operation)
                             })
                         }
@@ -1133,6 +1475,8 @@ fn submit_error(error: SessionSubmitError) -> ProtocolError {
         SessionSubmitError::CapabilityDenied => "capability_denied",
         SessionSubmitError::ClockModeMismatch => "clock_mode_mismatch",
         SessionSubmitError::InvalidRequest => "invalid_request",
+        #[cfg(feature = "audio")]
+        SessionSubmitError::AudioUnavailable => "audio_unavailable",
         SessionSubmitError::ReservedCommandId => "reserved_command_id",
         SessionSubmitError::QueueSequenceExhausted | SessionSubmitError::TicketIdExhausted => {
             "id_exhausted"
@@ -1238,6 +1582,140 @@ fn result_out(result: &SessionRequestResult) -> OperationResult {
             OperationResult::Step(steps.iter().map(step_out).collect())
         }
         SessionRequestResult::Status(status) => OperationResult::Status(status_out(status)),
+        #[cfg(feature = "audio")]
+        SessionRequestResult::Audio(audio) => OperationResult::Audio(audio_result_out(audio)),
+    }
+}
+
+#[cfg(feature = "audio")]
+fn audio_result_out(result: &SessionAudioResult) -> AudioResultOut {
+    match result {
+        SessionAudioResult::Status(status) => {
+            let backend = match status.backend() {
+                SessionAudioBackend::Offline { sample_rate } => {
+                    AudioBackendOut::Offline { sample_rate }
+                }
+                SessionAudioBackend::Native => AudioBackendOut::Native,
+            };
+            AudioResultOut::Status(AudioStatusOut {
+                session: DecimalU64(status.session().get()),
+                backend,
+                alias_count: status.alias_count(),
+                unique_clip_count: status.unique_clip_count(),
+                converted_clip_count: status.converted_clip_count(),
+                converted_frame_bytes: DecimalU64(status.converted_frame_bytes()),
+                active_voice_count: status.active_voice_count(),
+                offline_progressed_frames: DecimalU64(status.offline_progressed_frames()),
+            })
+        }
+        SessionAudioResult::Clips(page) => AudioResultOut::Clips(AudioClipPageOut {
+            observed_tick: DecimalU64(page.observed_tick().get()),
+            total: page.total(),
+            offset: page.offset(),
+            limit: page.limit(),
+            next_offset: page.next_offset(),
+            clips: page
+                .clips()
+                .iter()
+                .map(|clip| AudioClipOut {
+                    asset_id: clip.asset_id().as_str().to_owned(),
+                    leaf_key: clip.key().hex(),
+                    sample_rate: clip.sample_rate(),
+                    channels: clip.channels(),
+                    frames: DecimalU64(clip.frames()),
+                })
+                .collect(),
+        }),
+        SessionAudioResult::Voice(voice) => AudioResultOut::Voice(audio_voice_out(voice)),
+        SessionAudioResult::Voices(page) => AudioResultOut::Voices(AudioVoicePageOut {
+            observed_tick: DecimalU64(page.observed_tick().get()),
+            total: page.total(),
+            offset: page.offset(),
+            limit: page.limit(),
+            next_offset: page.next_offset(),
+            voices: page.voices().iter().map(audio_voice_out).collect(),
+        }),
+        SessionAudioResult::Command(command) => {
+            let outcome = match command.outcome() {
+                Ok(SessionAudioCommandOutcome::Played { voice }) => {
+                    AudioCommandTerminalOut::Played {
+                        voice: voice_out(*voice),
+                    }
+                }
+                Ok(SessionAudioCommandOutcome::StopRequested { voice }) => {
+                    AudioCommandTerminalOut::StopRequested {
+                        voice: voice_out(*voice),
+                    }
+                }
+                Ok(SessionAudioCommandOutcome::VolumeSet {
+                    voice,
+                    requested_volume,
+                }) => AudioCommandTerminalOut::VolumeSet {
+                    voice: voice_out(*voice),
+                    requested_volume: *requested_volume,
+                },
+                Ok(SessionAudioCommandOutcome::PanSet {
+                    voice,
+                    requested_pan,
+                }) => AudioCommandTerminalOut::PanSet {
+                    voice: voice_out(*voice),
+                    requested_pan: *requested_pan,
+                },
+                Ok(SessionAudioCommandOutcome::Offline(summary)) => {
+                    AudioCommandTerminalOut::Offline(offline_summary_out(*summary))
+                }
+                Err(error) => AudioCommandTerminalOut::Error {
+                    code: error.code(),
+                    message: error.message(),
+                },
+            };
+            AudioResultOut::Command(AudioCommandOut {
+                command_id: DecimalU128(command.command_id().get()),
+                observed_tick: DecimalU64(command.observed_tick().get()),
+                outcome,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "audio")]
+fn voice_out(voice: SessionAudioVoiceId) -> WireVoiceId {
+    WireVoiceId {
+        session: DecimalU64(voice.session().get()),
+        sequence: DecimalU64(voice.sequence()),
+    }
+}
+
+#[cfg(feature = "audio")]
+fn audio_voice_out(voice: &daedalus_runtime::SessionAudioVoiceInfo) -> AudioVoiceOut {
+    AudioVoiceOut {
+        voice: voice_out(voice.voice()),
+        state: match voice.state() {
+            SessionAudioVoiceState::Playing => "playing",
+            SessionAudioVoiceState::StopRequested => "stop_requested",
+            SessionAudioVoiceState::Ended => "ended",
+        },
+        clip_id: voice.clip_id().map(|id| id.as_str().to_owned()),
+        requested_volume: voice.requested_volume(),
+        requested_pan: voice.requested_pan(),
+        looping: voice.looping(),
+    }
+}
+
+#[cfg(feature = "audio")]
+fn offline_summary_out(summary: OfflineAudioSummary) -> OfflineAudioSummaryOut {
+    OfflineAudioSummaryOut {
+        frames: summary.frames(),
+        sample_rate: summary.sample_rate(),
+        channels: summary.channels(),
+        peak: summary.peak(),
+        rms: summary.rms(),
+        left_peak: summary.left_peak(),
+        left_rms: summary.left_rms(),
+        right_peak: summary.right_peak(),
+        right_rms: summary.right_rms(),
+        nonzero_samples: summary.nonzero_samples(),
+        cumulative_frames: DecimalU64(summary.cumulative_frames()),
     }
 }
 
@@ -1424,6 +1902,14 @@ fn request_error(error: &SessionRequestError) -> ProtocolError {
         }
         E::UnknownPendingCommand(_) => {
             ProtocolError::new("unknown_pending_command", error.to_string())
+        }
+        #[cfg(feature = "audio")]
+        E::AudioUnavailable => ProtocolError::new("audio_unavailable", error.to_string()),
+        #[cfg(feature = "audio")]
+        E::Audio(audio_error) => ProtocolError::new(audio_error.code(), audio_error.message()),
+        #[cfg(feature = "audio")]
+        E::ReplayStorageUnavailable => {
+            ProtocolError::retryable("replay_storage_unavailable", error.to_string())
         }
     };
     if let E::CommandRejected(message) = error

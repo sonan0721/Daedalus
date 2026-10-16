@@ -12,7 +12,6 @@ mod project;
 mod project_assets;
 #[cfg(feature = "window")]
 mod project_view;
-#[cfg(feature = "window")]
 mod project_view_control;
 #[cfg(feature = "window")]
 mod view;
@@ -107,7 +106,18 @@ enum ProjectCommands {
         ticks: u32,
     },
     /// Serve the project session through the bounded JSON Lines control protocol.
-    Serve { directory: PathBuf },
+    Serve {
+        directory: PathBuf,
+        /// Select the legacy synchronous protocol (1) or shared-session ticket protocol (2).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+        protocol: u8,
+        /// Protocol-2 session clock. Protocol 1 keeps its existing fixed-step behavior.
+        #[arg(long, value_enum)]
+        clock: Option<project::ProjectClockArg>,
+        /// Explicitly start imported audio in the selected backend; no audio is loaded otherwise.
+        #[arg(long, value_enum)]
+        audio: Option<project::ProjectAudioArg>,
+    },
     /// Open the external project with a native window and optional protocol-2 control.
     #[cfg(feature = "window")]
     View(project_view::ProjectViewArgs),

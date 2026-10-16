@@ -926,6 +926,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "bevy_tasks",
+ "daedalus-audio",
  "daedalus-content",
  "daedalus-core",
  "daedalus-tasks",

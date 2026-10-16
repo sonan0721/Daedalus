@@ -1,9 +1,12 @@
 use std::fmt;
+use std::mem::size_of;
 use std::sync::Arc;
 use std::time::Duration;
 
 use daedalus_core::SessionId;
-use kira::backend::{Backend, DefaultBackend, Renderer};
+#[cfg(feature = "native")]
+use kira::backend::cpal::CpalBackend;
+use kira::backend::{Backend, Renderer};
 use kira::sound::PlaybackState;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::track::MainTrackBuilder;
@@ -17,6 +20,10 @@ pub const MAX_AUDIO_BUFFER_FRAMES: usize = 8192;
 pub const MAX_OFFLINE_RENDER_FRAMES: usize = 1_048_576;
 /// Maximum PCM frames kept in a single static clip.
 pub const MAX_CLIP_FRAMES: usize = 10_000_000;
+/// Largest absolute source sample accepted for playback. Finite PCM headroom above 1.0 is kept.
+pub const MAX_PLAYBACK_SAMPLE_MAGNITUDE: f32 = 64.0;
+/// Byte size of one Kira output frame, for bounded PCM accounting without a Kira dependency.
+pub const PCM_FRAME_BYTES: usize = size_of::<Frame>();
 
 /// Audio service limits shared by native and offline backends.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,7 +44,8 @@ impl Default for AudioConfig {
 }
 
 impl AudioConfig {
-    fn validate(self) -> Result<(), AudioError> {
+    /// Validates configured mixer limits against this crate's supported bounds.
+    pub fn validate(self) -> Result<(), AudioError> {
         if !(1..=MAX_AUDIO_VOICES).contains(&self.max_voices) {
             return Err(AudioError::InvalidInput(
                 "max_voices must be between 1 and 4,096",
@@ -60,45 +68,28 @@ pub struct PcmClip {
 }
 
 impl PcmClip {
-    /// Converts interleaved PCM samples into a bounded static clip.
+    /// Converts borrowed interleaved PCM samples into a bounded static clip.
     ///
-    /// Mono is duplicated to both channels. Stereo is kept as supplied. Samples must be finite;
-    /// the Kira output renderer clamps the final mix to `[-1, 1]`.
-    pub fn from_interleaved(
+    /// Mono is duplicated to both channels. Stereo is kept as supplied. Samples must be finite
+    /// and have magnitude no greater than [`MAX_PLAYBACK_SAMPLE_MAGNITUDE`]. Values above 1.0 are
+    /// retained as headroom and are not normalized. Validation completes before frame allocation.
+    pub fn from_interleaved_slice(
         sample_rate: u32,
         channels: u16,
-        samples: Vec<f32>,
+        samples: &[f32],
     ) -> Result<Self, AudioError> {
-        if !(8_000..=384_000).contains(&sample_rate) {
-            return Err(AudioError::InvalidInput(
-                "PCM sample rate must be in 8,000..=384,000 Hz",
-            ));
-        }
-        if !(1..=2).contains(&channels) {
-            return Err(AudioError::InvalidInput(
-                "PCM clips must contain one or two channels",
-            ));
-        }
-        if samples.is_empty() || !samples.len().is_multiple_of(usize::from(channels)) {
-            return Err(AudioError::InvalidInput(
-                "PCM sample count must be non-empty and divisible by channel count",
-            ));
-        }
-        let frame_count = samples.len() / usize::from(channels);
-        if frame_count > MAX_CLIP_FRAMES {
-            return Err(AudioError::InvalidInput(
-                "PCM clip exceeds the 10,000,000-frame limit",
-            ));
-        }
-        if !samples.iter().all(|sample| sample.is_finite()) {
-            return Err(AudioError::InvalidInput("PCM samples must be finite"));
-        }
+        let frame_count = validate_interleaved(sample_rate, channels, samples)?;
         let mut frames = Vec::new();
         frames
             .try_reserve_exact(frame_count)
             .map_err(|_| AudioError::AllocationFailed)?;
         if channels == 1 {
-            frames.extend(samples.into_iter().map(|sample| Frame::new(sample, sample)));
+            frames.extend(
+                samples
+                    .iter()
+                    .copied()
+                    .map(|sample| Frame::new(sample, sample)),
+            );
         } else {
             frames.extend(
                 samples
@@ -112,6 +103,18 @@ impl PcmClip {
         })
     }
 
+    /// Converts owned interleaved PCM samples into a bounded static clip.
+    ///
+    /// This compatibility constructor shares validation and conversion with
+    /// [`from_interleaved_slice`](Self::from_interleaved_slice).
+    pub fn from_interleaved(
+        sample_rate: u32,
+        channels: u16,
+        samples: Vec<f32>,
+    ) -> Result<Self, AudioError> {
+        Self::from_interleaved_slice(sample_rate, channels, &samples)
+    }
+
     /// Sample rate of this clip.
     pub const fn sample_rate(&self) -> u32 {
         self.sample_rate
@@ -122,10 +125,15 @@ impl PcmClip {
         self.frames.len()
     }
 
-    fn sound_data(&self, volume: f32, pan: f32) -> StaticSoundData {
+    fn sound_data(&self, volume: f32, pan: f32, looping: bool) -> StaticSoundData {
         let settings = StaticSoundSettings::new()
             .volume(gain_to_decibels(volume))
             .panning(Panning(pan));
+        let settings = if looping {
+            settings.loop_region(..)
+        } else {
+            settings
+        };
         StaticSoundData {
             sample_rate: self.sample_rate,
             frames: Arc::clone(&self.frames),
@@ -158,6 +166,8 @@ pub enum AudioError {
     Backend(String),
     /// A native output device exists but could not report a name or supported output config.
     DeviceProbe(String),
+    /// This build does not include the optional native CPAL backend.
+    BackendUnavailable,
 }
 
 impl fmt::Display for AudioError {
@@ -173,6 +183,9 @@ impl fmt::Display for AudioError {
             }
             Self::Backend(message) => write!(f, "audio backend error: {message}"),
             Self::DeviceProbe(message) => write!(f, "audio device probe failed: {message}"),
+            Self::BackendUnavailable => {
+                f.write_str("native audio backend is unavailable in this build")
+            }
         }
     }
 }
@@ -219,6 +232,18 @@ where
         volume: f32,
         pan: f32,
     ) -> Result<VoiceHandle, AudioError> {
+        self.play_with_looping(clip, volume, pan, false)
+    }
+
+    /// Plays an owned PCM clip, optionally looping over the entire clip. `volume` is linear gain
+    /// in `[0, 1]`; `pan` is `-1` left to `1` right. Capacity is checked before Kira receives it.
+    pub fn play_with_looping(
+        &mut self,
+        clip: &PcmClip,
+        volume: f32,
+        pan: f32,
+        looping: bool,
+    ) -> Result<VoiceHandle, AudioError> {
         validate_voice_controls(volume, pan)?;
         self.reap_stopped()?;
         if self.voices.len() >= self.max_voices
@@ -227,13 +252,13 @@ where
             return Err(AudioError::VoiceCapacityReached);
         }
         self.voices.prepare_insert()?;
-        let sound =
-            self.manager
-                .play(clip.sound_data(volume, pan))
-                .map_err(|error| match error {
-                    kira::PlaySoundError::SoundLimitReached => AudioError::VoiceCapacityReached,
-                    other => AudioError::Backend(format!("{other:?}")),
-                })?;
+        let sound = self
+            .manager
+            .play(clip.sound_data(volume, pan, looping))
+            .map_err(|error| match error {
+                kira::PlaySoundError::SoundLimitReached => AudioError::VoiceCapacityReached,
+                other => AudioError::Backend(format!("{other:?}")),
+            })?;
         Ok(self.voices.insert_prepared(sound))
     }
 
@@ -271,18 +296,31 @@ where
         self.voices.len()
     }
 
+    /// Returns whether this handle currently occupies a slot in this service.
+    ///
+    /// A stopped sound remains present until [`reap_stopped`](Self::reap_stopped) observes Kira's
+    /// stopped state. This query does not reap or inspect audibility.
+    pub fn contains_voice(&self, handle: VoiceHandle) -> bool {
+        self.voices.contains(handle)
+    }
+
     /// Releases handles for sounds Kira has finished processing.
     pub fn reap_stopped(&mut self) -> Result<usize, AudioError> {
         self.voices.reap_stopped()
     }
 }
 
+/// Service specialized to Kira's actual CPAL backend. Available only with the `native` feature.
+#[cfg(feature = "native")]
+pub type NativeAudioService = AudioService<CpalBackend>;
+
 /// Constructs a service using Kira's actual CPAL default backend.
-impl AudioService<DefaultBackend>
+#[cfg(feature = "native")]
+impl AudioService<CpalBackend>
 where
-    DefaultBackend: Backend,
-    <DefaultBackend as Backend>::Settings: Default,
-    <DefaultBackend as Backend>::Error: fmt::Debug,
+    CpalBackend: Backend,
+    <CpalBackend as Backend>::Settings: Default,
+    <CpalBackend as Backend>::Error: fmt::Debug,
 {
     /// Opens Kira's default CPAL output backend. The constructor may start a silent output stream;
     /// no sound is generated until a voice is played.
@@ -344,6 +382,7 @@ impl AudioService<OfflineBackend> {
                 "offline render frames must be in 1..=1,048,576",
             ));
         }
+        self.voices.prepare_reap_capacity(self.voices.slots.len())?;
         let samples_len = frames.checked_mul(2).ok_or(AudioError::AllocationFailed)?;
         let mut samples = Vec::new();
         samples
@@ -358,7 +397,7 @@ impl AudioService<OfflineBackend> {
             .ok_or_else(|| AudioError::Backend("offline renderer was not started".to_owned()))?;
         renderer.on_start_processing();
         renderer.process(&mut samples, 2);
-        self.reap_stopped()?;
+        self.voices.reap_stopped_prepared();
         Ok(samples)
     }
 }
@@ -379,23 +418,67 @@ pub struct AudioDeviceInfo {
 /// Returning `Ok(None)` means the host reported no default output device. This operation does not
 /// generate sound. On builds without the CPAL feature, it returns an explicit backend error.
 pub fn probe_default_output_device() -> Result<Option<AudioDeviceInfo>, AudioError> {
-    use kira::backend::cpal::cpal::traits::{DeviceTrait, HostTrait};
+    #[cfg(not(feature = "native"))]
+    {
+        Err(AudioError::BackendUnavailable)
+    }
+    #[cfg(feature = "native")]
+    {
+        use kira::backend::cpal::cpal::traits::{DeviceTrait, HostTrait};
 
-    let host = kira::backend::cpal::cpal::default_host();
-    let Some(device) = host.default_output_device() else {
-        return Ok(None);
-    };
-    let description = device
-        .description()
-        .map_err(|error| AudioError::DeviceProbe(format!("{error:?}")))?;
-    let config = device
-        .default_output_config()
-        .map_err(|error| AudioError::DeviceProbe(format!("{error:?}")))?;
-    Ok(Some(AudioDeviceInfo {
-        name: description.name().to_owned(),
-        sample_rate: config.sample_rate(),
-        channels: config.channels(),
-    }))
+        let host = kira::backend::cpal::cpal::default_host();
+        let Some(device) = host.default_output_device() else {
+            return Ok(None);
+        };
+        let description = device
+            .description()
+            .map_err(|error| AudioError::DeviceProbe(format!("{error:?}")))?;
+        let config = device
+            .default_output_config()
+            .map_err(|error| AudioError::DeviceProbe(format!("{error:?}")))?;
+        Ok(Some(AudioDeviceInfo {
+            name: description.name().to_owned(),
+            sample_rate: config.sample_rate(),
+            channels: config.channels(),
+        }))
+    }
+}
+
+fn validate_interleaved(
+    sample_rate: u32,
+    channels: u16,
+    samples: &[f32],
+) -> Result<usize, AudioError> {
+    if !(8_000..=384_000).contains(&sample_rate) {
+        return Err(AudioError::InvalidInput(
+            "PCM sample rate must be in 8,000..=384,000 Hz",
+        ));
+    }
+    if !(1..=2).contains(&channels) {
+        return Err(AudioError::InvalidInput(
+            "PCM clips must contain one or two channels",
+        ));
+    }
+    if samples.is_empty() || !samples.len().is_multiple_of(usize::from(channels)) {
+        return Err(AudioError::InvalidInput(
+            "PCM sample count must be non-empty and divisible by channel count",
+        ));
+    }
+    let frame_count = samples.len() / usize::from(channels);
+    if frame_count > MAX_CLIP_FRAMES {
+        return Err(AudioError::InvalidInput(
+            "PCM clip exceeds the 10,000,000-frame limit",
+        ));
+    }
+    if !samples
+        .iter()
+        .all(|sample| sample.is_finite() && sample.abs() <= MAX_PLAYBACK_SAMPLE_MAGNITUDE)
+    {
+        return Err(AudioError::InvalidInput(
+            "PCM samples must be finite and have magnitude at most 64",
+        ));
+    }
+    Ok(frame_count)
 }
 
 fn validate_voice_controls(volume: f32, pan: f32) -> Result<(), AudioError> {
@@ -451,7 +534,8 @@ impl VoiceArena {
     }
 
     fn prepare_insert(&mut self) -> Result<(), AudioError> {
-        if self.free.is_empty() {
+        let needs_new_slot = self.free.is_empty();
+        if needs_new_slot {
             if self.slots.len() >= u32::MAX as usize {
                 return Err(AudioError::VoiceCapacityReached);
             }
@@ -459,6 +543,12 @@ impl VoiceArena {
                 .try_reserve(1)
                 .map_err(|_| AudioError::AllocationFailed)?;
         }
+        let slot_count_after_insert = self
+            .slots
+            .len()
+            .checked_add(usize::from(needs_new_slot))
+            .ok_or(AudioError::AllocationFailed)?;
+        self.prepare_reap_capacity(slot_count_after_insert)?;
         Ok(())
     }
 
@@ -493,31 +583,40 @@ impl VoiceArena {
     }
 
     fn reap_stopped(&mut self) -> Result<usize, AudioError> {
-        let mut stopped = Vec::new();
-        stopped
-            .try_reserve_exact(self.slots.len())
-            .map_err(|_| AudioError::AllocationFailed)?;
-        stopped.extend(self.slots.iter().enumerate().filter_map(|(index, slot)| {
-            slot.voice
+        self.prepare_reap_capacity(self.slots.len())?;
+        Ok(self.reap_stopped_prepared())
+    }
+
+    fn prepare_reap_capacity(&mut self, maximum_slot_count: usize) -> Result<(), AudioError> {
+        let additional_free_slots = maximum_slot_count.saturating_sub(self.free.len());
+        self.free
+            .try_reserve(additional_free_slots)
+            .map_err(|_| AudioError::AllocationFailed)
+    }
+
+    fn reap_stopped_prepared(&mut self) -> usize {
+        debug_assert!(self.free.capacity() >= self.slots.len());
+        let mut reaped = 0;
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if !slot
+                .voice
                 .as_ref()
                 .is_some_and(|voice| voice.state() == PlaybackState::Stopped)
-                .then_some(index)
-        }));
-        self.free
-            .try_reserve(stopped.len())
-            .map_err(|_| AudioError::AllocationFailed)?;
-        for index in &stopped {
-            let slot = &mut self.slots[*index];
+            {
+                continue;
+            }
+
             slot.voice.take();
             self.live_count -= 1;
             if let Some(generation) = slot.generation.checked_add(1) {
                 slot.generation = generation;
-                self.free.push(*index as u32);
+                self.free.push(index as u32);
             } else {
                 slot.retired = true;
             }
+            reaped += 1;
         }
-        Ok(stopped.len())
+        reaped
     }
 
     fn checked_slot_mut(&mut self, handle: VoiceHandle) -> Result<&mut VoiceSlot, AudioError> {
@@ -533,11 +632,24 @@ impl VoiceArena {
         }
         Ok(slot)
     }
+
+    fn contains(&self, handle: VoiceHandle) -> bool {
+        if handle.session != self.session {
+            return false;
+        }
+        self.slots.get(handle.index as usize).is_some_and(|slot| {
+            slot.generation == handle.generation && !slot.retired && slot.voice.is_some()
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioConfig, AudioError, AudioService, PcmClip, probe_default_output_device};
+    use super::{
+        AudioConfig, AudioError, AudioService, MAX_AUDIO_VOICES, MAX_PLAYBACK_SAMPLE_MAGNITUDE,
+        PCM_FRAME_BYTES, PcmClip, probe_default_output_device,
+    };
+    use kira::Frame;
 
     fn constant_clip(value: f32, frames: usize) -> PcmClip {
         PcmClip::from_interleaved(48_000, 1, vec![value; frames]).unwrap()
@@ -605,6 +717,8 @@ mod tests {
             second.set_volume(voice, 0.5),
             Err(AudioError::StaleVoiceHandle)
         );
+        assert!(first.contains_voice(voice));
+        assert!(!second.contains_voice(voice));
         assert_eq!(
             first.play(&clip, 1.0, 0.0),
             Err(AudioError::VoiceCapacityReached)
@@ -612,6 +726,7 @@ mod tests {
         first.stop(voice).unwrap();
         first.render_offline(1024).unwrap();
         assert_eq!(first.active_voice_count(), 0);
+        assert!(!first.contains_voice(voice));
         assert_eq!(
             first.set_volume(voice, 1.0),
             Err(AudioError::StaleVoiceHandle)
@@ -622,7 +737,10 @@ mod tests {
         );
         // Kira removes a stopped sound from its mixer storage at the next processing boundary.
         first.render_offline(64).unwrap();
-        assert!(first.play(&clip, 1.0, 0.0).is_ok());
+        let recycled_voice = first.play(&clip, 1.0, 0.0).unwrap();
+        assert_ne!(recycled_voice, voice);
+        assert!(!first.contains_voice(voice));
+        assert!(first.contains_voice(recycled_voice));
         assert!(matches!(
             PcmClip::from_interleaved(48_000, 2, vec![0.0, f32::NAN]),
             Err(AudioError::InvalidInput(_))
@@ -633,6 +751,149 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn borrowed_pcm_enforces_magnitude_before_playback_and_loops_full_clip() {
+        let edge = [
+            -MAX_PLAYBACK_SAMPLE_MAGNITUDE,
+            MAX_PLAYBACK_SAMPLE_MAGNITUDE,
+            1.25,
+            -1.25,
+        ];
+        let clip = PcmClip::from_interleaved_slice(48_000, 2, &edge).unwrap();
+        assert_eq!(clip.frame_count(), 2);
+        assert_eq!(clip.frames[0], Frame::new(-64.0, 64.0));
+        assert_eq!(clip.frames[1], Frame::new(1.25, -1.25));
+        assert_eq!(PCM_FRAME_BYTES, std::mem::size_of::<Frame>());
+
+        for invalid in [
+            64.000_01,
+            -64.000_01,
+            f32::MAX,
+            -f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            assert!(matches!(
+                PcmClip::from_interleaved_slice(48_000, 1, &[invalid]),
+                Err(AudioError::InvalidInput(_))
+            ));
+            assert!(matches!(
+                PcmClip::from_interleaved(48_000, 1, vec![invalid]),
+                Err(AudioError::InvalidInput(_))
+            ));
+        }
+
+        let short_clip = PcmClip::from_interleaved_slice(8_000, 1, &[0.25; 8]).unwrap();
+        let mut service = AudioService::offline(
+            AudioConfig {
+                max_voices: 2,
+                internal_buffer_frames: 64,
+            },
+            48_000,
+        )
+        .unwrap();
+        let other_service = AudioService::offline(
+            AudioConfig {
+                max_voices: 1,
+                internal_buffer_frames: 64,
+            },
+            48_000,
+        )
+        .unwrap();
+        let looping = service
+            .play_with_looping(&short_clip, 1.0, 0.0, true)
+            .unwrap();
+        let one_shot = service.play(&short_clip, 1.0, 0.0).unwrap();
+        assert!(service.contains_voice(looping));
+        assert!(service.contains_voice(one_shot));
+        assert!(!other_service.contains_voice(looping));
+
+        let rendered = service.render_offline(2_048).unwrap();
+        assert!(rendered.iter().all(|sample| sample.is_finite()));
+        assert!(service.contains_voice(looping));
+        assert!(!service.contains_voice(one_shot));
+        service.stop(looping).unwrap();
+        service.render_offline(512).unwrap();
+        assert!(!service.contains_voice(looping));
+    }
+
+    #[test]
+    fn repeated_reaping_reuses_prepared_free_slot_storage() {
+        let mut service = AudioService::offline(
+            AudioConfig {
+                max_voices: 4,
+                internal_buffer_frames: 64,
+            },
+            48_000,
+        )
+        .unwrap();
+        let clip = PcmClip::from_interleaved_slice(8_000, 1, &[0.5; 8]).unwrap();
+        let voice = service.play(&clip, 1.0, 0.0).unwrap();
+        let reserved_capacity = service.voices.free.capacity();
+        assert!(reserved_capacity >= service.voices.slots.len());
+
+        service.render_offline(2_048).unwrap();
+        assert_eq!(service.reap_stopped().unwrap(), 0);
+        assert!(!service.contains_voice(voice));
+        let free_count = service.voices.free.len();
+        let capacity_after_first_reap = service.voices.free.capacity();
+        assert_eq!(free_count, 1);
+        assert!(capacity_after_first_reap >= service.voices.slots.len());
+
+        for _ in 0..128 {
+            assert_eq!(service.reap_stopped().unwrap(), 0);
+            assert_eq!(service.voices.free.capacity(), capacity_after_first_reap);
+            assert_eq!(service.voices.free.len(), free_count);
+        }
+    }
+
+    #[test]
+    fn extreme_pcm_mix_is_finite_at_maximum_voice_count() {
+        let mut same_sign_service = AudioService::offline(
+            AudioConfig {
+                max_voices: MAX_AUDIO_VOICES,
+                internal_buffer_frames: 1,
+            },
+            48_000,
+        )
+        .unwrap();
+        let same_sign_clip =
+            PcmClip::from_interleaved_slice(48_000, 1, &[MAX_PLAYBACK_SAMPLE_MAGNITUDE; 2_048])
+                .unwrap();
+        for _ in 0..MAX_AUDIO_VOICES {
+            same_sign_service.play(&same_sign_clip, 1.0, 0.0).unwrap();
+        }
+        let same_sign_output = same_sign_service.render_offline(128).unwrap();
+        assert!(same_sign_output.iter().all(|sample| sample.is_finite()));
+        assert!(same_sign_output.iter().any(|sample| sample.abs() > 0.99));
+
+        let mut opposite_sign_service = AudioService::offline(
+            AudioConfig {
+                max_voices: MAX_AUDIO_VOICES,
+                internal_buffer_frames: 1,
+            },
+            48_000,
+        )
+        .unwrap();
+        let positive =
+            PcmClip::from_interleaved_slice(48_000, 1, &[MAX_PLAYBACK_SAMPLE_MAGNITUDE; 2_048])
+                .unwrap();
+        let negative =
+            PcmClip::from_interleaved_slice(48_000, 1, &[-MAX_PLAYBACK_SAMPLE_MAGNITUDE; 2_048])
+                .unwrap();
+        for _ in 0..(MAX_AUDIO_VOICES / 2) {
+            opposite_sign_service.play(&positive, 1.0, -1.0).unwrap();
+            opposite_sign_service.play(&negative, 1.0, 1.0).unwrap();
+        }
+        assert_eq!(opposite_sign_service.active_voice_count(), MAX_AUDIO_VOICES);
+        let opposite_sign_output = opposite_sign_service.render_offline(128).unwrap();
+        assert!(opposite_sign_output.iter().all(|sample| sample.is_finite()));
+        assert!(opposite_sign_output.iter().any(|sample| *sample > 0.99));
+        assert!(opposite_sign_output.iter().any(|sample| *sample < -0.99));
+    }
+
+    #[cfg(feature = "native")]
     #[test]
     fn native_device_probe_does_not_open_an_output_stream() {
         match probe_default_output_device() {
@@ -646,6 +907,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "native")]
     #[test]
     #[ignore = "manually run when a physical or virtual output device is available"]
     fn inspect_native_default_output_device_without_playback() {
@@ -657,5 +919,14 @@ mod tests {
             Ok(None) => println!("no default output device is available"),
             Err(error) => println!("default output probe unavailable: {error}"),
         }
+    }
+
+    #[cfg(not(feature = "native"))]
+    #[test]
+    fn native_probe_is_explicitly_unavailable_without_feature() {
+        assert_eq!(
+            probe_default_output_device(),
+            Err(AudioError::BackendUnavailable)
+        );
     }
 }

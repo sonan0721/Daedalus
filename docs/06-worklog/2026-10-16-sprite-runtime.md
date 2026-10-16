@@ -1,6 +1,6 @@
 # P03.2b 스프라이트·정사영 실행 작업 기록
 
-상태: source/로컬 CPU·Metal·native·clean package 통과·최종 CI 인수 대기 · 2026-10-16
+상태: P03.2b 인수·PR12 CI/main 동일 tree 확인·전체 P03.2/D1 미통과 · 2026-10-16
 
 ## 두 문서를 만든 이유
 
@@ -113,3 +113,9 @@ target/debug/daedalus project view dist/qa-assets/sprite-runtime-project --secon
 | third-party notices SHA-256 | `90f06b4836dab77d568a9d2cd903f19659f1de15135941f81511d3f2c009ca72` |
 
 archive를 `dist/qa-assets/p03-sprite-release-extracted/`에 풀고 추출 binary로 같은 `--assets --view --models --sprites` smoke를 실행해 **39/39 pass·14.522841초**를 확인했다. binary hash는 manifest와 일치했다. 로그는 `p03-sprite-package.log`, `p03-sprite-release-smoke.json`이다. 이것은 로컬 CLI archive이며 공개 tag/Release나 D1 제품 인수가 아니다. 최종 PR의 다섯 CI/두 packaged-assets step·main 동일 tree는 별도 확인한다.
+
+## PR12와 하위 gate 인수
+
+[PR12](https://github.com/sonan0721/Daedalus/pull/12)의 최종 head는 `6e8fa504164a59167515f56415eecdf406703485`다. release source `ee5570e` 이후에는 문서만 바뀌었으며 Cargo/crates/scripts/managed/workflows 동일성을 별도 diff로 확인했다. 최종 [docs](https://github.com/sonan0721/Daedalus/actions/runs/38861046914), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38861046827), [managed native integration](https://github.com/sonan0721/Daedalus/actions/runs/38861046805), [두 native package](https://github.com/sonan0721/Daedalus/actions/runs/38861046801)가 성공했다. macOS/Linux 두 `Verify packaged CLI asset cook smoke` step도 success이고 publish job은 skipped다. 보호 체크3개/strict=true도 다시 조회했다.
+
+검증한 head SHA를 `--match-head-commit`으로 지정해 squash 병합했다. main은 `dd2de2ed37a244aa77be342c62b8afafe958d697`이고 `git diff --exit-code 6e8fa504164a59167515f56415eecdf406703485 HEAD`로 전체 file tree 동일성을 확인했다. 따라서 **P03.2b만 체크**한다. audio c·source generation/reload·제작 반복 품질과 전체 P03.2/D1/D2/D3는 계속 열려 있다. 공개 tag/Release는 만들지 않았다. 인수 결과는 다음 audio 문서 checkpoint에서 기록하며, 성공 결과 문구만 갱신하려고 검증한 PR head를 바꾸어 CI 전체를 다시 돌리지 않는다.

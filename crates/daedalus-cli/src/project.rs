@@ -5,13 +5,40 @@ use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use clap::ValueEnum;
 use daedalus_content::project::{PreparedProject, ProjectManifest, prepare_project_from_bytes};
 use daedalus_content::scene::SceneDocument;
-use daedalus_runtime::{EngineConfig, ProjectSession, ProjectSessionReport, StepReport};
+use daedalus_runtime::{
+    EngineConfig, ProjectSession, ProjectSessionReport, SessionCapabilities, SessionClockMode,
+    SessionControlConfig, SessionControlLimits, SessionControlService, SessionTermination,
+    StepReport,
+};
 use serde_json::{Value, json};
 
 use super::{MAX_CLI_TICKS, ProjectCommands, print_json};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(super) enum ProjectClockArg {
+    Realtime,
+    Manual,
+}
+
+impl ProjectClockArg {
+    pub(super) const fn runtime(self) -> SessionClockMode {
+        match self {
+            Self::Realtime => SessionClockMode::Realtime,
+            Self::Manual => SessionClockMode::Manual,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(super) enum ProjectAudioArg {
+    Offline,
+    Native,
+}
 
 pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
     match command {
@@ -52,22 +79,38 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             session.engine().shutdown()?;
             print_json(&run_output(report, steps))?;
         }
-        ProjectCommands::Serve { directory } => {
-            let mut session = ProjectSession::new(
-                super::project_assets::load_project_runtime(&directory)?,
-                EngineConfig::default(),
-            )?;
-            let info = project_info(&session);
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            super::control::serve_project_jsonl(
-                session.engine_mut(),
-                stdin.lock(),
-                stdout.lock(),
-                super::control::ControlLimits::default(),
-                info,
-            )?;
-        }
+        ProjectCommands::Serve {
+            directory,
+            protocol,
+            clock,
+            audio,
+        } => match protocol {
+            1 => {
+                if clock.is_some() || audio.is_some() {
+                    return Err("--clock and --audio require `project serve --protocol 2`".into());
+                }
+                let mut session = ProjectSession::new(
+                    super::project_assets::load_project_runtime(&directory)?,
+                    EngineConfig::default(),
+                )?;
+                let info = project_info(&session);
+                let stdin = std::io::stdin();
+                let stdout = std::io::stdout();
+                super::control::serve_project_jsonl(
+                    session.engine_mut(),
+                    stdin.lock(),
+                    stdout.lock(),
+                    super::control::ControlLimits::default(),
+                    info,
+                )?;
+            }
+            2 => serve_project_protocol2(
+                &directory,
+                clock.unwrap_or(ProjectClockArg::Manual),
+                audio,
+            )?,
+            _ => unreachable!("Clap constrains project serve protocol to 1 or 2"),
+        },
         #[cfg(feature = "window")]
         ProjectCommands::View(args) => super::project_view::run(args)?,
         #[cfg(feature = "capture")]
@@ -78,6 +121,125 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             height,
             ticks,
         } => capture_project(&directory, output, width, height, ticks)?,
+    }
+    Ok(())
+}
+
+pub(super) fn start_control_service(
+    project: Arc<PreparedProject>,
+    config: SessionControlConfig,
+    audio: Option<ProjectAudioArg>,
+) -> Result<SessionControlService, Box<dyn Error>> {
+    let Some(audio) = audio else {
+        return Ok(SessionControlService::start_shared(project, config)?);
+    };
+    if !cfg!(feature = "audio") {
+        return Err(
+            "audio support is not compiled into this CLI; rebuild with --features audio".into(),
+        );
+    }
+    if audio == ProjectAudioArg::Native && !cfg!(feature = "native-audio") {
+        return Err(
+            "native audio support is not compiled into this CLI; rebuild with --features native-audio"
+                .into(),
+        );
+    }
+    start_control_service_with_audio(project, config, audio)
+}
+
+#[cfg(feature = "audio")]
+fn start_control_service_with_audio(
+    project: Arc<PreparedProject>,
+    config: SessionControlConfig,
+    audio: ProjectAudioArg,
+) -> Result<SessionControlService, Box<dyn Error>> {
+    use daedalus_runtime::SessionAudioOptions;
+
+    let options = match audio {
+        ProjectAudioArg::Offline => SessionAudioOptions::offline(48_000),
+        ProjectAudioArg::Native => SessionAudioOptions::native(),
+    };
+    Ok(SessionControlService::start_shared_with_audio(
+        project, config, options,
+    )?)
+}
+
+#[cfg(not(feature = "audio"))]
+fn start_control_service_with_audio(
+    _project: Arc<PreparedProject>,
+    _config: SessionControlConfig,
+    _audio: ProjectAudioArg,
+) -> Result<SessionControlService, Box<dyn Error>> {
+    Err("audio support is not compiled into this CLI".into())
+}
+
+fn serve_project_protocol2(
+    directory: &Path,
+    clock: ProjectClockArg,
+    audio: Option<ProjectAudioArg>,
+) -> Result<(), Box<dyn Error>> {
+    use std::thread;
+    use std::time::Duration;
+
+    let project = Arc::new(super::project_assets::load_project_runtime(directory)?);
+    let mut engine = EngineConfig::default();
+    engine.snapshot_entity_capacity = engine
+        .snapshot_entity_capacity
+        .max(project.entities().len());
+    let limits = SessionControlLimits::default();
+    let config = SessionControlConfig {
+        engine,
+        clock_mode: clock.runtime(),
+        limits,
+    };
+    let service = start_control_service(Arc::clone(&project), config, audio)?;
+    let client = match service.attach_with_capabilities(SessionCapabilities::trusted_local()) {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = service.shutdown();
+            return Err(Box::new(error));
+        }
+    };
+    let transport = match super::project_view_control::StdioTransport::start() {
+        Ok(transport) => transport,
+        Err(error) => {
+            let _ = service.shutdown();
+            return Err(Box::new(error));
+        }
+    };
+    let mut controller = super::project_view_control::ProtocolController::new(
+        transport,
+        client,
+        clock.runtime(),
+        limits,
+        audio.is_some(),
+    );
+    while controller.detach_reason().is_none()
+        && !controller.closing()
+        && !controller.session_stopping()
+    {
+        controller.pump();
+        if controller.detach_reason().is_some()
+            || controller.closing()
+            || controller.session_stopping()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    let actor_stopped_before_owner_exit = controller.session_stopping()
+        && controller.detach_reason().is_none()
+        && !controller.closing();
+    drop(controller);
+    service.request_stop();
+    let shutdown = service.shutdown();
+    if actor_stopped_before_owner_exit || shutdown.termination != SessionTermination::StopRequested
+    {
+        return Err(format!(
+            "project protocol-2 session terminated abnormally: {:?}",
+            shutdown.termination
+        )
+        .into());
     }
     Ok(())
 }

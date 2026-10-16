@@ -61,7 +61,7 @@ def empty_cli_metadata(repository: Path) -> dict:
         ],
         "workspace_members": [root_id],
         "resolve": {
-            "nodes": [{"id": root_id, "features": ["capture", "window"], "deps": []}]
+            "nodes": [{"id": root_id, "features": ["audio", "capture", "native-audio", "window"], "deps": []}]
         },
     }
 
@@ -87,7 +87,11 @@ class PackageCliTests(unittest.TestCase):
             with patch.object(
                 package_cli,
                 "run_project_smoke",
-                return_value={"status": "passed", "checks": [{"name": "mocked-unit-boundary"}]},
+                return_value={
+                    "status": "passed",
+                    "checks": [{"name": "mocked-unit-boundary"}],
+                    "audio_offline": {"invocation_kind": "headless_protocol2_manual_offline"},
+                },
             ) as project_smoke:
                 package = package_cli.create_package(
                     binary_path=binary or self.binary,
@@ -120,17 +124,22 @@ class PackageCliTests(unittest.TestCase):
         smoke_binary = self.project_smoke_mock_arguments[0].args[0]
         self.assertEqual(smoke_binary.name, package_cli.ARCHIVE_BINARY)
         self.assertEqual(self.project_smoke_mock_arguments[0].kwargs["cwd"], smoke_binary.parent)
+        self.assertIs(self.project_smoke_mock_arguments[0].kwargs["audio"], True)
         self.assertEqual(manifest["cli_version"], VERSION)
         self.assertEqual(manifest["exact_commit"], COMMIT)
         self.assertTrue(manifest["dirty"])
         self.assertEqual(manifest["target_triple"], TARGET)
         self.assertEqual(manifest["cargo_profile"], "release")
-        self.assertEqual(manifest["cargo_features"], ["window"])
+        self.assertEqual(manifest["cargo_features"], ["native-audio", "window"])
         self.assertEqual(manifest["rust_path_remapping"], package_cli.RUST_PATH_REMAP_POLICY)
         self.assertEqual(manifest["build_id"], BUILD_ID)
         self.assertEqual(manifest["binary_name"], "daedalus")
         self.assertEqual(len(manifest["third_party_notices_sha256"]), 64)
         self.assertEqual(len(manifest["dependency_inventory_sha256"]), 64)
+        package_usage = (output_directory / package_cli.ARCHIVE_USAGE).read_text(encoding="utf-8")
+        self.assertIn("--audio offline", package_usage)
+        self.assertIn("native-audio", package_usage)
+        self.assertIn("libasound.so.2", package_cli.usage_text(VERSION, "x86_64-unknown-linux-gnu"))
 
         with tarfile.open(package.archive, "r:gz") as archive:
             members = archive.getmembers()
@@ -231,7 +240,7 @@ class PackageCliTests(unittest.TestCase):
                 "-p",
                 "daedalus-cli",
                 "--features",
-                "window",
+                "native-audio,window",
                 "--locked",
                 "--target-dir",
                 str(self.root / "target"),
@@ -310,7 +319,7 @@ class PackageCliTests(unittest.TestCase):
                         "-p",
                         "daedalus-cli",
                         "--features",
-                        "window",
+                        "native-audio,window",
                         "--locked",
                         "--target-dir",
                         str(repository / "target"),
@@ -452,6 +461,10 @@ class PackageCliTests(unittest.TestCase):
         workflow = (REPOSITORY / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        self.assertIn("libasound2-dev", workflow)
+        self.assertIn("libasound\\.so", workflow)
+        self.assertIn("--audio", workflow)
+        self.assertIn('index("native-audio")', workflow)
         lines = workflow.splitlines()
         start = next(
             index for index, line in enumerate(lines)

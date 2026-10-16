@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use daedalus_content::project::PreparedProject;
 use daedalus_content::scene::StableId;
 use daedalus_core::EntityHandle;
@@ -27,6 +27,7 @@ use daedalus_runtime::{
 };
 use serde_json::{Value, json};
 
+use super::project::{ProjectAudioArg, ProjectClockArg};
 use super::project_view_control::{ProtocolController, StdioTransport};
 
 const MAX_VIEW_WIDTH: u32 = 4_096;
@@ -40,19 +41,16 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const COORDINATOR_SLEEP: Duration = Duration::from_millis(2);
 const MAX_INPUT_EVENTS_PER_LOOP: usize = 64;
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(super) enum ClockArg {
-    Realtime,
-    Manual,
-}
-
 #[derive(Args)]
 pub(super) struct ProjectViewArgs {
     /// External project directory.
     pub directory: PathBuf,
     /// Use fixed ticks only when protocol Step/F10 is explicitly requested.
     #[arg(long, value_enum, default_value = "realtime")]
-    pub clock: ClockArg,
+    pub clock: ProjectClockArg,
+    /// Explicitly load imported audio with an offline or native backend; loading never auto-plays.
+    #[arg(long, value_enum)]
+    pub audio: Option<ProjectAudioArg>,
     /// Attach bounded protocol-2 JSONL control to stdin/stdout.
     #[arg(long)]
     pub stdio_control: bool,
@@ -112,10 +110,7 @@ enum InputTicket {
 
 pub(super) fn run(args: ProjectViewArgs) -> Result<(), Box<dyn Error>> {
     validate_args(&args)?;
-    let clock = match args.clock {
-        ClockArg::Realtime => SessionClockMode::Realtime,
-        ClockArg::Manual => SessionClockMode::Manual,
-    };
+    let clock = args.clock.runtime();
     let project = Arc::new(super::project_assets::load_project_runtime(
         &args.directory,
     )?);
@@ -129,7 +124,8 @@ pub(super) fn run(args: ProjectViewArgs) -> Result<(), Box<dyn Error>> {
         .engine
         .snapshot_entity_capacity
         .max(project.entities().len());
-    let service = SessionControlService::start_shared(Arc::clone(&project), service_config)?;
+    let service =
+        super::project::start_control_service(Arc::clone(&project), service_config, args.audio)?;
 
     let run_result = run_window(&args, Arc::clone(&project), &service, clock, control_limits);
     service.request_stop();
@@ -229,6 +225,7 @@ fn run_window(
     let worker_stop = Arc::new(AtomicBool::new(false));
     let worker_stop_thread = Arc::clone(&worker_stop);
     let controlled_for_worker = controlled_entity.clone();
+    let audio_enabled = args.audio.is_some();
     let worker = thread::Builder::new()
         .name("daedalus-project-view-coordinator".into())
         .spawn(move || {
@@ -243,6 +240,7 @@ fn run_window(
                 stop: worker_stop_thread,
                 first_page: binding_map.first_page,
                 control_limits,
+                audio_enabled,
             })
         })?;
 
@@ -292,6 +290,7 @@ struct CoordinatorContext {
     stop: Arc<AtomicBool>,
     first_page: ProjectInfoPage,
     control_limits: SessionControlLimits,
+    audio_enabled: bool,
 }
 
 fn collect_bindings(client: &SessionControlClient) -> Result<BindingMap, Box<dyn Error>> {
@@ -413,19 +412,16 @@ fn coordinate(context: CoordinatorContext) -> CoordinatorReport {
         stop,
         first_page,
         control_limits,
+        audio_enabled,
     } = context;
     let mut report = CoordinatorReport::default();
     let mut protocol = protocol_pair.map(|(client, transport)| {
-        ProtocolController::new(
-            transport,
-            client,
-            packet_sender.clone(),
-            clock,
-            control_limits,
-        )
+        ProtocolController::new(transport, client, clock, control_limits, audio_enabled)
     });
     let mut last_observed_sequence = 0;
     let mut pending_packet: Option<Arc<daedalus_renderer::RenderPacket>> = None;
+    let mut close_observed = false;
+    let mut close_pending = false;
     let mut input_ticket: Option<InputTicket> = None;
     let mut step_ticket: Option<RequestTicket> = None;
     let first_session = first_page.session;
@@ -442,6 +438,11 @@ fn coordinate(context: CoordinatorContext) -> CoordinatorReport {
             protocol.pump();
         }
         let closing = protocol.as_ref().is_some_and(ProtocolController::closing);
+        if closing && !close_observed {
+            close_observed = true;
+            close_pending = true;
+        }
+        send_pending_close(&packet_sender, &mut close_pending);
         for _ in 0..MAX_INPUT_EVENTS_PER_LOOP {
             let event = match input_events.try_recv() {
                 Ok(event) => event,
@@ -822,11 +823,24 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "unknown panic payload".into())
 }
 
+fn send_pending_close(sender: &SyncSender<PacketWindowMessage>, pending: &mut bool) {
+    if !*pending {
+        return;
+    }
+    match sender.try_send(PacketWindowMessage::Close) {
+        Ok(()) | Err(TrySendError::Disconnected(_)) => *pending = false,
+        Err(TrySendError::Full(_)) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::{TryRecvError, sync_channel};
+
+    use daedalus_renderer::PacketWindowMessage;
     use daedalus_runtime::SessionTermination;
 
-    use super::session_termination_error;
+    use super::{send_pending_close, session_termination_error};
 
     #[test]
     fn normal_session_stop_succeeds_but_engine_failure_and_panic_fail_closed() {
@@ -842,5 +856,30 @@ mod tests {
             session_termination_error(&SessionTermination::Panicked("boom".into()))
                 .is_some_and(|error| error.contains("boom"))
         );
+    }
+
+    #[test]
+    fn saturated_window_queue_keeps_one_close_intent_until_it_can_send() {
+        let (sender, receiver) = sync_channel(1);
+        sender
+            .try_send(PacketWindowMessage::SetLoading(true))
+            .expect("occupy the bounded packet slot");
+        let mut pending = true;
+
+        send_pending_close(&sender, &mut pending);
+        assert!(pending, "full queue retains the one close intent");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(PacketWindowMessage::SetLoading(true))
+        ));
+
+        send_pending_close(&sender, &mut pending);
+        assert!(!pending, "successful send consumes the one close intent");
+        send_pending_close(&sender, &mut pending);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(PacketWindowMessage::Close)
+        ));
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 }

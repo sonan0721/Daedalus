@@ -11,6 +11,8 @@ description = "Headless JSON control CLI for the Daedalus engine"
 default = []
 capture = ["dep:daedalus-renderer", "daedalus-renderer/test-fixtures"]
 window = ["capture", "daedalus-renderer/window", "dep:glam"]
+audio = ["daedalus-runtime/audio"]
+native-audio = ["audio", "daedalus-runtime/native-audio"]
 
 [[bin]]
 name = "daedalus"

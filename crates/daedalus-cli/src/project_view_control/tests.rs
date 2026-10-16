@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 
 use daedalus_content::project::{PreparedProject, ProjectLimits, prepare_project_from_bytes};
 use daedalus_content::scene::StableId;
-use daedalus_core::{Revision, SessionId, Tick};
-use daedalus_renderer::{Camera, DirectionalLight, PacketWindowMessage, RenderPacket};
+use daedalus_core::{Revision, Tick};
 use daedalus_runtime::{
     EngineConfig, RequestTicket, SessionClockMode, SessionControlClient, SessionControlConfig,
     SessionControlService, SessionEntityTarget, SessionOperation, SessionRequestResult,
@@ -51,7 +50,6 @@ fn prepared_fixture() -> PreparedProject {
 struct Harness {
     controller: ProtocolController,
     service: Option<SessionControlService>,
-    _window_receiver: Receiver<PacketWindowMessage>,
 }
 
 type HarnessParts = (
@@ -79,10 +77,33 @@ fn harness(clock: SessionClockMode, output_capacity: usize) -> HarnessParts {
         },
     )
     .expect("start in-memory session service");
+    harness_for_service(service, clock, output_capacity, false)
+}
+
+#[cfg(feature = "audio")]
+fn audio_harness(clock: SessionClockMode, output_capacity: usize) -> HarnessParts {
+    let service = SessionControlService::start_shared_with_audio(
+        Arc::new(prepared_fixture()),
+        SessionControlConfig {
+            engine: EngineConfig::default(),
+            clock_mode: clock,
+            ..SessionControlConfig::default()
+        },
+        daedalus_runtime::SessionAudioOptions::offline(8_000),
+    )
+    .expect("start offline audio session service");
+    harness_for_service(service, clock, output_capacity, true)
+}
+
+fn harness_for_service(
+    service: SessionControlService,
+    clock: SessionClockMode,
+    output_capacity: usize,
+    audio_enabled: bool,
+) -> HarnessParts {
     let client = service.attach().expect("attach protocol client");
     let (request_sender, requests) = mpsc::sync_channel(MAX_PROTOCOL_QUEUE);
     let (response_sender, responses) = mpsc::sync_channel(output_capacity);
-    let (window_sender, window_receiver) = mpsc::sync_channel(1);
     let transport = StdioTransport {
         requests,
         pending_request: None,
@@ -93,15 +114,14 @@ fn harness(clock: SessionClockMode, output_capacity: usize) -> HarnessParts {
     let controller = ProtocolController::new(
         transport,
         client,
-        window_sender,
         clock,
         SessionControlLimits::default(),
+        audio_enabled,
     );
     (
         Harness {
             controller,
             service: Some(service),
-            _window_receiver: window_receiver,
         },
         request_sender,
         responses,
@@ -209,6 +229,24 @@ fn poll_until_terminal(
     ticket: &str,
 ) -> Value {
     poll_until_phase(harness, input, output, ticket, "terminal")
+}
+
+#[cfg(feature = "audio")]
+fn ack(
+    harness: &mut Harness,
+    input: &SyncSender<Vec<u8>>,
+    output: &Receiver<Vec<u8>>,
+    ticket: &str,
+) {
+    let response = request(
+        harness,
+        input,
+        output,
+        "ack-ticket",
+        json!({"op":"ack", "ticket":ticket}),
+    );
+    assert_eq!(response["ok"], true, "ack response: {response}");
+    assert_eq!(response["result"]["kind"], "acked");
 }
 
 fn native_submit(client: &SessionControlClient, operation: SessionOperation) -> RequestTicket {
@@ -809,33 +847,9 @@ fn full_output_queue_releases_protocol_ticket_without_rolling_back_accepted_comm
     assert_accepted_command_survives_output_detach(OutputFailure::Full);
 }
 
-fn empty_packet() -> Arc<RenderPacket> {
-    Arc::new(RenderPacket::new(
-        SessionId::fresh(),
-        Tick(0),
-        0,
-        0,
-        "test-digest",
-        Camera::default(),
-        DirectionalLight::default(),
-        [0.1, 0.1, 0.1],
-        [0.0, 0.0, 0.0, 1.0],
-        Vec::new(),
-    ))
-}
-
 #[test]
-fn close_survives_full_packet_queue_detach_and_dispatches_once_after_present_drains() {
+fn close_intent_is_idempotent_and_rejects_new_submissions_after_detach() {
     let (mut harness, input, output, _) = harness(SessionClockMode::Manual, 8);
-    let present = PacketWindowMessage::Present {
-        packet: empty_packet(),
-        loading: false,
-    };
-    harness
-        .controller
-        .window
-        .try_send(present)
-        .expect("fill one-slot packet queue");
 
     let close = request(
         &mut harness,
@@ -879,19 +893,100 @@ fn close_survives_full_packet_queue_detach_and_dispatches_once_after_present_dra
         .store(TRANSPORT_EOF, Ordering::Release);
     harness.controller.pump();
     assert_eq!(harness.controller.detach_reason(), Some("stdin_eof"));
+}
 
-    assert!(matches!(
-        harness._window_receiver.try_recv(),
-        Ok(PacketWindowMessage::Present { .. })
-    ));
-    harness.controller.pump();
-    assert!(matches!(
-        harness._window_receiver.try_recv(),
-        Ok(PacketWindowMessage::Close)
-    ));
-    harness.controller.pump();
-    assert!(matches!(
-        harness._window_receiver.try_recv(),
-        Err(TryRecvError::Empty)
-    ));
+#[test]
+fn audio_operation_is_explicitly_unavailable_when_session_audio_is_disabled() {
+    let (mut harness, input, output, _) = harness(SessionClockMode::Manual, 4);
+    let capabilities = request(
+        &mut harness,
+        &input,
+        &output,
+        "base-capabilities",
+        json!({"op":"capabilities"}),
+    );
+    assert_eq!(capabilities["result"]["data"]["audio_enabled"], false);
+    assert!(
+        !capabilities["result"]["data"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "audio_command")
+    );
+    let response = request(
+        &mut harness,
+        &input,
+        &output,
+        "audio-disabled",
+        json!({"op":"submit", "operation":{"op":"audio_status"}}),
+    );
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "audio_unavailable");
+}
+
+#[cfg(feature = "audio")]
+#[test]
+fn audio_protocol_reports_typed_command_errors_and_offline_channel_summary() {
+    let (mut harness, input, output, _) = audio_harness(SessionClockMode::Manual, 8);
+    let capabilities = request(
+        &mut harness,
+        &input,
+        &output,
+        "audio-capabilities",
+        json!({"op":"capabilities"}),
+    );
+    assert_eq!(capabilities["result"]["data"]["audio_enabled"], true);
+    assert!(
+        capabilities["result"]["data"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "audio_command")
+    );
+
+    let rejected = submit(
+        &mut harness,
+        &input,
+        &output,
+        "audio-unknown-clip",
+        json!({
+            "op":"audio_command",
+            "command_id":"21",
+            "mutation":{"kind":"play", "clip":"missing-clip", "volume":1.0, "pan":0.0, "looping":false}
+        }),
+    );
+    let rejected_terminal = poll_until_terminal(&mut harness, &input, &output, &rejected);
+    // The request ticket reached a terminal protocol result, while the nested audio command
+    // outcome remains an explicit failure and cannot be mistaken for a successful Play.
+    let rejected_command = &rejected_terminal["result"]["data"]["terminal"]["result"];
+    assert_eq!(rejected_command["kind"], "audio");
+    assert_eq!(rejected_command["data"]["kind"], "command");
+    assert_eq!(rejected_command["data"]["data"]["outcome"]["kind"], "error");
+    assert_eq!(
+        rejected_command["data"]["data"]["outcome"]["data"]["code"],
+        "unknown_clip"
+    );
+    ack(&mut harness, &input, &output, &rejected);
+
+    let rendered = submit(
+        &mut harness,
+        &input,
+        &output,
+        "audio-offline-render",
+        json!({
+            "op":"audio_command",
+            "command_id":"22",
+            "mutation":{"kind":"render_offline", "frames":64}
+        }),
+    );
+    let rendered_terminal = poll_until_terminal(&mut harness, &input, &output, &rendered);
+    let outcome =
+        &rendered_terminal["result"]["data"]["terminal"]["result"]["data"]["data"]["outcome"];
+    assert_eq!(outcome["kind"], "offline");
+    assert_eq!(outcome["data"]["frames"], 64);
+    assert_eq!(outcome["data"]["sample_rate"], 8_000);
+    assert_eq!(outcome["data"]["channels"], 2);
+    assert!(outcome["data"]["left_peak"].as_f64().is_some());
+    assert!(outcome["data"]["right_rms"].as_f64().is_some());
+    ack(&mut harness, &input, &output, &rendered);
 }

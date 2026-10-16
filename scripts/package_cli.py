@@ -21,7 +21,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
-from collect_cli_notices import NoticeCollectionError, collect_cli_notices
+from collect_cli_notices import (
+    REQUESTED_FEATURES,
+    NoticeCollectionError,
+    collect_cli_notices,
+)
 from smoke_project import SmokeError, run_project_smoke
 
 
@@ -32,7 +36,7 @@ SUPPORTED_TARGETS = frozenset(
         "x86_64-unknown-linux-gnu",
     }
 )
-PACKAGE_FEATURES = ("window",)
+PACKAGE_FEATURES = ("native-audio", "window")
 ARCHIVE_BINARY = "daedalus"
 ARCHIVE_USAGE = "USAGE.txt"
 ARCHIVE_MANIFEST = "build-manifest.json"
@@ -269,6 +273,12 @@ def sha256_file(path: Path) -> str:
 
 
 def usage_text(version: str, target: str) -> str:
+    linux_audio_note = (
+        "On Linux, the host must provide the ALSA runtime library `libasound.so.2`; it is linked "
+        "by the native-audio backend and is not bundled in this archive.\n"
+        if target == "x86_64-unknown-linux-gnu"
+        else ""
+    )
     return f"""# Daedalus CLI {version}
 
 Native command-line build for `{target}`. The archive contains the `daedalus` executable, the
@@ -283,8 +293,13 @@ license and notice texts, and `build-manifest.json`.
 ```
 
 `inspect`, `run`, `step`, and `serve` use the CPU control path. This package is built with the
-`window` feature, which also enables `capture`. `view` opens a native window and requires a
-compatible graphics adapter. `capture` writes the renderer's bounded validation fixture as PNG.
+`window` and `native-audio` features; `window` also enables `capture`, and `native-audio` includes
+offline audio support. `view` opens a native window and requires a compatible graphics adapter.
+`capture` writes the renderer's bounded validation fixture as PNG. The command
+`project serve <directory> --protocol 2 --clock manual --audio offline` runs imported project
+audio without an audio device. Use `--audio native` only when the host has a working audio backend.
+Native playback can fail during device startup and never silently falls back to offline mixing.
+{linux_audio_note}
 
 This is a native CLI package only. It does not include a C# SDK, CoreCLR runtime, game assets,
 external content, or a game export. The manifest records the exact source commit, dirty state,
@@ -459,11 +474,13 @@ def _run_binary_smoke(binary: Path, version: str, cwd: Path) -> None:
     if not isinstance(output, dict) or output.get("command") != "inspect" or output.get("entity_count") != 2:
         raise PackageError("extracted CLI inspect smoke returned unexpected CPU state")
     try:
-        smoke_result = run_project_smoke(binary, cwd=cwd)
+        smoke_result = run_project_smoke(binary, cwd=cwd, audio=True)
     except SmokeError as error:
         raise PackageError(f"extracted CLI project smoke failed: {error}") from error
     if smoke_result.get("status") != "passed" or not smoke_result.get("checks"):
         raise PackageError("extracted CLI project smoke returned no passing checks")
+    if not isinstance(smoke_result.get("audio_offline"), dict):
+        raise PackageError("extracted CLI project smoke did not exercise imported offline audio")
 
 
 def verify_archive(
@@ -521,7 +538,7 @@ def verify_archive(
             or type(inventory.get("schema_version")) is not int
             or inventory.get("schema_version") != 1
             or inventory.get("target_triple") != manifest["target_triple"]
-            or inventory.get("requested_features") != ["daedalus-cli/window"]
+            or inventory.get("requested_features") != list(REQUESTED_FEATURES)
             or not isinstance(inventory.get("dependencies"), list)
             or type(inventory.get("dependency_count")) is not int
             or inventory.get("dependency_count") != len(inventory["dependencies"])

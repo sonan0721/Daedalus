@@ -3,8 +3,13 @@
 mod clock;
 pub mod live_session;
 pub mod project;
+#[cfg(feature = "audio")]
+mod project_audio;
 mod session_control;
 mod session_primitives;
+
+#[cfg(feature = "audio")]
+pub(crate) use project_audio::ProjectAudioRuntime;
 
 use std::time::Duration;
 
@@ -40,6 +45,14 @@ pub use live_session::{
 pub use project::{
     ProjectEntityState, ProjectSession, ProjectSessionCommandError, ProjectSessionReadError,
     ProjectSessionReport, ProjectSessionStartError,
+};
+#[cfg(feature = "audio")]
+pub use project_audio::{
+    AudioBankLimits, AudioBankResource, OfflineAudioSummary, SessionAudioBackend,
+    SessionAudioClipInfo, SessionAudioClipPage, SessionAudioCommandOutcome,
+    SessionAudioCommandResult, SessionAudioError, SessionAudioMutation, SessionAudioOperation,
+    SessionAudioOptions, SessionAudioResult, SessionAudioStartError, SessionAudioStatus,
+    SessionAudioVoiceId, SessionAudioVoiceInfo, SessionAudioVoicePage, SessionAudioVoiceState,
 };
 pub use session_control::{
     AuthorityAdmission, CommandTerminalResult, FrameReadError, ProjectEntityBinding,

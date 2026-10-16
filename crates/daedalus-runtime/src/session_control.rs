@@ -27,6 +27,20 @@ use crate::{
     EngineConfig, ProjectSession, ProjectSessionStartError, SnapshotPublication, StepReport,
 };
 
+#[cfg(feature = "audio")]
+use crate::ProjectAudioRuntime;
+#[cfg(feature = "audio")]
+use crate::SessionAudioOptions;
+#[cfg(feature = "audio")]
+use crate::project_audio::{
+    SessionAudioCommandResult, SessionAudioError, SessionAudioOperation, SessionAudioResult,
+};
+
+#[cfg(feature = "audio")]
+type ActorAudioOptions = Option<SessionAudioOptions>;
+#[cfg(not(feature = "audio"))]
+type ActorAudioOptions = ();
+
 const MAX_CONTROL_QUEUE: usize = 4_096;
 const MAX_CONTROL_CLIENTS: usize = 64;
 const MAX_PENDING_PER_CLIENT: usize = 256;
@@ -253,24 +267,43 @@ pub enum SessionOperation {
         count: u32,
     },
     Status,
+    #[cfg(feature = "audio")]
+    Audio(SessionAudioOperation),
 }
 
 impl SessionOperation {
     fn needs_inspect(&self) -> bool {
-        matches!(
+        let world = matches!(
             self,
             Self::ProjectInfo { .. }
                 | Self::GetTransform { .. }
                 | Self::ListTransforms { .. }
                 | Self::Status
-        )
+        );
+        #[cfg(feature = "audio")]
+        return world
+            || matches!(
+                self,
+                Self::Audio(
+                    SessionAudioOperation::Status
+                        | SessionAudioOperation::Clips { .. }
+                        | SessionAudioOperation::Voice { .. }
+                        | SessionAudioOperation::Voices { .. }
+                )
+            );
+        #[cfg(not(feature = "audio"))]
+        world
     }
 
     fn needs_mutate(&self) -> bool {
-        matches!(
+        let world = matches!(
             self,
             Self::SpawnTransform { .. } | Self::SetTransform { .. }
-        )
+        );
+        #[cfg(feature = "audio")]
+        return world || matches!(self, Self::Audio(SessionAudioOperation::Command { .. }));
+        #[cfg(not(feature = "audio"))]
+        world
     }
 
     fn is_step(&self) -> bool {
@@ -406,6 +439,8 @@ pub enum SessionRequestResult {
     Command(CommandTerminalResult),
     Step(Vec<StepReport>),
     Status(SessionStatus),
+    #[cfg(feature = "audio")]
+    Audio(SessionAudioResult),
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -443,6 +478,15 @@ pub enum SessionRequestError {
     ReplayWindowExpired { command_id: u128, high_water: u128 },
     #[error("pending command {0:?} has no service-owned request record")]
     UnknownPendingCommand(CommandId),
+    #[cfg(feature = "audio")]
+    #[error("could not reserve space in the bounded command replay ledger")]
+    ReplayStorageUnavailable,
+    #[cfg(feature = "audio")]
+    #[error("audio operations require a service started with audio enabled")]
+    AudioUnavailable,
+    #[cfg(feature = "audio")]
+    #[error(transparent)]
+    Audio(#[from] SessionAudioError),
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -469,6 +513,9 @@ pub enum SessionSubmitError {
     QueueSequenceExhausted,
     #[error("request ticket sequence is exhausted")]
     TicketIdExhausted,
+    #[cfg(feature = "audio")]
+    #[error("this session was started without audio enabled")]
+    AudioUnavailable,
 }
 
 #[derive(Debug, Error)]
@@ -487,6 +534,9 @@ pub enum SessionControlStartError {
     StartupDisconnected,
     #[error("project actor startup handshake failed: {0}")]
     StartupFailed(String),
+    #[cfg(feature = "audio")]
+    #[error("project audio startup failed: {0}")]
+    Audio(#[from] crate::project_audio::SessionAudioStartError),
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -962,6 +1012,8 @@ struct ControlShared {
     clock_mode: SessionClockMode,
     limits: SessionControlLimits,
     accepting: AtomicBool,
+    #[cfg(feature = "audio")]
+    audio_enabled: bool,
     stop: StopSignal,
     queue: RequestQueue,
     frames: Arc<LatestValueMailbox<SessionFrame>>,
@@ -974,6 +1026,10 @@ struct ControlShared {
     panic_before_next_request: AtomicBool,
     #[cfg(test)]
     panic_after_next_engine_step: AtomicBool,
+    #[cfg(all(test, feature = "audio"))]
+    panic_after_audio_command_effect: AtomicBool,
+    #[cfg(all(test, feature = "audio"))]
+    audio_command_effects: AtomicUsize,
     #[cfg(test)]
     pause_after_next_request_before_cleanup: AtomicBool,
     #[cfg(test)]
@@ -1008,7 +1064,28 @@ impl SessionControlService {
     /// Start the actor with the same immutable prepared-project allocation held by the caller.
     pub fn start_shared(
         prepared: Arc<PreparedProject>,
+        config: SessionControlConfig,
+    ) -> Result<Self, SessionControlStartError> {
+        #[cfg(feature = "audio")]
+        let audio_options = None;
+        #[cfg(not(feature = "audio"))]
+        let audio_options = ();
+        Self::start_shared_inner(prepared, config, audio_options)
+    }
+
+    #[cfg(feature = "audio")]
+    pub fn start_shared_with_audio(
+        prepared: Arc<PreparedProject>,
+        config: SessionControlConfig,
+        audio_options: SessionAudioOptions,
+    ) -> Result<Self, SessionControlStartError> {
+        Self::start_shared_inner(prepared, config, Some(audio_options))
+    }
+
+    fn start_shared_inner(
+        prepared: Arc<PreparedProject>,
         mut config: SessionControlConfig,
+        audio_options: ActorAudioOptions,
     ) -> Result<Self, SessionControlStartError> {
         config.limits.validate(&config.engine)?;
         if prepared.entities().len() > MAX_PROJECT_SESSION_ENTITIES {
@@ -1035,6 +1112,8 @@ impl SessionControlService {
             clock_mode: config.clock_mode,
             limits: config.limits,
             accepting: AtomicBool::new(true),
+            #[cfg(feature = "audio")]
+            audio_enabled: audio_options.is_some(),
             stop: StopSignal::default(),
             queue: RequestQueue::new(config.limits.command_capacity),
             frames: Arc::new(LatestValueMailbox::new(config.limits.max_retained_frames)),
@@ -1058,6 +1137,10 @@ impl SessionControlService {
             panic_before_next_request: AtomicBool::new(false),
             #[cfg(test)]
             panic_after_next_engine_step: AtomicBool::new(false),
+            #[cfg(all(test, feature = "audio"))]
+            panic_after_audio_command_effect: AtomicBool::new(false),
+            #[cfg(all(test, feature = "audio"))]
+            audio_command_effects: AtomicUsize::new(0),
             #[cfg(test)]
             pause_after_next_request_before_cleanup: AtomicBool::new(false),
             #[cfg(test)]
@@ -1069,7 +1152,15 @@ impl SessionControlService {
         let actor_shared = Arc::clone(&shared);
         let join = thread::Builder::new()
             .name("daedalus-project-control".to_owned())
-            .spawn(move || run_control_actor(prepared, config, actor_shared, startup_sender))
+            .spawn(move || {
+                run_control_actor(
+                    prepared,
+                    config,
+                    audio_options,
+                    actor_shared,
+                    startup_sender,
+                )
+            })
             .map_err(|error| SessionControlStartError::ThreadSpawn(error.to_string()))?;
         match startup_receiver.recv() {
             Ok(Ok(())) => {}
@@ -1213,6 +1304,10 @@ impl SessionControlClient {
         if !self.shared.accepting.load(Ordering::Acquire) {
             return Err(SessionSubmitError::Stopped);
         }
+        #[cfg(feature = "audio")]
+        if matches!(&operation, SessionOperation::Audio(_)) && !self.shared.audio_enabled {
+            return Err(SessionSubmitError::AudioUnavailable);
+        }
         if operation.needs_inspect() && !self.attachment.capabilities.inspect
             || operation.needs_mutate() && !self.attachment.capabilities.mutate
             || operation.is_step() && !self.attachment.capabilities.manual_step
@@ -1220,12 +1315,19 @@ impl SessionControlClient {
             return Err(SessionSubmitError::CapabilityDenied);
         }
         validate_operation(&operation, self.shared.clock_mode, self.shared.limits)?;
-        if let SessionOperation::SetTransform {
-            command_id: Some(id),
-            ..
-        } = &operation
-            && id.get() >= MAX_CALLER_COMMAND_ID
-        {
+        let caller_command_id = match &operation {
+            SessionOperation::SetTransform {
+                command_id: Some(id),
+                ..
+            } => Some(*id),
+            #[cfg(feature = "audio")]
+            SessionOperation::Audio(SessionAudioOperation::Command {
+                command_id: Some(id),
+                ..
+            }) => Some(*id),
+            _ => None,
+        };
+        if caller_command_id.is_some_and(|id| id.get() >= MAX_CALLER_COMMAND_ID) {
             return Err(SessionSubmitError::ReservedCommandId);
         }
         let mut queue = self
@@ -1333,6 +1435,19 @@ fn map_credit_error(_error: CreditError) -> SessionSubmitError {
     SessionSubmitError::ResultCapacity
 }
 
+fn replay_storage_error() -> SessionRequestError {
+    #[cfg(feature = "audio")]
+    {
+        SessionRequestError::ReplayStorageUnavailable
+    }
+    #[cfg(not(feature = "audio"))]
+    {
+        SessionRequestError::ActorFailed(
+            "could not reserve bounded command replay storage".to_owned(),
+        )
+    }
+}
+
 fn validate_operation(
     operation: &SessionOperation,
     mode: SessionClockMode,
@@ -1360,6 +1475,42 @@ fn validate_operation(
             }
         }
         SessionOperation::GetTransform { .. } | SessionOperation::Status => {}
+        #[cfg(feature = "audio")]
+        SessionOperation::Audio(operation) => match operation {
+            SessionAudioOperation::Status | SessionAudioOperation::Voice { .. } => {}
+            SessionAudioOperation::Clips { limit, .. }
+            | SessionAudioOperation::Voices { limit, .. } => {
+                if limit.is_some_and(|limit| limit == 0 || limit > limits.max_page_entities) {
+                    return Err(SessionSubmitError::InvalidRequest);
+                }
+            }
+            SessionAudioOperation::Command { mutation, .. } => match mutation {
+                crate::SessionAudioMutation::Play { volume, pan, .. }
+                    if !volume.is_finite()
+                        || !(0.0..=1.0).contains(volume)
+                        || !pan.is_finite()
+                        || !(-1.0..=1.0).contains(pan) =>
+                {
+                    return Err(SessionSubmitError::InvalidRequest);
+                }
+                crate::SessionAudioMutation::SetVolume { volume, .. }
+                    if !volume.is_finite() || !(0.0..=1.0).contains(volume) =>
+                {
+                    return Err(SessionSubmitError::InvalidRequest);
+                }
+                crate::SessionAudioMutation::SetPan { pan, .. }
+                    if !pan.is_finite() || !(-1.0..=1.0).contains(pan) =>
+                {
+                    return Err(SessionSubmitError::InvalidRequest);
+                }
+                crate::SessionAudioMutation::RenderOffline { frames }
+                    if !(1..=4_096).contains(frames) =>
+                {
+                    return Err(SessionSubmitError::InvalidRequest);
+                }
+                _ => {}
+            },
+        },
     }
     Ok(())
 }
@@ -1375,10 +1526,17 @@ struct PendingCommand {
 }
 
 #[derive(Clone)]
+enum CachedCommandResult {
+    World(CommandResult),
+    #[cfg(feature = "audio")]
+    Audio(SessionAudioCommandResult),
+}
+
+#[derive(Clone)]
 struct ReplayEntry {
     apply_tick: Option<Tick>,
     resolve_tick: Option<Tick>,
-    result: CommandResult,
+    result: CachedCommandResult,
 }
 
 struct ControlActor {
@@ -1392,12 +1550,16 @@ struct ControlActor {
     pending_commands: HashMap<CommandId, PendingCommand>,
     completed_replay: HashMap<CommandId, ReplayEntry>,
     replay_order: VecDeque<CommandId>,
+    #[cfg(feature = "audio")]
+    audio: Option<ProjectAudioRuntime>,
     active_request: Option<ActiveRequest>,
 }
 
 fn run_control_actor(
     prepared: Arc<PreparedProject>,
     config: SessionControlConfig,
+    #[cfg(feature = "audio")] audio_options: ActorAudioOptions,
+    #[cfg(not(feature = "audio"))] _audio_options: ActorAudioOptions,
     shared: Arc<ControlShared>,
     startup_sender: std::sync::mpsc::SyncSender<Result<(), SessionControlStartError>>,
 ) -> SessionShutdownReport {
@@ -1413,18 +1575,83 @@ fn run_control_actor(
             );
         }
     };
+    #[cfg(feature = "audio")]
+    let audio = match audio_options {
+        Some(options) => match ProjectAudioRuntime::start(
+            session.project(),
+            session.engine().world().session(),
+            options,
+        ) {
+            Ok(audio) => Some(audio),
+            Err(error) => {
+                shared.request_stop();
+                let _ = startup_sender.send(Err(SessionControlStartError::Audio(error)));
+                let _ = session.engine().shutdown();
+                return shutdown_report(
+                    &shared,
+                    SessionTermination::EngineError("project audio startup failed".to_owned()),
+                    Tick(0),
+                );
+            }
+        },
+        None => None,
+    };
     let initial_snapshot = session.engine_mut().publish_current_snapshot();
     if !matches!(initial_snapshot, SnapshotPublication::Published { .. }) {
         shared.request_stop();
         let _ = startup_sender.send(Err(SessionControlStartError::InitialSnapshot(
             initial_snapshot,
         )));
+        #[cfg(feature = "audio")]
+        if let Some(audio) = audio {
+            audio.shutdown();
+        }
         let _ = session.engine().shutdown();
         return shutdown_report(
             &shared,
             SessionTermination::EngineError(
                 "project session could not publish its tick-zero snapshot".to_owned(),
             ),
+            Tick(0),
+        );
+    }
+    let mut completed_replay = HashMap::new();
+    if completed_replay
+        .try_reserve(config.limits.replay_ledger_capacity.saturating_add(1))
+        .is_err()
+    {
+        shared.request_stop();
+        #[cfg(feature = "audio")]
+        if let Some(audio) = audio {
+            audio.shutdown();
+        }
+        let _ = session.engine().shutdown();
+        let _ = startup_sender.send(Err(SessionControlStartError::StartupFailed(
+            "could not reserve bounded command replay storage".to_owned(),
+        )));
+        return shutdown_report(
+            &shared,
+            SessionTermination::EngineError("could not reserve command replay ledger".to_owned()),
+            Tick(0),
+        );
+    }
+    let mut replay_order = VecDeque::new();
+    if replay_order
+        .try_reserve(config.limits.replay_ledger_capacity.saturating_add(1))
+        .is_err()
+    {
+        shared.request_stop();
+        #[cfg(feature = "audio")]
+        if let Some(audio) = audio {
+            audio.shutdown();
+        }
+        let _ = session.engine().shutdown();
+        let _ = startup_sender.send(Err(SessionControlStartError::StartupFailed(
+            "could not reserve bounded command replay storage".to_owned(),
+        )));
+        return shutdown_report(
+            &shared,
+            SessionTermination::EngineError("could not reserve command replay ledger".to_owned()),
             Tick(0),
         );
     }
@@ -1437,8 +1664,10 @@ fn run_control_actor(
         next_server_command_id: 1,
         caller_command_high_water: None,
         pending_commands: HashMap::new(),
-        completed_replay: HashMap::new(),
-        replay_order: VecDeque::new(),
+        completed_replay,
+        replay_order,
+        #[cfg(feature = "audio")]
+        audio,
         active_request: None,
     };
     if let Err(error) = actor.publish_latest_frame() {
@@ -1446,6 +1675,10 @@ fn run_control_actor(
         let _ = startup_sender.send(Err(SessionControlStartError::InitialFramePublication(
             error,
         )));
+        #[cfg(feature = "audio")]
+        if let Some(audio) = actor.audio.take() {
+            audio.shutdown();
+        }
         let _ = actor.session.engine().shutdown();
         return shutdown_report(
             &shared,
@@ -1503,6 +1736,11 @@ fn run_control_actor(
         }
     }
 
+    #[cfg(feature = "audio")]
+    if let Some(audio) = actor.audio.take() {
+        audio.shutdown();
+    }
+
     if let Err(error) = actor.session.engine_mut().shutdown()
         && termination == SessionTermination::StopRequested
     {
@@ -1524,6 +1762,12 @@ impl ControlActor {
         loop {
             if self.shared.stop.is_requested() {
                 return Ok(());
+            }
+            #[cfg(feature = "audio")]
+            if let Some(audio) = self.audio.as_mut() {
+                audio
+                    .reconcile()
+                    .map_err(|error| format!("audio service reconciliation failed: {error}"))?;
             }
             if let Some(request) = self.shared.queue.pop(ACTOR_POLL_INTERVAL) {
                 self.active_request = Some(ActiveRequest {
@@ -1631,6 +1875,10 @@ impl ControlActor {
                     stopping: self.shared.stop.is_requested(),
                 };
                 self.finish_cell(cell, credit, Ok(SessionRequestResult::Status(status)));
+            }
+            #[cfg(feature = "audio")]
+            SessionOperation::Audio(operation) => {
+                self.audio_operation(cell, credit, operation);
             }
         }
     }
@@ -1795,46 +2043,11 @@ impl ControlActor {
             },
         };
 
-        if caller_id {
-            if let Some(pending) = self.pending_commands.get_mut(&command_id) {
-                cell.set_authority(AuthorityAdmission {
-                    command_id,
-                    submission: CommandSubmission::DuplicatePending,
-                    apply_tick: Some(pending.apply_tick),
-                });
-                pending.tickets.push(PendingTicket { cell, credit });
-                return;
-            }
-            if let Some(replay) = self.completed_replay.get(&command_id).cloned() {
-                cell.set_authority(AuthorityAdmission {
-                    command_id,
-                    submission: CommandSubmission::DuplicateCompleted(replay.result.clone()),
-                    apply_tick: replay.apply_tick,
-                });
-                self.finish_cell(
-                    cell,
-                    credit,
-                    Ok(SessionRequestResult::Command(CommandTerminalResult {
-                        result: replay.result,
-                        resolve_tick: replay.resolve_tick,
-                    })),
-                );
-                return;
-            }
-            if let Some(high_water) = self.caller_command_high_water
-                && command_id.get() <= high_water
-            {
-                self.finish_cell(
-                    cell,
-                    credit,
-                    Err(SessionRequestError::ReplayWindowExpired {
-                        command_id: command_id.get(),
-                        high_water,
-                    }),
-                );
-                return;
-            }
-        }
+        let Some((cell, credit)) =
+            self.replay_existing_command(cell, credit, command_id, caller_id)
+        else {
+            return;
+        };
 
         let target = match self.resolve_handle(target) {
             Ok(target) => target,
@@ -1867,6 +2080,10 @@ impl ControlActor {
             apply_at: apply_tick,
             kind: WorldCommandKind::SetTransform(transform),
         };
+        if let Err(error) = self.prepare_replay_slot() {
+            self.finish_cell(cell, credit, Err(error));
+            return;
+        }
         if let Some(active) = self.active_request.as_mut() {
             active.possible_command_id = Some(command_id);
         }
@@ -1939,6 +2156,127 @@ impl ControlActor {
         }
     }
 
+    #[cfg(feature = "audio")]
+    fn audio_operation(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        operation: SessionAudioOperation,
+    ) {
+        match operation {
+            SessionAudioOperation::Command {
+                command_id,
+                mutation,
+            } => self.submit_audio_command(cell, credit, command_id, mutation),
+            query => {
+                let tick = self.session.engine().clock().current_tick();
+                let result = match self.audio.as_mut() {
+                    Some(audio) => audio
+                        .query(
+                            query,
+                            tick,
+                            self.config.limits.max_page_entities,
+                            MAX_RESULT_BYTES_PER_TICKET,
+                        )
+                        .map(SessionRequestResult::Audio)
+                        .map_err(SessionRequestError::Audio),
+                    None => Err(SessionRequestError::AudioUnavailable),
+                };
+                self.finish_cell(cell, credit, result);
+            }
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    fn submit_audio_command(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        requested_id: Option<CommandId>,
+        mutation: crate::SessionAudioMutation,
+    ) {
+        let (command_id, caller_id) = match requested_id {
+            Some(id) => (id, true),
+            None => match self.next_server_command_id() {
+                Some(id) => (id, false),
+                None => {
+                    self.finish_cell(
+                        cell,
+                        credit,
+                        Err(SessionRequestError::ActorFailed(
+                            "server command identifier space is exhausted".to_owned(),
+                        )),
+                    );
+                    return;
+                }
+            },
+        };
+
+        let Some((cell, credit)) =
+            self.replay_existing_command(cell, credit, command_id, caller_id)
+        else {
+            return;
+        };
+
+        if self.audio.is_none() {
+            self.finish_cell(cell, credit, Err(SessionRequestError::AudioUnavailable));
+            return;
+        }
+        if let Err(error) = self.prepare_replay_slot() {
+            self.finish_cell(cell, credit, Err(error));
+            return;
+        }
+
+        // Check both bounded ledger containers before the side effect. Advance caller high-water
+        // before execution so an abnormal exit is conservative about an accepted command.
+        if caller_id {
+            self.caller_command_high_water = Some(
+                self.caller_command_high_water
+                    .map_or(command_id.get(), |current| current.max(command_id.get())),
+            );
+        }
+        if let Some(active) = self.active_request.as_mut() {
+            active.possible_command_id = Some(command_id);
+        }
+        let observed_tick = self.session.engine().clock().current_tick();
+        let result = self
+            .audio
+            .as_mut()
+            .expect("audio sidecar checked above")
+            .execute(command_id, mutation, observed_tick);
+        #[cfg(test)]
+        {
+            self.shared
+                .audio_command_effects
+                .fetch_add(1, Ordering::AcqRel);
+            if self
+                .shared
+                .panic_after_audio_command_effect
+                .swap(false, Ordering::AcqRel)
+            {
+                panic!("injected actor failure after audio command effect");
+            }
+        }
+        self.remember_completed(
+            command_id,
+            ReplayEntry {
+                apply_tick: None,
+                resolve_tick: None,
+                result: CachedCommandResult::Audio(result.clone()),
+            },
+        );
+        if let Some(active) = self.active_request.as_mut() {
+            active.possible_command_id = None;
+        }
+        self.finish_cell(
+            cell,
+            credit,
+            Ok(SessionRequestResult::Audio(SessionAudioResult::Command(
+                result,
+            ))),
+        );
+    }
+
     fn next_server_command_id(&mut self) -> Option<CommandId> {
         if self.next_server_command_id >= MAX_CALLER_COMMAND_ID {
             return None;
@@ -1946,6 +2284,99 @@ impl ControlActor {
         let raw = SERVER_COMMAND_ID_PREFIX | self.next_server_command_id;
         self.next_server_command_id = self.next_server_command_id.checked_add(1)?;
         Some(CommandId::from_raw(raw))
+    }
+
+    /// Share one session-wide pending/completed replay path across world and audio mutations.
+    /// An original world command keeps its real authority receipt; an original audio command
+    /// returns only its typed terminal result.
+    fn replay_existing_command(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        command_id: CommandId,
+        caller_id: bool,
+    ) -> Option<(Arc<RequestCell>, Arc<CreditBundle>)> {
+        if !caller_id {
+            return Some((cell, credit));
+        }
+        if let Some(pending) = self.pending_commands.get_mut(&command_id) {
+            cell.set_authority(AuthorityAdmission {
+                command_id,
+                submission: CommandSubmission::DuplicatePending,
+                apply_tick: Some(pending.apply_tick),
+            });
+            pending.tickets.push(PendingTicket { cell, credit });
+            return None;
+        }
+        match self.completed_replay_for(command_id, true) {
+            Ok(Some(replay)) => {
+                self.finish_replayed_command(cell, credit, command_id, replay);
+                None
+            }
+            Ok(None) => Some((cell, credit)),
+            Err(error) => {
+                self.finish_cell(cell, credit, Err(error));
+                None
+            }
+        }
+    }
+
+    fn finish_replayed_command(
+        &self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        command_id: CommandId,
+        replay: ReplayEntry,
+    ) {
+        let result = match replay.result {
+            CachedCommandResult::World(result) => {
+                cell.set_authority(AuthorityAdmission {
+                    command_id,
+                    submission: CommandSubmission::DuplicateCompleted(result.clone()),
+                    apply_tick: replay.apply_tick,
+                });
+                SessionRequestResult::Command(CommandTerminalResult {
+                    result,
+                    resolve_tick: replay.resolve_tick,
+                })
+            }
+            #[cfg(feature = "audio")]
+            CachedCommandResult::Audio(result) => {
+                SessionRequestResult::Audio(SessionAudioResult::Command(result))
+            }
+        };
+        self.finish_cell(cell, credit, Ok(result));
+    }
+
+    fn completed_replay_for(
+        &self,
+        command_id: CommandId,
+        caller_id: bool,
+    ) -> Result<Option<ReplayEntry>, SessionRequestError> {
+        if !caller_id {
+            return Ok(None);
+        }
+        if let Some(replay) = self.completed_replay.get(&command_id) {
+            return Ok(Some(replay.clone()));
+        }
+        if let Some(high_water) = self.caller_command_high_water
+            && command_id.get() <= high_water
+        {
+            return Err(SessionRequestError::ReplayWindowExpired {
+                command_id: command_id.get(),
+                high_water,
+            });
+        }
+        Ok(None)
+    }
+
+    fn prepare_replay_slot(&mut self) -> Result<(), SessionRequestError> {
+        self.completed_replay
+            .try_reserve(1)
+            .map_err(|_| replay_storage_error())?;
+        self.replay_order
+            .try_reserve(1)
+            .map_err(|_| replay_storage_error())
     }
 
     fn step(&mut self, count: u32, cell: Arc<RequestCell>, credit: Arc<CreditBundle>) {
@@ -2010,7 +2441,7 @@ impl ControlActor {
                 ReplayEntry {
                     apply_tick: Some(pending.apply_tick),
                     resolve_tick: Some(report.tick),
-                    result: result.clone(),
+                    result: CachedCommandResult::World(result.clone()),
                 },
             );
             for ticket in pending.tickets {
@@ -2022,16 +2453,13 @@ impl ControlActor {
     fn remember_completed(&mut self, id: CommandId, entry: ReplayEntry) {
         if self.completed_replay.contains_key(&id) {
             self.replay_order.retain(|candidate| *candidate != id);
+        } else if self.completed_replay.len() >= self.config.limits.replay_ledger_capacity
+            && let Some(oldest) = self.replay_order.pop_front()
+        {
+            self.completed_replay.remove(&oldest);
         }
         self.completed_replay.insert(id, entry);
         self.replay_order.push_back(id);
-        while self.completed_replay.len() > self.config.limits.replay_ledger_capacity {
-            if let Some(oldest) = self.replay_order.pop_front() {
-                self.completed_replay.remove(&oldest);
-            } else {
-                break;
-            }
-        }
     }
 
     fn finish_cell(
@@ -2175,7 +2603,43 @@ fn estimate_result_bytes(result: &SessionRequestResult) -> usize {
                 })
         }
         SessionRequestResult::Status(_) => std::mem::size_of::<SessionStatus>(),
+        #[cfg(feature = "audio")]
+        SessionRequestResult::Audio(audio) => estimate_audio_result_bytes(audio),
     }
+}
+
+#[cfg(feature = "audio")]
+fn estimate_audio_result_bytes(result: &SessionAudioResult) -> usize {
+    if let Some(status) = result.as_status() {
+        return std::mem::size_of_val(status);
+    }
+    if let Some(page) = result.as_clips() {
+        return page
+            .clips()
+            .iter()
+            .fold(std::mem::size_of_val(page), |bytes, clip| {
+                bytes
+                    .saturating_add(std::mem::size_of_val(clip))
+                    .saturating_add(clip.asset_id().as_str().len())
+            });
+    }
+    if let Some(voice) = result.as_voice() {
+        return std::mem::size_of_val(voice)
+            .saturating_add(voice.clip_id().map_or(0, |clip_id| clip_id.as_str().len()));
+    }
+    if let Some(page) = result.as_voices() {
+        return page
+            .voices()
+            .iter()
+            .fold(std::mem::size_of_val(page), |bytes, voice| {
+                bytes
+                    .saturating_add(std::mem::size_of_val(voice))
+                    .saturating_add(voice.clip_id().map_or(0, |clip_id| clip_id.as_str().len()))
+            });
+    }
+    result.as_command().map_or(0, |command| {
+        std::mem::size_of_val(command).saturating_add(512)
+    })
 }
 
 fn shutdown_report(
@@ -2285,6 +2749,24 @@ mod tests {
     fn start(config: SessionControlConfig) -> SessionControlService {
         SessionControlService::start(prepared(ONE_ENTITY_SCENE), config)
             .expect("start project control service")
+    }
+
+    #[cfg(feature = "audio")]
+    fn start_audio(config: SessionControlConfig) -> SessionControlService {
+        start_audio_project(prepared(ONE_ENTITY_SCENE), config)
+    }
+
+    #[cfg(feature = "audio")]
+    fn start_audio_project(
+        project: PreparedProject,
+        config: SessionControlConfig,
+    ) -> SessionControlService {
+        SessionControlService::start_shared_with_audio(
+            Arc::new(project),
+            config,
+            crate::SessionAudioOptions::offline(8_000),
+        )
+        .expect("start project control service with offline audio")
     }
 
     fn default_config() -> SessionControlConfig {
@@ -2952,6 +3434,463 @@ mod tests {
         );
         expired.acknowledge().unwrap();
         let _ = service.shutdown();
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn audio_replay_is_terminal_without_authority_and_eviction_expires_the_id() {
+        let mut config = default_config();
+        config.limits.replay_ledger_capacity = 1;
+        let service = start_audio(config);
+        let client = service.attach().unwrap();
+
+        let mut typed_failure = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(30)),
+                mutation: crate::SessionAudioMutation::Play {
+                    clip: stable_id("missing-clip"),
+                    volume: 1.0,
+                    pan: 0.0,
+                    looping: false,
+                },
+            }),
+        );
+        let typed_failure_state = wait_terminal(&typed_failure);
+        assert!(matches!(
+            typed_failure_state.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Audio(audio))
+                if audio.as_command().unwrap().outcome()
+                    == &Err(crate::SessionAudioError::UnknownClip)
+        ));
+        let mut typed_failure_replay = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(30)),
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 1 },
+            }),
+        );
+        let typed_failure_replay_state = wait_terminal(&typed_failure_replay);
+        assert_eq!(
+            typed_failure_replay_state.terminal(),
+            typed_failure_state.terminal()
+        );
+        typed_failure.acknowledge().unwrap();
+        typed_failure_replay.acknowledge().unwrap();
+        drop(typed_failure_state);
+        drop(typed_failure_replay_state);
+
+        let mut first = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(31)),
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 32 },
+            }),
+        );
+        // Audio is immediate, but the stage wait still terminates successfully instead of
+        // waiting forever for a world-only AuthorityAdmission.
+        let first_state = first
+            .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(3))
+            .expect("audio terminal satisfies the authority-stage wait");
+        assert_eq!(first_state.phase(), RequestPhase::Terminal);
+        assert!(first_state.authority().is_none());
+        assert!(matches!(
+            first_state.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Audio(audio))
+                if matches!(audio.as_command().unwrap().outcome(),
+                    Ok(crate::SessionAudioCommandOutcome::Offline(summary))
+                        if summary.frames() == 32)
+        ));
+
+        // Same command ID with a different operation replays the first actual typed outcome.
+        let mut duplicate = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(31)),
+                mutation: crate::SessionAudioMutation::Play {
+                    clip: stable_id("missing-clip"),
+                    volume: 1.0,
+                    pan: 0.0,
+                    looping: false,
+                },
+            }),
+        );
+        let duplicate_state = duplicate
+            .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(3))
+            .expect("audio replay is immediately terminal");
+        assert_eq!(duplicate_state.phase(), RequestPhase::Terminal);
+        assert_eq!(duplicate_state.authority(), None);
+        assert_eq!(duplicate_state.terminal(), first_state.terminal());
+
+        let mut next = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(32)),
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 64 },
+            }),
+        );
+        let next_state = wait_terminal(&next);
+        assert!(matches!(
+            next_state.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Audio(audio))
+                if matches!(audio.as_command().unwrap().outcome(),
+                    Ok(crate::SessionAudioCommandOutcome::Offline(summary))
+                        if summary.frames() == 64 && summary.cumulative_frames() == 96)
+        ));
+
+        let mut expired = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(31)),
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 1 },
+            }),
+        );
+        let expired_state = wait_terminal(&expired);
+        assert_eq!(
+            expired_state.terminal().unwrap(),
+            &Err(SessionRequestError::ReplayWindowExpired {
+                command_id: 31,
+                high_water: 32,
+            })
+        );
+        first.acknowledge().unwrap();
+        duplicate.acknowledge().unwrap();
+        next.acknowledge().unwrap();
+        expired.acknowledge().unwrap();
+        let _ = service.shutdown();
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn audio_cross_kind_duplicate_preserves_world_admission_and_cached_outcome() {
+        let service = start_audio(default_config());
+        let client = service.attach().unwrap();
+        let id = CommandId::from_raw(41);
+        let target = SessionEntityTarget::StableId(stable_id("entity:hero"));
+        let mut world = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
+                target,
+                command_id: Some(id),
+                expected_revision: Revision(0),
+                apply_at: None,
+                transform: moved(41.0),
+            },
+        );
+        let accepted = world
+            .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(accepted.authority().unwrap().apply_tick, Some(Tick(1)));
+
+        let mut pending_audio_duplicate = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(id),
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 1 },
+            }),
+        );
+        let pending_admission = pending_audio_duplicate
+            .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(pending_admission.phase(), RequestPhase::AuthorityAccepted);
+        assert_eq!(
+            pending_admission.authority().unwrap().submission,
+            CommandSubmission::DuplicatePending
+        );
+        assert_eq!(
+            pending_admission.authority().unwrap().apply_tick,
+            Some(Tick(1))
+        );
+
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        wait_terminal(&step);
+        let world_result = wait_terminal(&world).terminal().unwrap().clone();
+        assert!(matches!(world_result, Ok(SessionRequestResult::Command(_))));
+        assert_eq!(
+            wait_terminal(&pending_audio_duplicate).terminal().unwrap(),
+            &world_result
+        );
+        pending_audio_duplicate.acknowledge().unwrap();
+        world.acknowledge().unwrap();
+        step.acknowledge().unwrap();
+
+        let mut completed_audio_duplicate = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(id),
+                mutation: crate::SessionAudioMutation::Play {
+                    clip: stable_id("missing-clip"),
+                    volume: 1.0,
+                    pan: 0.0,
+                    looping: false,
+                },
+            }),
+        );
+        let completed_admission = completed_audio_duplicate
+            .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
+            .unwrap();
+        let admission = completed_admission.authority().unwrap();
+        assert_eq!(admission.apply_tick, Some(Tick(1)));
+        assert!(matches!(
+            &admission.submission,
+            CommandSubmission::DuplicateCompleted(result)
+                if matches!(&world_result,
+                    Ok(SessionRequestResult::Command(command))
+                        if result == &command.result)
+        ));
+        assert_eq!(completed_admission.terminal(), Some(&world_result));
+        completed_audio_duplicate.acknowledge().unwrap();
+        let _ = service.shutdown();
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn audio_result_lease_uses_normal_lane_while_manual_step_keeps_its_reserve() {
+        let mut config = default_config();
+        config.limits.max_pending_per_client = 2;
+        config.limits.max_pending_total = 2;
+        config.limits.max_result_bytes_total = 2 * 1024 * 1024;
+        let service = start_audio(config);
+        let client = service.attach().unwrap();
+
+        let mut audio = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: None,
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 16 },
+            }),
+        );
+        let audio_state = wait_terminal(&audio);
+        assert!(audio_state.terminal().unwrap().is_ok());
+        assert_eq!(
+            client
+                .try_submit(SessionOperation::Audio(
+                    crate::SessionAudioOperation::Status
+                ))
+                .err()
+                .unwrap(),
+            SessionSubmitError::ResultCapacity
+        );
+
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        let step_state = wait_terminal(&step);
+        assert!(step_state.terminal().unwrap().is_ok());
+        audio.acknowledge().unwrap();
+        step.acknowledge().unwrap();
+        drop(audio_state);
+        drop(step_state);
+
+        let mut status = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Status),
+        );
+        let status_state = wait_terminal(&status);
+        assert!(matches!(
+            status_state.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Audio(audio)) if audio.as_status().is_some()
+        ));
+        status.acknowledge().unwrap();
+        let _ = service.shutdown();
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn audio_mutation_obeys_capability_and_replay_is_shared_with_world_ids() {
+        let service = start_audio(default_config());
+        let read_only = service
+            .attach_with_capabilities(SessionCapabilities {
+                inspect: true,
+                mutate: false,
+                manual_step: false,
+            })
+            .unwrap();
+        assert_eq!(
+            read_only
+                .try_submit(SessionOperation::Audio(
+                    crate::SessionAudioOperation::Command {
+                        command_id: None,
+                        mutation: crate::SessionAudioMutation::RenderOffline { frames: 8 },
+                    }
+                ))
+                .err()
+                .unwrap(),
+            SessionSubmitError::CapabilityDenied
+        );
+        let mut status = submit_after_busy(
+            &read_only,
+            SessionOperation::Audio(crate::SessionAudioOperation::Status),
+        );
+        wait_terminal(&status);
+        status.acknowledge().unwrap();
+
+        let client = service.attach().unwrap();
+        assert_eq!(
+            client
+                .try_submit(SessionOperation::Audio(
+                    crate::SessionAudioOperation::Command {
+                        command_id: Some(CommandId::from_raw(1_u128 << 127)),
+                        mutation: crate::SessionAudioMutation::RenderOffline { frames: 8 },
+                    }
+                ))
+                .err()
+                .unwrap(),
+            SessionSubmitError::ReservedCommandId
+        );
+        let id = CommandId::from_raw(53);
+        let mut audio = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(id),
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 8 },
+            }),
+        );
+        let audio_result = wait_terminal(&audio).terminal().unwrap().clone();
+        audio.acknowledge().unwrap();
+
+        // The world API shares the same lower-half replay namespace. Reusing an audio ID returns
+        // its original typed result and never creates a world mutation or synthetic authority.
+        let mut world_duplicate = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
+                target: SessionEntityTarget::StableId(stable_id("entity:hero")),
+                command_id: Some(id),
+                expected_revision: Revision(0),
+                apply_at: None,
+                transform: moved(53.0),
+            },
+        );
+        let replay = world_duplicate
+            .wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(replay.phase(), RequestPhase::Terminal);
+        assert!(replay.authority().is_none());
+        assert_eq!(replay.terminal(), Some(&audio_result));
+        world_duplicate.acknowledge().unwrap();
+
+        let mut read = submit_after_busy(
+            &client,
+            SessionOperation::GetTransform {
+                target: SessionEntityTarget::StableId(stable_id("entity:hero")),
+            },
+        );
+        let state = wait_terminal(&read);
+        let SessionRequestResult::Transform(transform) =
+            state.terminal().unwrap().as_ref().unwrap()
+        else {
+            panic!("world read returned a different result")
+        };
+        assert_eq!(transform.entity.revision, Revision(0));
+        read.acknowledge().unwrap();
+        let _ = service.shutdown();
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn imported_play_replay_after_ack_and_client_detach_does_not_start_a_second_voice() {
+        let service =
+            start_audio_project(crate::project_audio::test_wav_project(), default_config());
+        let first_client = service.attach().unwrap();
+        let id = CommandId::from_raw(55);
+        let mut first_play = submit_after_busy(
+            &first_client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(id),
+                mutation: crate::SessionAudioMutation::Play {
+                    clip: stable_id("clip_a"),
+                    volume: 1.0,
+                    pan: 0.0,
+                    looping: true,
+                },
+            }),
+        );
+        let first_state = wait_terminal(&first_play);
+        let first_result = first_state.terminal().unwrap().clone();
+        let Ok(SessionRequestResult::Audio(audio_result)) = &first_result else {
+            panic!("Play returned a different request result")
+        };
+        let Ok(crate::SessionAudioCommandOutcome::Played { voice }) =
+            audio_result.as_command().unwrap().outcome()
+        else {
+            panic!("imported Play did not start a voice")
+        };
+        let voice = *voice;
+        first_play.acknowledge().unwrap();
+        drop(first_state);
+        drop(first_play);
+        drop(first_client);
+
+        let second_client = service.attach().unwrap();
+        let mut duplicate = submit_after_busy(
+            &second_client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(id),
+                mutation: crate::SessionAudioMutation::Play {
+                    clip: stable_id("clip_b"),
+                    volume: 0.2,
+                    pan: 1.0,
+                    looping: false,
+                },
+            }),
+        );
+        let duplicate_state = wait_terminal(&duplicate);
+        assert_eq!(duplicate_state.terminal(), Some(&first_result));
+        duplicate.acknowledge().unwrap();
+
+        let mut voices = submit_after_busy(
+            &second_client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Voices {
+                offset: 0,
+                limit: None,
+            }),
+        );
+        let voices_state = wait_terminal(&voices);
+        let Ok(SessionRequestResult::Audio(audio_result)) =
+            voices_state.terminal().unwrap().as_ref()
+        else {
+            panic!("voice query returned a different request result")
+        };
+        let page = audio_result.as_voices().unwrap();
+        assert_eq!(page.total(), 1);
+        assert_eq!(page.voices()[0].voice(), voice);
+        assert_eq!(page.voices()[0].clip_id().unwrap().as_str(), "clip_a");
+        assert_eq!(page.voices()[0].looping(), Some(true));
+        voices.acknowledge().unwrap();
+        drop(voices_state);
+        let _ = service.shutdown();
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn actor_panic_after_audio_effect_reports_unknown_without_claiming_no_effect() {
+        let service = start_audio(default_config());
+        let client = service.attach().unwrap();
+        service
+            .shared
+            .panic_after_audio_command_effect
+            .store(true, Ordering::Release);
+        let mut ticket = submit_after_busy(
+            &client,
+            SessionOperation::Audio(crate::SessionAudioOperation::Command {
+                command_id: Some(CommandId::from_raw(54)),
+                mutation: crate::SessionAudioMutation::RenderOffline { frames: 24 },
+            }),
+        );
+        let state = wait_terminal(&ticket);
+        assert_eq!(
+            state.terminal().unwrap(),
+            &Err(SessionRequestError::OutcomeUnknown {
+                command_id: CommandId::from_raw(54),
+            })
+        );
+        assert_eq!(
+            service.shared.audio_command_effects.load(Ordering::Acquire),
+            1
+        );
+        ticket.acknowledge().unwrap();
+        assert!(matches!(
+            service.shutdown().termination,
+            SessionTermination::Panicked(_)
+        ));
     }
 
     #[test]

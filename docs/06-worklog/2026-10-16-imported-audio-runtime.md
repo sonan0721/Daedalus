@@ -45,7 +45,25 @@ Luna의 feature-off runtime 검사는65/65, CLI 검사는29/29로 통과했다. 
 - imported WAV volume 변경 시험은 첫 변경 block의 peak를 곧바로 steady-state gain으로 비교해 실패했다. pinned Kira `src/parameter.rs`는 이전/현재 값을 보유하고 `src/sound/static_sound/sound.rs`는 chunk 안에서 gain을 보간한다. zero-duration Tween도 이 chunk 보간을 없애지 않는다. 별도 settling render와 그 실제 clock 진행을 기록하고 정상 구간의 gain을 비교하도록 조사 중이며, 허용 오차를 넓혀 성공 처리하지 않는다.
 - 새 normal-lane credit 회귀는 ticket ACK 후에도 terminal progress Arc를 보유하면서 credit 회수를 기대해 ResultCapacity를 만났다. 기존 owned-result 계약대로 마지막 reader가 credit을 보유하는 동작이다. 시험에서 progress owner를 해제한 뒤 회복 요청을 하도록 수정했다. actor의 한도나 실패 응답을 완화하지 않았다.
 
-이후 수정·최종 suite·CLI 실제 consumer 결과는 실행 후 기록한다. 위 실패를 해결 전 통과 기록으로 바꾸거나 P03.2c 인수로 올리지 않는다.
+volume 시험은 실제256frame settling render를 Play/SetVolume 뒤 각각 진행하고 이후 구간을 비교하도록 수정했다. 총256/512/768/1024frame의 clock을 대조하고 원래 gain-ratio 허용 오차0.02는 유지했다. engine의 immediate Tween은 duration0이다. Tween::default의10ms를 원인으로 추정한 발언은 low-level override 확인 후 철회했다. 이 수정은 mixer가 하지 않은 render를 가짜로 진행시키거나 assertion을 완화한 것이 아니다.
+
+작업 인계 중 종료된 담당자에게 단순 메시지만 보내 후속 수정이 실행되지 않은 대기도 확인했다. coordinator가 상태 조회 후 명시적인 follow-up task로 재활성화했다. 별도 작업 배정과 단순 메시지 전송을 구분하는 규칙을 [개발 반복 파이프라인](../04-plan/development-iteration-pipeline.md)에 반영했다.
+
+## 엔진·공통 프로토콜 Rust checkpoint
+
+수정·source freeze 후 조정자가 같은 shared target에서 독립 실행했다.
+
+| 명령 | 실제 결과 | ignored raw log |
+| --- | --- | --- |
+| `cargo test -p daedalus-runtime --lib --features audio --locked` | 77pass/0fail, tests0.79초 | `dist/project-evidence/p03-root-runtime-audio.log` |
+| `cargo test -p daedalus-runtime --lib --all-features --locked` | 76pass/0fail, tests0.73초 | `dist/project-evidence/p03-root-runtime-native-audio.log` |
+| `cargo test -p daedalus-cli --all-features --locked` | 39pass/0fail, tests0.05초 | `dist/project-evidence/p03-root-cli-allfeatures.log` |
+
+native-audio feature가 켜진 CPU 검사도 실제 장치 출력 검사는 아니다. audio-only의 no-native startup 실패 시험1건은 all-features에서 조건 제외되므로77/76 차이가 난다. Luna의 feature-off runtime65/CLI29와 strict runtime default/audio·CLI window/window+audio Clippy도 통과했다. scoped diff/docs check가 통과했다.
+
+검사에는 imported Play의 ACK/클라이언트 detach 후 재접속 replay가 voice를 하나만 유지하는 것, 원래 world/audio typed outcome을 양방향 반환하는 것, pending world의 실제 authority 유지, 실패 결과 replay/eviction, normal-result 보유와 별도 Step reserve, audio 효과 뒤 주입한 panic의 OutcomeUnknown이 포함된다. 음향 구현과 별도 권한 actor/replay를 만들지 않았다. 공통 replay lookup·pending 연결·결과 게시 helper와 공통 renderer-neutral protocol2가 두 실행 경로를 처리한다. audio 결과 직렬화는 exhaustive match로 새 variant 누락을 compile 때 검출한다.
+
+CLI window+audio 첫 compile은 args.audio를 borrowed args와 함께 `'static` coordinator로 capture해 실패했다. spawn 전에 Copy flag를 만들도록 고친 뒤39tests/strict Clippy를 재실행했다. native 창을 실행하다 실패한 것으로 기록하지 않는다. 실제 project smoke·public WAV mixer/native·workspace/managed/GPU·clean package·CI/main 인수는 아직 대기다. **P03.2c와 D1/D2/D3는 계속 열려 있다.**
 
 ## 조사 한계
 

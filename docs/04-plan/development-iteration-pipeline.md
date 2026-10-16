@@ -129,3 +129,5 @@ PNG alpha 감사는 같은 readback/row-unpadding/encoder에 private 표현 poli
 | 장치 의존 테스트와 CPU/package fixture를 각각 수동 조립 | 기존 offline asset generator·bounded subprocess/JSONL·cleanup과 opt-in audio smoke | 동일 추출 binary의 offline 검사, 명시적 native 실제 출력 검사, 실패 cleanup |
 
 작업 분담도 manifest 먼저 고정→단일 Cargo.lock/target owner→source-only 병렬 구현→focused→통합→hardware→clean archive 순서로 유지한다. 루프별 wall time·변환/재생/clock counter와 source/binary hash는 실행 후 [작업 기록](../06-worklog/2026-10-16-imported-audio-runtime.md)에 남긴다. 재사용한 함수 수나 CI cache만으로 개발 시간 향상을 주장하지 않는다. C# SDK/schema 생성·source reload·AI live capture 같은 아직 없는 제작 기능도 이 공통화로 완료 처리하지 않는다.
+
+이 작업에서 종료된 작업자에게 단순 메시지만 보내 수정이 시작되지 않는 대기도 확인했다. 단순 메시지 전송과 새 작업 dispatch를 구분하고, 후속 수정의 담당자가 종료 상태이면 명시적으로 재활성화한 뒤 수신·source freeze를 확인한다. 실제 P03.2c volume 시험 수정은 작업자 상태 조회 후 후속 작업으로 다시 배정했다. Cargo 소유권은 그대로 유지했다. 대기 시간의 비교 계측은 없으므로 절감 분수/배율을 만들지 않는다. 별도 orchestration framework를 추가하는 대신 기존 작업 배정 기능을 올바르게 사용한다.

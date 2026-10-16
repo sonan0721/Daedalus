@@ -43,7 +43,7 @@ ProjectAudioBank는 PreparedProject catalog의 Audio entry를 borrowed 상태로
 | alias/unique clip 수 | 각각256 이하 | 기존 import max_assets와 동일. alias는 별도 PCM 복사를 만들지 않음 |
 | Kira Frame resident payload | 256 MiB | 기존 cooked128 MiB가 모두 mono4-byte PCM이면 stereo Frame8-byte 변환은 최대256 MiB. source catalog와 별도 |
 | conversion scratch | 128 MiB | Vec<Frame>→Arc<[Frame]> 최종화 시 추가 backing peak를 별도 예약. clip10M frames의 Frame80M bytes 포함 |
-| bank/voice metadata | 4 MiB | alias ID/table, unique clip wrapper/Arc header, active voice map/controls·table 여유. Kira 내부 mixer/command buffer·driver와 payload/RSS는 별도이며 이 값으로 전체 프로세스 상한을 주장하지 않음 |
+| runtime bank/voice-index metadata | 4 MiB | alias ID/table, unique clip wrapper/Arc header, runtime active voice index/requested controls·owner 여유. low-level voice arena와 Kira mixer/command buffer는 AudioConfig로 별도 제한하며 payload/driver/RSS를 이 값으로 포함·계측했다고 주장하지 않음 |
 | voices/mixer block | AudioConfig 기존 계약 | 기본128/128, hard4096/8192. 낮춘 값은 허용하되 상한 초과/0 거부 |
 | actor offline render | 호출당1..4096 frames | 기존 standalone helper의1,048,576 상한과 구분. 유한 PCM scratch32 KiB와 요약, 큰 JSON PCM 배열 없음 |
 

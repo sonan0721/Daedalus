@@ -27,4 +27,6 @@ P01.1에서 외부 data-only project의 실제 ECS 실행을 연결했다. 그�
 
 ## 통과 근거
 
-이 ADR 작성 시 P02.1은 Luna xhigh가 구현 중이다. public 계약을 먼저 공유했으며 독립 감사에서 frame retention·replay 보존의 누락을 보완했다. 실제 manual/realtime·복수 client·포화/ack/drop/timeout·dedup/eviction·shutdown·legacy 회귀를 통과해야 하위 구현을 체크한다. 아직 실행하지 않은 검사를 성공으로 기록하지 않는다. visible project/MCP/live capture와 전체 P02/D1 인수는 후속이다.
+public 계약을 먼저 공유했으며 독립 감사에서 frame retention·replay 보존의 누락을 보완했다. Luna xhigh의 native 구현과 backing 회수 수정을 조정자가 workspace CPU 157건·check/fmt/strict Clippy로 독립 확인했다. 기존 JSONL/managed/fixture window는 별도 회귀다. 새 검사는 manual/realtime·복수 client·포화/ack/drop/timeout·dedup/eviction·shutdown·panic·inner Arc retention을 포함한다. source와 범위는 [service 구현 절](../03-architecture/session-control-service.md), 실제 실행 근거는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
+
+legacy는 mailbox/stop만 공유하며 count-only result guard/receiver migration이 남았다. visible project/MCP/live capture·SDK attach와 전체 P02/D1 인수는 후속이다. 아직 실행하지 않은 adapter·platform 검사를 성공으로 기록하지 않는다.

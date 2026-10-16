@@ -3,6 +3,8 @@
 mod clock;
 pub mod live_session;
 pub mod project;
+mod session_control;
+mod session_primitives;
 
 use std::time::Duration;
 
@@ -38,6 +40,16 @@ pub use live_session::{
 pub use project::{
     ProjectEntityState, ProjectSession, ProjectSessionCommandError, ProjectSessionReadError,
     ProjectSessionReport, ProjectSessionStartError,
+};
+pub use session_control::{
+    AuthorityAdmission, CommandTerminalResult, FrameReadError, ProjectEntityBinding,
+    ProjectInfoPage, RequestAckError, RequestPhase, RequestProgress, RequestReadError,
+    RequestTicket, RequestTicketId, RequestWaitError, SessionAttachError, SessionCapabilities,
+    SessionClientId, SessionClockMode, SessionControlClient, SessionControlConfig,
+    SessionControlLimits, SessionControlService, SessionEntityState, SessionEntityTarget,
+    SessionFrame, SessionOperation, SessionRequestError, SessionRequestResult,
+    SessionShutdownReport, SessionStatus, SessionSubmitError, SessionTermination, TransformPage,
+    TransformState, WaitStage,
 };
 
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]

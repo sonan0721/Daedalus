@@ -99,9 +99,11 @@ P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 
 
 [session service 계약](../03-architecture/session-control-service.md)을 먼저 고정한다. 아래는 실제로 같은 project/authority를 공유해야 하며 interface나 fixture facade 생성만으로 체크하지 않는다. P02 전체와 D1은 계속 미통과다.
 
-- [ ] P02.1a: typed operation/result·attachment별 소유권·admission/outcome credit·clock mode의 public API 고정.
-- [ ] P02.1b: 실제 ProjectSession의 generic host/client·manual/realtime·frame·stop/shutdown과 복수 attachment 검증.
+- [x] P02.1a: typed operation/result·attachment별 소유권·admission/outcome credit·clock mode의 public API 고정.
+- [x] P02.1b: 실제 ProjectSession의 generic host/client·manual/realtime·frame·stop/shutdown과 복수 attachment 검증.
 - [ ] P02.1c: 기존 fixture LiveSession의 공통 kernel 재사용·호환 검사, migration 중 임시 중복의 명시/제거.
 - [ ] P02.2a: 외부 project view와 같은 session의 JSONL 제어, 입력/창 종료/포화 실패 처리.
 - [ ] P02.2b: source generation별 CPU/GPU resource 재사용과 transform-only update 계측.
 - [ ] P02.3: live capture/조건/입력·실제 MCP·SDK attach·trace, 필요한 2D/UI/서버 연결까지 제품 인수.
+
+P02.1a/b의 native library 검증은 수정 후 workspace CPU 157건·check/fmt/strict Clippy와 별도 기존 JSONL·managed·fixture window 회귀로 확인한다. `LiveSession`은 mailbox/stop만 공유하고 count-only result guard/receiver migration이 남아 P02.1c는 미체크다. 새 service에 CLI/window/MCP를 연결한 결과가 아니며 P02 전체/D1은 계속 열려 있다. [구체 근거](../06-worklog/2026-10-16-product-readiness-audit.md).

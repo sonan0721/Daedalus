@@ -1,6 +1,6 @@
 //! A validated authored project loaded into one authoritative runtime engine session.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use daedalus_content::project::{PreparedProject, ProjectError};
@@ -15,6 +15,8 @@ use daedalus_world::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub const MAX_PROJECT_SESSION_ENTITIES: usize = 16_384;
 
 use crate::{Engine, EngineBuildError, EngineBuilder, EngineConfig, EngineError, StepReport};
 
@@ -53,6 +55,8 @@ pub enum ProjectSessionStartError {
     },
     #[error("prepared project runtime entity IDs do not match its source scene IDs")]
     EntityProjectionIds,
+    #[error("prepared project has {0} entities; runtime session cap is 16384")]
+    EntityLimit(usize),
     #[error("prepared project entity '{stable_id}' has a non-finite runtime transform")]
     InvalidRuntimeTransform { stable_id: StableId },
     #[error(transparent)]
@@ -90,6 +94,7 @@ pub struct ProjectSession {
     project: PreparedProject,
     engine: Engine,
     entity_handles: BTreeMap<StableId, EntityHandle>,
+    stable_ids_by_handle: HashMap<EntityHandle, StableId>,
 }
 
 impl ProjectSession {
@@ -99,6 +104,11 @@ impl ProjectSession {
         config: EngineConfig,
     ) -> Result<Self, ProjectSessionStartError> {
         prepared.validate()?;
+        if prepared.entities().len() > MAX_PROJECT_SESSION_ENTITIES {
+            return Err(ProjectSessionStartError::EntityLimit(
+                prepared.entities().len(),
+            ));
+        }
         let source_ids: BTreeSet<_> = prepared
             .scene()
             .entities
@@ -143,6 +153,7 @@ impl ProjectSession {
 
         let mut engine = EngineBuilder::new(config).build()?;
         let mut entity_handles = BTreeMap::new();
+        let mut stable_ids_by_handle = HashMap::new();
         for (stable_id, transform) in spawn_data {
             let handle = engine.spawn_transform(transform).map_err(|source| {
                 ProjectSessionStartError::Spawn {
@@ -150,6 +161,7 @@ impl ProjectSession {
                     source,
                 }
             })?;
+            stable_ids_by_handle.insert(handle, stable_id.clone());
             entity_handles.insert(stable_id, handle);
         }
 
@@ -157,6 +169,7 @@ impl ProjectSession {
             project: prepared,
             engine,
             entity_handles,
+            stable_ids_by_handle,
         })
     }
 
@@ -177,6 +190,11 @@ impl ProjectSession {
     #[must_use]
     pub fn entity_handle(&self, stable_id: &StableId) -> Option<EntityHandle> {
         self.entity_handles.get(stable_id).copied()
+    }
+
+    #[must_use]
+    pub fn stable_id_for_handle(&self, handle: EntityHandle) -> Option<&StableId> {
+        self.stable_ids_by_handle.get(&handle)
     }
 
     /// Read stable IDs, handles, transforms and revisions from the current ECS world.

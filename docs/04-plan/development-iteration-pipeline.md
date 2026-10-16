@@ -12,7 +12,7 @@
 
 | ID | 반복되는 작업 | 공통화할 책임 | 정확성 조건 | 현재 |
 | --- | --- | --- | --- | --- |
-| DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 공통 경로 확인. visible/MCP/bridge service 통합 미완료 |
+| DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. legacy credit migration·visible/MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
 | DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | 미구현 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | 일부 JSONL 제어만 구현 |
@@ -63,6 +63,8 @@ AI 루프는 GUI automation만 반복하는 방식에 의존하지 않는다. CL
 
 ## DEV01/DEV08 후속 설계
 
-P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 typed 요청·owned 결과·clock·포화/종료를 먼저 고정한다. 계약 감사에서 Manual Step admission deadlock, client-held frame retention, 유한 replay의 의미를 보완한 뒤 Luna xhigh가 runtime/world를 구현 중이다. 실제 검사 전에는 공통 host 기능이 통과했다고 표시하지 않는다.
+P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 typed 요청·owned 결과·clock·포화/종료를 먼저 고정했다. 계약 감사에서 Manual Step admission deadlock, client-held frame retention, 유한 replay의 의미를 보완한 뒤 Luna xhigh가 runtime/world를 구현했다. root는 backing 회수 수정 후 workspace CPU 157건을 통과했고 기존 control/managed/fixture window는 별도 회귀로 확인한다. actor panic 때 in-flight ticket이 남는 문제와 중복 ticket의 종료 통계도 regression으로 막았다.
+
+실제 공통화는 native service와 legacy mailbox/stop까지다. legacy count-only result guard/receiver, JSONL·visible project·MCP·SDK attach는 남아 있다. 따라서 DEV01 전체 완료나 제작 속도 배율을 주장하지 않는다. 새 frontend는 이 kernel을 사용하고 adapter-specific envelope·동기/비동기 수명만 추가하는 것이 다음 검증 대상이다.
 
 별도 [renderer resource 재사용](../03-architecture/renderer-resource-reuse.md) 문서는 로컬 source 감사에서 확인한 per-frame flatten/buffer 생성과 project entity별 mesh 복제를 없애기 위한 다음 계약이다. CPU mesh handle/instance 갱신·GPU cache·in-flight retirement를 함께 다루고 upload count/bytes로 검증한다. 현재는 미구현이며 cache 속도 향상이나 전체 DEV08 완료를 뜻하지 않는다.

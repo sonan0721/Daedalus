@@ -36,7 +36,7 @@ Luna xhigh의 read-only API 제안을 바탕으로 다음 경계를 채택한다
 
 CPU source file hash를 사용할 수도 있지만 공개 Rust procedural mesh와 다음 voxel generation은 source file 없이 자원을 만든다. 그러므로 `MeshHandle::new`는 layout version·vertices의 canonical little-endian float bit patterns·indices를 자체 SHA-256으로 한 번 계산한다. `sha2 = "=0.10.9"`는 이미 content에서 lock된 package이며 renderer direct dependency 추가 시 lock package graph만 갱신하고 버전 해석은 바꾸지 않는다. parser source digest와 cooked geometry digest를 같은 값으로 표시하지 않는다. 생성 후 mutable vertex/index 접근을 제공하지 않는다.
 
-초기 설정은 preferred unique geometry 64 MiB·hard resident/retired total 128 MiB, cache entries 최대 256·instances 최대 16,384다. 단일 CPU mesh와 준비한 project unique geometry는 기존 64 MiB 상한을 유지한다. 한 packet의 expanded draw vertices 1,000,000·indices 3,000,000도 별도로 검사한다. instancing으로 unique memory가 줄었다고 draw workload 제한까지 없애지 않는다. tight configuration은 이 상한을 낮출 수 있고 0/모순/상향 초과는 실패다. device buffer/binding/vertex attribute 상한도 별도로 확인한다.
+초기 설정은 preferred unique geometry 64 MiB·hard resident/retired total 128 MiB, 한 packet의 active unique meshes 최대 256·cache active/retired 전체 entries 최대 512·instances 최대 16,384다. entry 수도 bytes와 마찬가지로 old→new 교체 여유를 둔다. active 256개와 hard total 256개를 같게 두어 전체 generation 교체가 영원히 막히게 하지 않는다. 단일 CPU mesh와 준비한 project unique geometry는 기존 64 MiB 상한을 유지한다. 한 packet의 expanded draw vertices 1,000,000·indices 3,000,000도 별도로 검사한다. instancing으로 unique memory가 줄었다고 draw workload 제한까지 없애지 않는다. tight configuration은 이 상한을 낮출 수 있고 0/모순/상향 초과는 실패다. device buffer/binding/vertex attribute 상한도 별도로 확인한다.
 
 기존 public `WindowMessage` variant 추가는 외부 exhaustive match를 깨뜨릴 수 있으므로 별도 packet message/entrypoint를 사용한다. window 내부 event·input·resize·overlay·종료 처리는 공통으로 유지한다. 기존 `WindowOutcome.final_scene`를 packet→대용량 scene 복사로 frame마다 채우지 않는다. 새 packet outcome과 legacy outcome의 종료 자료를 구분한다. 이 window 연결은 cache library 구현 후 public 서명을 고정하고 실제 project/JSONL adapter와 함께 검증한다.
 
@@ -67,6 +67,8 @@ eviction은 active packet과 미완료 submission이 쓰는 자원을 보호한�
 초기 byte 정책은 preferred working set 64 MiB와 transition/retirement 여유를 합한 **hard unique geometry 128 MiB** 후보로 둔다. 이 중 여유는 새 generation을 준비하면서 이전 complete frame을 유지하기 위한 것이다. hard total을 넘는 숨은 overcommit을 만들지 않는다. 실제 기본값과 entry/instance 제한은 API 확정 때 source budgets와 맞춰 잠근다.
 
 공간이 모자라면 candidate를 bounded pending/coalesced 상태로 두거나 명시적으로 거부하고 마지막 ready packet/UI를 계속 사용한다. candidate가 자체 상한을 초과한 경우와 in-flight retirement를 기다리면 되는 경우를 구분한다. max-size mesh의 old→new 교체가 영원히 진행하지 못하는 reserve/eviction deadlock도 시험한다.
+
+초기 정책에서 한 ready/candidate packet의 unique geometry는 preferred bytes/active entry 한도 안이어야 한다. tight config도 hard bytes가 preferred bytes의 최소 2배, total entry 한도가 active entry 한도의 최소 2배인지 checked arithmetic으로 검증한다. 이 교체 여유를 이전 정상 packet과 미완료 submission이 함께 쓰는 전체 한도에 포함한다. 여유가 모자란 상태에서 더 많은 generation을 연속 게시하면 완료된 retirement를 회수하거나 최신 candidate로 합치며 새 작업을 무제한 예약하지 않는다.
 
 [Queue::on_submitted_work_done](https://docs.rs/wgpu/27.0.1/wgpu/struct.Queue.html) callback에는 실제 poll/event-loop 진행이 필요하다. 첫 native 설계는 submission serial/completion watermark를 추적하고 nonwaiting poll로 retirement를 진행하는 안이다. window callback에서 매 frame GPU 완료를 동기 wait하지 않는다. offscreen blocking capture와 live async readback은 다른 실행 계약이다. [Buffer 수명](https://docs.rs/wgpu/27.0.1/wgpu/struct.Buffer.html)과 장치 손실/회수도 함께 검증한다. 위 API는 registry source 감사와 대조했으나 다이달로스 새 cache의 실행 근거는 아니다.
 

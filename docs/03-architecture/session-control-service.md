@@ -173,6 +173,6 @@ attachment는 inspect/input/mutate/manual-step/capture/shutdown capability를 �
 
 `daedalus-runtime/src/session_control.rs`가 실제 ProjectSession 한 개를 소유하고, `session_primitives.rs`가 atomic credit lease·bounded latest-value mailbox·stop signal을 제공한다. `daedalus-world`의 transform page는 ECS iterator에서 skip/take 후 작은 Vec만 만든다. source metadata는 result size를 계산한 뒤 복사한다. query/Step의 처리 중 panic도 ticket을 terminal로 만들고, 적용 여부가 불명확한 command는 OutcomeUnknown으로 남긴다.
 
-조정자의 all-feature workspace 검사는 CPU 151건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 통과했다. 세부 입력·binary identity·한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
+조정자의 수정 후 all-feature workspace 검사는 CPU 157건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 별도 회귀로 확인한다. 세부 입력·binary identity·각 실행 시점과 한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
 
 legacy `LiveSession`은 같은 mailbox/stop primitive를 사용하지만 count-only AtomicUsize result credit와 기존 단일 result receiver는 유지한다. owned ticket 서비스와 accounting 의미가 달라 강제로 통합하지 않았다. 이 남은 migration은 P02.1c/DEV01 미완료이며 두 path의 테스트를 유지한다. CLI protocol 2·실제 project window·MCP·SDK attach는 아직 이 service의 adapter로 구현되지 않았다.

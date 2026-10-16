@@ -43,6 +43,8 @@ physics·script·gameplay를 임의로 동시에 실행하지 않는다. 입력�
 
 CPU snapshot 회수와 GPU 사용 중인 buffer/texture 회수는 다른 수명이다. 커맨드 제출만으로 자원을 즉시 재사용하지 않는다. 실제 memory ordering·게시 알고리즘은 모델 리뷰 뒤 선택한다.
 
+native core의 현재 구현은 wrapper뿐 아니라 `entities` 공유 배열의 수명도 generation별 weak record로 추적한다. 내부 배열 Arc나 snapshot 값의 clone만 보유해도 publication cap에 계수하고, 포화 때 extraction을 호출하지 않는다. native service의 last-good frame과 producer 예산은 별도이며 cap-one 자체 교착을 피하는 제한·회귀는 [service 계약](session-control-service.md)과 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다. 이 CPU 구현을 전체 렌더/GPU 수명 검증으로 확장하지 않는다.
+
 ## 큐와 포화 정책
 
 | 데이터 | 전달 의미 | 포화 시 동작 |

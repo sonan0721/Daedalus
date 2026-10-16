@@ -106,3 +106,13 @@ Luna xhigh의 source freeze 후 조정자는 pinned Rust의 workspace check/fmt�
 후속 read-only 감사에서 기존 core snapshot의 내부 `entities` Arc만 보유하면 wrapper weak tracking을 우회하는 retention 결함과 service의 world dedup capacity 상한 누락을 확인했다. 다음 수정은 core의 wrapper/backing generation 이중 추적·service backing probe·producer 최소 2/frame 최소 1의 별도 예산·dedup 16,384 hard cap이다. 이 문단의 151건은 그 후속 수정 **이전** 통합 결과이며, 수정 후 재검사를 별도로 기록한다. audit issue를 열어둔 채 PR을 병합하지 않는다.
 
 DEV01의 실제 공통화는 native owned-ticket actor와 legacy mailbox/stop까지다. legacy count-only result guard/receiver와 CLI/window/MCP/managed attach는 남았으며 P02.1c·P02 전체·D1을 통과시키지 않는다. 다음 renderer API 명세는 동일 mesh hash/Arc와 stable instance 갱신을 고정했지만 아직 코드나 개선 수치가 아니다.
+
+## P02.1 회수 수정 후 최종 독립 검사
+
+core는 snapshot wrapper와 entity backing의 weak record를 함께 유지한다. service mailbox는 별도의 backing probe를 사용하며 성공한 weak upgrade 참조를 계수 중 유지해 baseline 경쟁을 피한다. wrapper와 backing을 함께 잡아도 generation은 한 번만 세고 둘 다 해제되면 회수한다. native service의 producer capacity는 2~64, frame capacity는 1~64로 독립 검증하며 config를 몰래 확대/축소하지 않는다. command dedup capacity는 1~16,384다. Luna xhigh의 수정 후 read-only source 재감사에서 해당 두 결함과 cap-one 진행 경로의 추가 finding은 없었다. 이 감사는 테스트 실행과 별도다.
+
+조정자는 수정 후 check/fmt·all-feature workspace **CPU 157건 통과, hardware 2건 기본 ignored**·all-target/all-feature strict Clippy·fresh bridge/window CLI build를 다시 통과했다. core 10건과 runtime 48건에는 backing-only/복제 snapshot 보유·lazy extraction 포화·해제 후 회복, frame cap 1과 producer cap 2의 반복 진행, dedup 설정 경계가 포함된다. pinned .NET의 실제 Rust self-test·integration 2 scenario도 새 bridge로 다시 통과했다. Python regression은 이번 branch의 변경 없는 script 기준 41건 통과이며 문서 link checker를 새 Markdown 편집 후 다시 통과했다.
+
+`dist/project-evidence/p02-final-cpu-smoke.json`은 동일 18개 검사를 통과했다. 최종 debug CLI SHA-256은 `b6100d7d4b4db7e435e53ee9eff4090c7806177960ec2dd295ea2a5654d31fa0`다. `p02-final-legacy-window.json`의 실제 M3 Pro/Metal 창은 같은 3초/10,000 work iterations 조건에서 loading frame 320·tick 186, terrain job 1개 시작/취소·active 0·time_limit/stop_requested 종료를 기록했다. 새 physical key/pointer 입력이나 external project window 검증은 아니다. concurrent native/managed smoke의 wall time을 과거 단독 실행과 비교하지 않는다.
+
+이 근거로 P02.1a/b의 좁은 native library 항목만 체크한다. P02.1c와 모든 frontend attach·live capture·실제 MCP·UI/asset/gameplay 통합·전체 D1/D2/D3는 계속 진행 중이다. 다음 package/PR은 clean source와 실제 required/native jobs를 확인한 뒤 별도 기록한다.

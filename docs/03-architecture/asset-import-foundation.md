@@ -15,13 +15,17 @@ scene asset descriptor는 기존 schema 1과 StableId/uri를 유지한다. 기�
 | kind / importer | 이번 실제 출력 | 오류로 진단할 요구 |
 | --- | --- | --- |
 | daedalus.model / gltf2-static-v1 | glTF/GLB static triangle·indexed/nonindexed 정규화·node hierarchy/local transform·primitive ordinal·POSITION/NORMAL/optional UV0·PBR scalar factor·base-color PNG·sampler | skin/animation/morph·sparse accessor·다른 primitive topology·없는 필수 normal/texture UV·JPEG/data URI·unsupported used/required extension·미지원 texture role/alpha/double-sided 요구 |
-| daedalus.image / png-rgba8-v1 | PNG palette/gray/RGB/RGBA·tRNS 확장→RGBA8, usage/sampler/mip 의미 | 16-bit/HDR/특수 color-profile 변환은 첫 버전에서 명시 unsupported. 알 수 없는 gamma 보정으로 색을 바꾸지 않음 |
+| daedalus.image / png-rgba8-v1 | PNG palette/gray/RGB/RGBA·tRNS 확장→RGBA8, 아래 명시 color policy·usage/sampler/mip 의미 | 16-bit/HDR/ICC·비지원 primaries 변환은 명시 unsupported. 알 수 없는 profile을 임의 삭제하지 않음 |
 | daedalus.sprite_atlas / sprite-atlas-json-v1 | versioned JSON·declared image StableId·region StableId/pixel rect/pivot/pixels-per-unit·nearest/no-mip pixel policy | 경계 초과/중복 ID/잘못된 image kind·지원하지 않는 atlas filter/mip policy |
 | daedalus.audio / wav-pcm-f32-v1 | WAV integer PCM 8/16/24/32 또는 float32→f32 mono/stereo·sample rate/frame count | 비지원 codec/channel/rate·잘린 payload·비유한 sample. finite float sample을 임의 clamp하지 않음 |
 
 model은 default scene을 사용하고, default가 없으면 scene 1개인 경우만 자동 선택한다. 여러 scene이면 metadata의 명시 scene index를 요구한다. scene 없는 자료를 임의 identity node로 그리게 만들지 않는다. transform·index·accessor/count·material scalar·실제 attribute payload를 검증하고 노드 cycle/multiple-parent·depth 초과를 오류로 낸다. 미사용 정의의 보존과 실제 선택 scene roots를 구분한다.
 
 base-color는 sRGB 의미, alpha는 linear 값이며 normal/data map을 color로 잘못 해석하지 않는다. UV 없는 geometry는 untextured material에만 허용한다. glTF의 material factor·UV·sampler 의미를 잃지 않는다. 첫 3D opaque color mip은 versioned linear-light box filter 뒤 sRGB encoding으로 생성한다. odd dimension·1×N·known-color를 검사한다. atlas는 nearest/no-mip으로 유지한다. 미지원 alpha-aware mip/재질을 조용히 근사하지 않는다.
+
+PNG base decode의 color policy는 `rgba8-srgb-normalize-v2`다. sRGB chunk가 있으면 그 transfer를 우선하고 이미 encoded인 RGB를 유지한다. sRGB가 없고 유효한 양의 gAMA가 있으면 `linear = (sample/255)^(100000/gAMA_integer)`를 계산한 뒤 IEC sRGB의 piecewise transfer로 encode·round-to-nearest-u8한다. alpha에는 적용하지 않는다. cHRM은 없거나 sRGB 표준 좌표 `(31270,32900;64000,33000;30000,60000;15000,6000)`일 때만 지원하며, 없는 primaries는 기존 color-role 정책과 같이 sRGB primaries를 가정한다. gamma/색좌표가 모두 없을 때는 sRGB encoded color라는 저작 기본값을 사용한다. cHRM만 표준인 경우에도 같은 기본 transfer를 사용한다. 비표준 cHRM·ICC/cICP/HDR profile은 이번 경로에서 Unsupported다. 명시 sRGB가 있으면 gAMA/cHRM보다 우선하되 ICC/HDR 충돌을 허용하는 일반 CMS가 되지는 않는다. 이 의미는 [PNG 규격의 gAMA](https://www.w3.org/TR/png-3/#11gAMA)·[sRGB 우선순위](https://www.w3.org/TR/png-3/#11sRGB)를 근거로 한 엔진 정책이며, 전체 색관리 지원은 아니다.
+
+8-bit RGB의256-entry LUT를 한 번 계산해 기존 RGBA buffer에 적용하며 전체 image를 추가 복사하지 않는다. row 취소와 예산을 유지한다. PNG memo/base-cache domain에 정책 v2를 반영해 이전 decoder-policy 산출물을 성공 hit로 쓰지 않는다. known gamma1.0의128→188, sRGB 태그의128 유지, alpha 유지, palette/tRNS·표준/비표준 cHRM·cold/warm parity를 검증한다. 실제 Kenney 원본의 gAMA45455를 삭제하거나 파일을 재저장해 성공 처리하지 않는다.
 
 image leaf key는 width/height·layout·color/settings도 포함한다. 같은 RGBA byte sequence를 1×4와 2×2로 해석한 이미지는 다른 resource다. mip extent는 [wgpu-types 27.0.1 Extent3d](https://docs.rs/wgpu-types/27.0.1/wgpu_types/struct.Extent3d.html#method.mip_level_size)의 `max(1, base >> level)`과 일치해야 한다. 홀수 축을 ceil 절반으로 만들거나 edge texel을 버리지 않고 source footprint의 면적을 반영해 filtering한다. base 전체와 각 mip을 계산용으로 다시 clone하지 않으며 row/chunk 취소 지점을 유지한다.
 

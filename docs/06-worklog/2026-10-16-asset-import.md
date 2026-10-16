@@ -48,6 +48,12 @@ CLI 담당자의 실제 assets smoke는 payload corruption 복구 다음 두 결
 
 확인한 제약은 Nature Kit 선택 GLB의 `KHR_materials_unlit` 선언과 Interface Sounds의 실제 OGG 배포다. 전자는 미지원 진단 입력으로, 후자는 변환 출처를 보존한 WAV 입력으로 사용한다. 아직 엔진 importer를 실행하지 않았으므로 cook/재생/표시 성공은 기록하지 않는다.
 
+## root 첫 통합 실행과 실제 원본에서 발견한 경계
+
+root workspace check/fmt·strict all-target/all-feature Clippy와 CPU234건이 통과했다. 기본 제외 hardware3건은 이 합계에 넣지 않았다. 최종 source 고정 후 Python 전체53건/6.684초/exit0, 실제 debug CLI `--assets`31건 통과를 확인했다. payload/header corruption 복구와 typed Unsupported를 포함한다. 새 native graph의 notice collector도201개 resolved dependency와 원문 notice를 생성했다.
+
+실제 공개 자료 project의 첫 cold cook은 Kenney palette PNG의 gAMA45455 때문에 Unsupported로 종료했다. 원본 chunk는 IHDR/gAMA/PLTE/tRNS/IDAT/IEND이며 sRGB chunk는 없다. generated fixture만 통과한 것을 공개 원본 성공으로 기록하지 않는다. S78의 PNG 규격을 확인하고, gAMA 기반 RGB를 linear를 거쳐 sRGB로 정규화하는 정책과 decoder-cache version을 계약에 먼저 보완했다. 원본/alpha 보존·표준 primaries 가정·특수 profile 미지원 의미를 명시한다. 이 변경 후 관련 검사를 다시 수행해야 P03.1 인수를 판단할 수 있다.
+
 ## 다음 검사
 
 native/byte parity, 실제 네 포맷 출력, aggregate/preallocation 한도, 외부/embedded PNG edit의 selective reuse, geometry/atlas/WAV 변경, corrupt/atomic/pin/cache ownership, 취소/이전 정상 catalog 보존, bounded CLI 진단과 기존 CPU18/view22 회귀를 확인한다. 새 dependency의 locked graph·notice·필요한 Wasm compile도 별도 확인한다. 실제 명령과 counter가 나오기 전에는 DEV03/DEV05 최적화 효과를 달성했다고 표시하지 않는다.

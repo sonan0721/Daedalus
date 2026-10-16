@@ -6,7 +6,7 @@
 
 [P03.1](asset-import-foundation.md)의 CPU catalog를 실제 실행 경로에서 사용한다. `project cook`의 summary나 PNG decoder 성공은 화면 표시·2D·사운드 재생의 근거가 아니다. 동일 PreparedProject/catalog와 authority snapshot을 renderer/audio adapter가 소비하게 하며 CLI별 loader·geometry 복사·임시 fixture를 새로 만들지 않는다.
 
-P03.1 로컬 인수와 필수 CI 확인 뒤 구현을 연다. 아래 세 하위 경로를 각각 검증하되 P03.2는 모두 통과해야 체크한다. W단계/D1 인수와 두 게임 인수는 계속 별도다.
+P03.1은 로컬 인수와 PR10 필수 CI·main 병합까지 확인했다. a 경로는 [상세 구현 계약](model-texture-runtime.md)으로 구체화했다. 아래 세 하위 경로를 각각 검증하되 P03.2는 모두 통과해야 체크한다. W단계/D1 인수와 두 게임 인수는 계속 별도다.
 
 | 하위 경로 | 필요한 실제 결과 | 대체할 수 없는 검증 |
 | --- | --- | --- |

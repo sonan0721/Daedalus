@@ -131,6 +131,9 @@ P02.1c의 [결과 수명 계약](../03-architecture/legacy-session-result-lifeti
 P03.1 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있다. source 고정 후 CPU240·Python53·assets31·실제 native22, 공개 원본/negative 진단과 clean local release archive/extracted assets31/native22를 확인했다. [PR10](https://github.com/sonan0721/Daedalus/pull/10)의 최종 head `1c4631c`에서 필수 다섯 CI·두 native packaged assets step을 확인하고 main `5c04db825436d28c39119f74aab6fcf1a55eb51e`에 병합했다. main과 검증한 PR head의 file tree도 동일하다. 이 CPU 하위 gate만 통과한 것이며 실제 consumer·P03 전체·D1/D2/D3는 아래와 같이 계속 미완료다.
 
 - [ ] P03.2: 같은 project/catalog의 실제 model primitive·UV/texture/sampler·sprite/2D·audio consumer 연결과 렌더/출력 검증. [소비 계약 초안](../03-architecture/asset-runtime-consumers.md)의 a/b/c 경로를 각각 확정·검증하며 모두 통과해야 체크한다.
+- [ ] P03.2a: [모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)의 binding·공통 view/capture·유한 GPU 자원·실제 픽셀/공개 모델 검증. 구현 계약만 확정했으며 검사 미실행.
+- [ ] P03.2b: sprite/2D 실제 소비와 픽셀 검증. 별도 상세 계약 후 착수.
+- [ ] P03.2c: imported PCM의 실제 audio 소비와 voice/device 수명 검증. 별도 상세 계약 후 착수.
 - [ ] P03.3: background import/cook·candidate/active resource generation·실행 중 변경/취소/stale·실패 last-good·CPU/GPU/audio 회수.
 - [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.
 

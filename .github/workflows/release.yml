@@ -47,6 +47,10 @@ jobs:
           fi
           python3 --version
 
+      - name: Install Linux ALSA build and runtime library
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes pkg-config libasound2-dev
+
       - name: Test package creation and release metadata checks
         run: |
           python3 -m unittest discover -s scripts -p 'test_package_cli.py' -v
@@ -73,9 +77,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-package-window-remap1-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-package-window-native-audio-remap1-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-package-window-remap1-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-${{ runner.arch }}-package-window-native-audio-remap1-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build and package native CLI
         env:
@@ -87,13 +91,32 @@ jobs:
           fi
           python3 scripts/package_cli.py "${package_args[@]}"
 
-      - name: Verify packaged CLI asset cook smoke
+      - name: Verify packaged CLI asset and offline audio smoke
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
         run: |
           python3 scripts/smoke_project.py \
             --cli "dist/release-package/$EXPECTED_TARGET/daedalus" \
-            --assets
+            --assets \
+            --audio
+
+      - name: Verify packaged Linux audio runtime linkage
+        if: runner.os == 'Linux'
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binary="dist/release-package/$EXPECTED_TARGET/daedalus"
+          linkage="$(ldd "$binary")"
+          printf '%s\n' "$linkage"
+          if grep -Eq 'libasound\.so[^[:space:]]* => not found' <<<"$linkage"; then
+            echo "packaged CLI cannot locate the ALSA runtime library" >&2
+            exit 1
+          fi
+          if ! grep -Eq 'libasound\.so([.[:space:]]|$)' <<<"$linkage"; then
+            echo "native-audio CLI is not linked against the installed ALSA runtime" >&2
+            exit 1
+          fi
 
       - name: Prepare CI artifact files
         env:
@@ -174,7 +197,7 @@ jobs:
               --arg version "$expected_version" \
               --arg commit "$RELEASE_COMMIT" \
               --arg target "$target" \
-              '.schema_version == 1 and .cli_version == $version and .exact_commit == $commit and .dirty == false and .target_triple == $target and .cargo_profile == "release" and (.cargo_features | index("window") != null) and (.third_party_notices_sha256 | test("^[0-9a-f]{64}$")) and (.dependency_inventory_sha256 | test("^[0-9a-f]{64}$"))' \
+              '.schema_version == 1 and .cli_version == $version and .exact_commit == $commit and .dirty == false and .target_triple == $target and .cargo_profile == "release" and (.cargo_features | index("window") != null) and (.cargo_features | index("native-audio") != null) and (.third_party_notices_sha256 | test("^[0-9a-f]{64}$")) and (.dependency_inventory_sha256 | test("^[0-9a-f]{64}$"))' \
               "${manifests[0]}" > /dev/null
             cp "$archive" "$release_assets/"
             cp "$checksum" "$release_assets/"

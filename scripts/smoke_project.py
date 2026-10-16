@@ -223,6 +223,61 @@ def _write_project(directory: Path, *, unsupported_component: bool = False) -> N
     )
 
 
+def _write_pcm16_mono(path: Path, sample_rate: int, samples: Sequence[int]) -> None:
+    """Write one checked mono PCM16 fixture without duplicating WAV setup."""
+
+    if sample_rate <= 0 or not samples or any(
+        type(sample) is not int or not -32_768 <= sample <= 32_767 for sample in samples
+    ):
+        raise SmokeError("offline smoke received invalid mono PCM16 fixture data")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(os.fspath(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+
+def _write_audio_project(directory: Path) -> None:
+    """Create an external project whose only imported resource is a finite WAV clip."""
+
+    (directory / "audio").mkdir(parents=True)
+    sample_rate = 8_000
+    frame_count = sample_rate // 4
+    samples = [
+        int(12_000 * math.sin(2.0 * math.pi * 440.0 * frame / sample_rate))
+        for frame in range(frame_count)
+    ]
+    _write_pcm16_mono(directory / "audio" / "tone.wav", sample_rate, samples)
+
+    manifest = {"schema_version": 1, "name": "offline-audio-smoke", "scene": "scene.json"}
+    scene = {
+        "schema_version": 1,
+        "revision": 0,
+        "entities": [],
+        "assets": [
+            {
+                "id": "asset:smoke-tone",
+                "kind": "daedalus.audio",
+                "uri": "audio/tone.wav",
+                "metadata": {"schema_version": 1},
+            },
+            {
+                "id": "asset:smoke-tone-alias",
+                "kind": "daedalus.audio",
+                "uri": "audio/tone.wav",
+                "metadata": {"schema_version": 1},
+            },
+        ],
+    }
+    (directory / "daedalus.project.json").write_text(
+        json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    (directory / "scene.json").write_text(
+        json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+
 def _png_rgba(width: int, height: int, color: tuple[int, int, int, int]) -> bytes:
     return _png_rgba_pixels(width, height, bytes(color) * width * height)
 
@@ -366,11 +421,7 @@ def _write_asset_project(directory: Path) -> None:
     (directory / "atlases" / "sprites.json").write_text(
         json.dumps(atlas, separators=(",", ":")) + "\n", encoding="utf-8"
     )
-    with wave.open(os.fspath(directory / "audio" / "tone.wav"), "wb") as audio:
-        audio.setnchannels(1)
-        audio.setsampwidth(2)
-        audio.setframerate(8_000)
-        audio.writeframes(struct.pack("<4h", 0, 1_000, -1_000, 0))
+    _write_pcm16_mono(directory / "audio" / "tone.wav", 8_000, (0, 1_000, -1_000, 0))
 
     manifest = {"schema_version": 1, "name": "offline-asset-smoke", "scene": "scene.json"}
     scene = {
@@ -774,11 +825,7 @@ def _run_asset_cook_smoke(
     _cook_expect_only(atlas_edit, label="atlas rectangle edit", changed_metric="atlasCooks")
     checks.append("asset_cook_atlas_metadata_keeps_png")
 
-    with wave.open(os.fspath(project / "audio" / "tone.wav"), "wb") as audio:
-        audio.setnchannels(1)
-        audio.setsampwidth(2)
-        audio.setframerate(8_000)
-        audio.writeframes(struct.pack("<4h", 0, 1_001, -1_001, 0))
+    _write_pcm16_mono(project / "audio" / "tone.wav", 8_000, (0, 1_001, -1_001, 0))
     audio_edit = _cook_project(binary, project, cwd=cwd, timeout=timeout)
     _cook_expect_only(audio_edit, label="WAV sample edit", changed_metric="audioCooks")
     checks.append("asset_cook_wav_edit_keeps_geometry")
@@ -1370,8 +1417,11 @@ def _v2_submit(
     server: _JsonlProjectServer,
     request_id: str,
     operation: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> tuple[str, bool]:
-    deadline = time.monotonic() + server.timeout
+    submit_timeout = server.timeout if timeout is None else min(timeout, server.timeout)
+    deadline = time.monotonic() + submit_timeout
     attempt = 0
     while True:
         remaining = deadline - time.monotonic()
@@ -1458,9 +1508,16 @@ def _v2_terminal_result(poll: dict[str, Any], *, context: str) -> dict[str, Any]
     return result
 
 
-def _v2_ack(server: _JsonlProjectServer, request_id: str, ticket: str) -> None:
-    deadline = time.monotonic() + server.timeout
-    for attempt in range(int(server.timeout * 100) + 1):
+def _v2_ack(
+    server: _JsonlProjectServer,
+    request_id: str,
+    ticket: str,
+    *,
+    timeout: float | None = None,
+) -> None:
+    ack_timeout = server.timeout if timeout is None else min(timeout, server.timeout)
+    deadline = time.monotonic() + ack_timeout
+    for attempt in range(int(ack_timeout * 100) + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise SmokeError(f"timed out acknowledging ticket {ticket!r}")
@@ -1478,6 +1535,556 @@ def _v2_ack(server: _JsonlProjectServer, request_id: str, ticket: str) -> None:
         _expect(response.get("result", {}).get("kind") == "acked", "ack returned another result kind", response)
         return
     raise SmokeError(f"ticket {ticket!r} exceeded its bounded acknowledgement retry count")
+
+
+def _v2_audio_result(
+    server: _JsonlProjectServer,
+    request_id: str,
+    operation: dict[str, Any],
+    *,
+    expected_kind: str,
+    timeout: float | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    result_timeout = server.timeout if timeout is None else min(timeout, server.timeout)
+    ticket, reused = _v2_submit(server, request_id, operation, timeout=result_timeout)
+    _expect(not reused, f"new audio request {request_id!r} unexpectedly reused a ticket")
+    poll = _v2_poll_until(
+        server,
+        ticket,
+        request_prefix=f"{request_id}-poll",
+        phase="terminal",
+        timeout=result_timeout,
+    )
+    terminal_result = _v2_terminal_result(poll, context=request_id)
+    _expect(terminal_result.get("kind") == "audio", "audio operation returned another result kind", terminal_result)
+    audio_result = terminal_result.get("data")
+    _expect(isinstance(audio_result, dict), "audio operation returned no typed data", terminal_result)
+    _expect(
+        audio_result.get("kind") == expected_kind,
+        f"audio operation returned {audio_result.get('kind')!r}, expected {expected_kind!r}",
+        audio_result,
+    )
+    data = audio_result.get("data")
+    _expect(isinstance(data, dict), "audio operation returned no result payload", audio_result)
+    _v2_ack(server, f"{request_id}-ack", ticket, timeout=result_timeout)
+    return data, terminal_result
+
+
+def _v2_audio_capabilities(server: _JsonlProjectServer, *, request_id: str) -> dict[str, Any]:
+    capabilities = _v2_result(
+        server,
+        request_id,
+        {"op": "capabilities"},
+        kind="capabilities",
+    )
+    _expect(capabilities.get("audio_enabled") is True, "requested project audio backend is not enabled", capabilities)
+    operations = capabilities.get("operations")
+    _expect(
+        isinstance(operations, list) and "audio_command" in operations,
+        "audio-enabled session omitted audio_command capability",
+        capabilities,
+    )
+    return capabilities
+
+
+def _v2_audio_command(
+    server: _JsonlProjectServer,
+    request_id: str,
+    command_id: str,
+    mutation: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    return _v2_audio_result(
+        server,
+        request_id,
+        {"op": "audio_command", "command_id": command_id, "mutation": mutation},
+        expected_kind="command",
+    )
+
+
+def _run_audio_project_smoke(
+    binary: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    project = root / "authored-offline-audio-project"
+    _write_audio_project(project)
+    command = [
+        "project",
+        "serve",
+        os.fspath(project),
+        "--protocol",
+        "2",
+        "--clock",
+        "manual",
+        "--audio",
+        "offline",
+    ]
+    checks: list[str] = []
+    with _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="offline audio project serve",
+    ) as server:
+        capabilities = _v2_audio_capabilities(server, request_id="offline-audio-capabilities")
+        status, _ = _v2_audio_result(
+            server,
+            "offline-audio-status",
+            {"op": "audio_status"},
+            expected_kind="status",
+        )
+        session = status.get("session")
+        backend = status.get("backend")
+        _expect(isinstance(session, str) and session.isdigit(), "audio status omitted decimal session identity", status)
+        _expect(
+            isinstance(backend, dict)
+            and backend.get("kind") == "offline"
+            and backend.get("data", {}).get("sample_rate") == 48_000,
+            "project did not select the requested 48 kHz offline backend",
+            status,
+        )
+        _expect(
+            status.get("alias_count") == 2
+            and status.get("unique_clip_count") == 1
+            and status.get("converted_clip_count") == 1,
+            "two aliases of the imported WAV were not prepared as one shared clip",
+            status,
+        )
+        checks.append("offline_imported_wav_bank_and_backend")
+
+        clips, _ = _v2_audio_result(
+            server,
+            "offline-audio-clips",
+            {"op": "audio_clips", "offset": 0, "limit": 8},
+            expected_kind="clips",
+        )
+        clip_rows = clips.get("clips")
+        _expect(
+            isinstance(clip_rows, list)
+            and [row.get("asset_id") for row in clip_rows] == ["asset:smoke-tone", "asset:smoke-tone-alias"]
+            and all(row.get("channels") == 1 and row.get("frames") == "2000" and row.get("sample_rate") == 8_000 for row in clip_rows),
+            "audio bank page did not expose both imported aliases and their PCM source shape",
+            clips,
+        )
+        checks.append("offline_imported_wav_alias_page")
+
+        play_operation = {
+            "op": "audio_command",
+            "command_id": "71001",
+            "mutation": {
+                "kind": "play",
+                "clip": "asset:smoke-tone",
+                "volume": 1.0,
+                "pan": -1.0,
+                "looping": True,
+            },
+        }
+        played, played_terminal = _v2_audio_result(
+            server,
+            "offline-audio-play",
+            play_operation,
+            expected_kind="command",
+        )
+        _expect(played.get("command_id") == "71001", "Play returned another command ID", played)
+        play_outcome = played.get("outcome")
+        _expect(
+            isinstance(play_outcome, dict) and play_outcome.get("kind") == "played",
+            "imported WAV Play did not return a typed Played outcome",
+            played,
+        )
+        voice = play_outcome.get("data", {}).get("voice")
+        _expect(
+            isinstance(voice, dict)
+            and voice.get("session") == session
+            and isinstance(voice.get("sequence"), str)
+            and voice["sequence"].isdigit(),
+            "Play returned an invalid session-scoped decimal voice ID",
+            played,
+        )
+
+        duplicate_play, duplicate_play_terminal = _v2_audio_result(
+            server,
+            "offline-audio-play-replay",
+            play_operation,
+            expected_kind="command",
+        )
+        _expect(
+            duplicate_play == played and duplicate_play_terminal == played_terminal,
+            "replayed Play did not return the original typed result after ticket acknowledgement",
+            {"first": played, "replay": duplicate_play},
+        )
+        voices, _ = _v2_audio_result(
+            server,
+            "offline-audio-voices",
+            {"op": "audio_voices", "offset": 0, "limit": 8},
+            expected_kind="voices",
+        )
+        voice_rows = voices.get("voices")
+        _expect(
+            isinstance(voice_rows, list)
+            and len(voice_rows) == 1
+            and voice_rows[0].get("voice") == voice
+            and voice_rows[0].get("state") == "playing"
+            and voice_rows[0].get("looping") is True,
+            "duplicate Play created another voice or lost the requested loop state",
+            voices,
+        )
+        checks.append("offline_play_replay_after_ack_is_idempotent")
+
+        render_operation = {
+            "op": "audio_command",
+            "command_id": "71002",
+            "mutation": {"kind": "render_offline", "frames": 1024},
+        }
+        rendered, rendered_terminal = _v2_audio_result(
+            server,
+            "offline-audio-render",
+            render_operation,
+            expected_kind="command",
+        )
+        summary = rendered.get("outcome", {}).get("data")
+        _expect(
+            rendered.get("command_id") == "71002"
+            and rendered.get("outcome", {}).get("kind") == "offline"
+            and isinstance(summary, dict)
+            and summary.get("frames") == 1024
+            and summary.get("sample_rate") == 48_000
+            and summary.get("channels") == 2
+            and summary.get("cumulative_frames") == "1024"
+            and type(summary.get("left_peak")) in (int, float)
+            and summary["left_peak"] > 0.0
+            and type(summary.get("right_peak")) in (int, float)
+            and summary["right_peak"] < 1.0e-6
+            and summary.get("nonzero_samples", 0) > 0,
+            "RenderOffline did not report the imported WAV in the hard-left stereo mix",
+            rendered,
+        )
+        duplicate_render, duplicate_render_terminal = _v2_audio_result(
+            server,
+            "offline-audio-render-replay",
+            render_operation,
+            expected_kind="command",
+        )
+        _expect(
+            duplicate_render == rendered and duplicate_render_terminal == rendered_terminal,
+            "replayed RenderOffline advanced the mixer or changed its original summary",
+            {"first": rendered, "replay": duplicate_render},
+        )
+        status_after = _v2_audio_result(
+            server,
+            "offline-audio-status-after-render",
+            {"op": "audio_status"},
+            expected_kind="status",
+        )[0]
+        _expect(
+            status_after.get("offline_progressed_frames") == "1024"
+            and status_after.get("active_voice_count") == 1,
+            "replayed offline render advanced the mixer twice or lost its active voice",
+            status_after,
+        )
+        checks.append("offline_render_reports_pcm_and_replay_does_not_advance_twice")
+
+        volume_zero, _ = _v2_audio_command(
+            server,
+            "offline-audio-volume-zero",
+            "71003",
+            {"kind": "set_volume", "voice": voice, "volume": 0.0},
+        )
+        _expect(
+            volume_zero.get("outcome", {}).get("kind") == "volume_set"
+            and volume_zero.get("outcome", {}).get("data", {}).get("requested_volume") == 0.0,
+            "SetVolume did not return its actual typed requested value",
+            volume_zero,
+        )
+        volume_settle, _ = _v2_audio_command(
+            server,
+            "offline-audio-volume-settle",
+            "71004",
+            {"kind": "render_offline", "frames": 256},
+        )
+        _expect(
+            volume_settle.get("outcome", {}).get("data", {}).get("cumulative_frames") == "1280",
+            "SetVolume settle block did not advance the offline mixer by its actual frames",
+            volume_settle,
+        )
+        silent_block, _ = _v2_audio_command(
+            server,
+            "offline-audio-volume-zero-measure",
+            "71005",
+            {"kind": "render_offline", "frames": 256},
+        )
+        silent_summary = silent_block.get("outcome", {}).get("data")
+        _expect(
+            silent_block.get("outcome", {}).get("kind") == "offline"
+            and isinstance(silent_summary, dict)
+            and silent_summary.get("cumulative_frames") == "1536"
+            and silent_summary.get("left_peak", 1.0) < 1.0e-6
+            and silent_summary.get("right_peak", 1.0) < 1.0e-6,
+            "SetVolume(0) did not produce a silent measured offline block after settling",
+            silent_block,
+        )
+
+        restored_volume, _ = _v2_audio_command(
+            server,
+            "offline-audio-volume-restore",
+            "71006",
+            {"kind": "set_volume", "voice": voice, "volume": 0.75},
+        )
+        right_pan, _ = _v2_audio_command(
+            server,
+            "offline-audio-pan-right",
+            "71007",
+            {"kind": "set_pan", "voice": voice, "pan": 1.0},
+        )
+        _expect(
+            restored_volume.get("outcome", {}).get("kind") == "volume_set"
+            and restored_volume.get("outcome", {}).get("data", {}).get("requested_volume") == 0.75
+            and right_pan.get("outcome", {}).get("kind") == "pan_set"
+            and right_pan.get("outcome", {}).get("data", {}).get("requested_pan") == 1.0,
+            "SetVolume or SetPan did not preserve the requested audio controls",
+            {"volume": restored_volume, "pan": right_pan},
+        )
+        pan_settle, _ = _v2_audio_command(
+            server,
+            "offline-audio-pan-settle",
+            "71008",
+            {"kind": "render_offline", "frames": 256},
+        )
+        _expect(
+            pan_settle.get("outcome", {}).get("data", {}).get("cumulative_frames") == "1792",
+            "SetPan settle block did not advance the offline mixer",
+            pan_settle,
+        )
+        right_block, _ = _v2_audio_command(
+            server,
+            "offline-audio-pan-right-measure",
+            "71009",
+            {"kind": "render_offline", "frames": 512},
+        )
+        right_summary = right_block.get("outcome", {}).get("data")
+        _expect(
+            right_block.get("outcome", {}).get("kind") == "offline"
+            and isinstance(right_summary, dict)
+            and right_summary.get("cumulative_frames") == "2304"
+            and right_summary.get("right_peak", 0.0) > 0.0
+            and right_summary.get("left_peak", 1.0) < 1.0e-6,
+            "SetPan(1) did not produce a measured hard-right offline block after settling",
+            right_block,
+        )
+
+        stopped, _ = _v2_audio_command(
+            server,
+            "offline-audio-stop",
+            "71010",
+            {"kind": "stop", "voice": voice},
+        )
+        _expect(
+            stopped.get("outcome", {}).get("kind") == "stop_requested",
+            "Stop did not return its typed stop-request outcome",
+            stopped,
+        )
+        stop_render, _ = _v2_audio_command(
+            server,
+            "offline-audio-stop-render",
+            "71011",
+            {"kind": "render_offline", "frames": 128},
+        )
+        ended_voice, _ = _v2_audio_result(
+            server,
+            "offline-audio-ended-voice",
+            {"op": "audio_voice", "voice": voice},
+            expected_kind="voice",
+        )
+        stopped_status, _ = _v2_audio_result(
+            server,
+            "offline-audio-status-after-stop",
+            {"op": "audio_status"},
+            expected_kind="status",
+        )
+        _expect(
+            stop_render.get("outcome", {}).get("data", {}).get("cumulative_frames") == "2432"
+            and ended_voice.get("voice") == voice
+            and ended_voice.get("state") == "ended"
+            and stopped_status.get("active_voice_count") == 0,
+            "Stop plus a real offline render did not reap the ended voice",
+            {"stop_render": stop_render, "voice": ended_voice, "status": stopped_status},
+        )
+        checks.append("offline_volume_pan_stop_and_voice_reap")
+
+        failed_play_operation = {
+            "op": "audio_command",
+            "command_id": "71012",
+            "mutation": {
+                "kind": "play",
+                "clip": "asset:missing-smoke-tone",
+                "volume": 1.0,
+                "pan": 0.0,
+                "looping": False,
+            },
+        }
+        rejected, rejected_terminal = _v2_audio_result(
+            server,
+            "offline-audio-typed-failure",
+            failed_play_operation,
+            expected_kind="command",
+        )
+        _expect(
+            rejected.get("command_id") == "71012"
+            and rejected.get("outcome", {}).get("kind") == "error"
+            and rejected.get("outcome", {}).get("data", {}).get("code") == "unknown_clip",
+            "accepted invalid Play did not preserve its explicit typed failure",
+            rejected,
+        )
+        replayed_rejection, replayed_rejection_terminal = _v2_audio_result(
+            server,
+            "offline-audio-typed-failure-replay",
+            failed_play_operation,
+            expected_kind="command",
+        )
+        _expect(
+            replayed_rejection == rejected and replayed_rejection_terminal == rejected_terminal,
+            "typed audio failure replay changed or retried the original command",
+            {"first": rejected, "replay": replayed_rejection},
+        )
+        checks.append("offline_typed_command_failure_replays_after_ack")
+
+    return {
+        "invocation_kind": "headless_protocol2_manual_offline",
+        "concurrent_with_native_window": False,
+        "project_name": "offline-audio-smoke",
+        "capabilities": capabilities,
+        "status": status,
+        "clip_page": clips,
+        "played": played,
+        "duplicate_play": duplicate_play,
+        "voices": voices,
+        "offline_render": rendered,
+        "volume_zero_render": silent_block,
+        "pan_right_render": right_block,
+        "stop_render": stop_render,
+        "ended_voice": ended_voice,
+        "status_after_stop": stopped_status,
+        "typed_failure": rejected,
+        "status_after_render": status_after,
+        "checks": checks,
+    }
+
+
+def _run_native_audio_smoke(
+    binary: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    project = root / "authored-native-audio-project"
+    _write_audio_project(project)
+    command = [
+        "project",
+        "serve",
+        os.fspath(project),
+        "--protocol",
+        "2",
+        "--clock",
+        "manual",
+        "--audio",
+        "native",
+    ]
+    started = time.monotonic()
+    with _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="native audio project serve",
+    ) as server:
+        capabilities = _v2_audio_capabilities(server, request_id="native-audio-capabilities")
+        status, _ = _v2_audio_result(
+            server,
+            "native-audio-status",
+            {"op": "audio_status"},
+            expected_kind="status",
+        )
+        _expect(
+            status.get("backend", {}).get("kind") == "native"
+            and status.get("alias_count") == 2
+            and status.get("unique_clip_count") == 1,
+            "native audio session did not open the imported project bank/backend",
+            status,
+        )
+        played, _ = _v2_audio_result(
+            server,
+            "native-audio-play",
+            {
+                "op": "audio_command",
+                "command_id": "72001",
+                "mutation": {
+                    "kind": "play",
+                    "clip": "asset:smoke-tone",
+                    "volume": 1.0,
+                    "pan": 0.0,
+                    "looping": False,
+                },
+            },
+            expected_kind="command",
+        )
+        _expect(
+            played.get("outcome", {}).get("kind") == "played",
+            "native imported-WAV Play did not reach the selected audio backend",
+            played,
+        )
+        voice = played.get("outcome", {}).get("data", {}).get("voice")
+        _expect(
+            isinstance(voice, dict)
+            and voice.get("session") == status.get("session")
+            and isinstance(voice.get("sequence"), str),
+            "native Play returned an invalid session voice identity",
+            played,
+        )
+
+        completion_timeout = min(timeout, 10.0)
+        deadline = time.monotonic() + completion_timeout
+        attempts = 0
+        last_voice: dict[str, Any] | None = None
+        while time.monotonic() < deadline and attempts < int(completion_timeout * 20) + 1:
+            attempts += 1
+            remaining = max(0.01, deadline - time.monotonic())
+            last_voice, _ = _v2_audio_result(
+                server,
+                f"native-audio-voice-{attempts}",
+                {"op": "audio_voice", "voice": voice},
+                expected_kind="voice",
+                timeout=min(0.5, remaining),
+            )
+            if last_voice.get("state") == "ended":
+                break
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        _expect(
+            isinstance(last_voice, dict) and last_voice.get("state") == "ended",
+            "finite imported native voice did not reach backend-observed completion before the deadline",
+            {"status": status, "played": played, "last_voice": last_voice, "attempts": attempts},
+        )
+        _expect(last_voice.get("voice") == voice, "native completion query returned another voice", last_voice)
+
+    return {
+        "invocation_kind": "headless_protocol2_manual_native",
+        "concurrent_with_native_window": False,
+        "capabilities": capabilities,
+        "backend": status.get("backend"),
+        "session": status.get("session"),
+        "played": played,
+        "voice_completion": last_voice,
+        "completion_poll_count": attempts,
+        "completion_wait_seconds": round(time.monotonic() - started, 6),
+        "evidence": "finite voice reached backend-reported ended state; no speaker loopback measurement",
+    }
 
 
 def _v2_latest_frame(server: _JsonlProjectServer, *, timeout: float) -> dict[str, Any]:
@@ -2218,12 +2825,17 @@ def _run_sprite_project_smoke(
         {"last_presented": presented, "window": view.get("window")},
     )
     geometry_resources = view.get("resources")
+    # The viewer may coalesce the initial tick-zero packet before its first
+    # surface draw. This smoke verifies initialized globals and the actual
+    # final presented camera; the ordered GPU regression
+    # asset_backpressure_preserves_ready_packet_and_does_not_count_busy_candidate_as_drawn
+    # verifies the exact camera-refresh write delta.
     _expect(
         isinstance(geometry_resources, dict)
         and geometry_resources.get("geometry_upload_count") == 1
         and type(geometry_resources.get("global_write_count")) is int
-        and geometry_resources["global_write_count"] >= 2,
-        "sprite window did not reuse one unit quad and refresh camera globals after authority movement",
+        and geometry_resources["global_write_count"] >= 1,
+        "sprite window did not initialize camera globals while reusing one unit quad",
         geometry_resources,
     )
     texture_resources = view.get("asset_resources")
@@ -2529,6 +3141,8 @@ def run_project_smoke(
     assets: bool = False,
     models: bool = False,
     sprites: bool = False,
+    audio: bool = False,
+    audio_native: bool = False,
 ) -> dict[str, Any]:
     """Exercise CPU lifecycle checks plus any explicitly requested native/model checks."""
 
@@ -2669,6 +3283,26 @@ def run_project_smoke(
             )
             checks.extend(asset_results.pop("checks"))
 
+        audio_results: dict[str, Any] | None = None
+        if audio:
+            audio_results = _run_audio_project_smoke(
+                binary,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+            )
+            checks.extend(audio_results.pop("checks"))
+
+        audio_native_results: dict[str, Any] | None = None
+        if audio_native:
+            audio_native_results = _run_native_audio_smoke(
+                binary,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+            )
+            checks.append("native_imported_voice_reaches_backend_completion")
+
         view_results: dict[str, Any] | None = None
         if view:
             timed_view = _run_native_project_view(
@@ -2765,12 +3399,16 @@ def run_project_smoke(
         result["models"] = model_results
     if sprite_results is not None:
         result["sprites"] = sprite_results
+    if audio_results is not None:
+        result["audio_offline"] = audio_results
+    if audio_native_results is not None:
+        result["audio_native"] = audio_native_results
     return result
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view and --models add opt-in native GPU checks."
+        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view/--models/--sprites add native GPU checks and --audio-native adds a native audio-device check."
     )
     parser.add_argument("--cli", type=Path, required=True, help="already-built daedalus executable")
     parser.add_argument(
@@ -2799,6 +3437,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also capture and open an offline orthographic atlas-sprite project in the native GPU viewer",
     )
+    parser.add_argument(
+        "--audio",
+        action="store_true",
+        help="also import, play, and render a generated WAV through protocol-2 offline audio (no device required)",
+    )
+    parser.add_argument(
+        "--audio-native",
+        action="store_true",
+        help="also open the imported finite WAV on the native audio backend and wait for backend-reported completion",
+    )
     return parser.parse_args(argv)
 
 
@@ -2812,6 +3460,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             assets=arguments.assets,
             models=arguments.models,
             sprites=arguments.sprites,
+            audio=arguments.audio,
+            audio_native=arguments.audio_native,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

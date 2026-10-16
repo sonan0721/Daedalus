@@ -144,6 +144,8 @@ GPU는 비대칭 colored/transparent atlas의 top/bottom·인접 region 경계·
 
 기존 smoke의 opt-in sprite mode를 사용하고 CPU/assets/view/models 기본 의미를 유지한다. 같은 창의 실제 authority 변경 후 표시/view JSON을 대조하고 가능하면 resize/2D pan/zoom도 실제 OS 입력과 report로 확인한다. 실제 공개 Kenney Tiny Dungeon 원본 PNG/CC0와 [provenance](../02-research/asset-validation-provenance.md)를 재사용해 화면을 확인하며 네트워크 다운로드는 CI에 추가하지 않는다. 작은 sprite 장면은 엔진 fixture이고 Terraria 구현이 아니다.
 
+P03.2c 통합 회귀에서 native 초기 packet이 첫 표시 전 coalesce될 수 있음을 확인했다. `latest_frame`은 actor가 게시한 snapshot identity이며 surface present ACK가 아니다. 따라서 native smoke의 최종 authority RenderView/last_presented와 geometry1회·globals 실제 기록을 검사하되 초기+변경 두 globals write를 무조건 요구하지 않는다. camera 변경의 정확한 dirty write delta는 실제 GPU library 시험 `asset_backpressure_preserves_ready_packet_and_does_not_count_busy_candidate_as_drawn`이 렌더 순서를 명시해 검사한다. 이 분담은 같은 창에서 최초 authored view가 표시된 뒤 바뀌는 전체 과정을 인증하는 것이 아니다. 그 관찰은 후속 live presentation/capture 계약으로 남긴다. snapshot polling이나 임의 sleep으로 present ACK를 흉내 내지 않는다.
+
 하위 gate는 source 고정→focused→workspace/Python/managed CI→실제 Metal/native/public asset→clean archive/extracted smoke→최종 다섯 PR CI·main 동일 tree까지 확인한 뒤에만 P03.2b를 체크한다. 리뷰 보완 후 CPU264·Python55·Metal9·통합 smoke39·공개 원본과 clean archive/extracted smoke39를 확인했다. PR12 head `6e8fa50`의 다섯 CI/두 packaged-assets step 성공과 main `dd2de2e` 동일 tree까지 확인해 이 하위 gate를 인수했다. P03.2 전체·D1/D2/D3는 계속 미완료다.
 
 ## 조사 근거와 적용 범위

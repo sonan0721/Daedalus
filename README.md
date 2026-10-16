@@ -31,7 +31,7 @@ cargo run -p daedalus-cli -- project serve /tmp/my-daedalus-project
 
 The project manifest references a versioned scene. Current runnable content is root entities with transforms, indexed JSON meshes with scalar opaque materials, static glTF/GLB models with opaque base-color PNG textures, and atlas sprites with an authority-owned orthographic camera. Models use cooked mip levels and per-primitive samplers; the first sprite subset uses nearest-filtered atlases. `project serve` retains one authority session; `project_info` exposes authored stable IDs and handles, and normal control operations query and change actual ECS state. `project capture` in a capture-enabled build renders the project's own geometry and snapshot to PNG. Initialization inserts no fixture objects.
 
-This is the first runnable project foundation: general scene hierarchy/prefabs, imported audio playback, attached gameplay modules, live project reload, same-window control/capture, saving, MCP, and game export remain unfinished. The existing `view` window still runs its named validation fixture. See the [project contract](docs/03-architecture/project-lifecycle.md) and [verification commands](TESTING.md).
+This is the first runnable project foundation: general scene hierarchy/prefabs, attached gameplay modules, live project reload, live image capture, saving, MCP, and game export remain unfinished. The existing bare `view` window still runs its named validation fixture. See the [project contract](docs/03-architecture/project-lifecycle.md) and [verification commands](TESTING.md).
 
 The native Rust library provides a bounded `SessionControlService` with multiple clients, owned request results, Manual/Realtime clocks, and snapshots from one real project engine. A window-enabled build opens the same project session for native viewing and optional protocol-2 JSONL control:
 
@@ -55,7 +55,16 @@ cargo run -p daedalus-cli -- project cook /path/to/project --cache-dir /path/to/
 
 The first CPU subset covers static glTF/GLB triangles, PNG, versioned sprite-atlas JSON, and PCM/float WAV. The [import contract](docs/03-architecture/asset-import-foundation.md) defines settings, format limits, and unsupported features. The bounded JSON report exposes source hashes, resource keys, and per-invocation decode/cook/cache counters. Unchanged resources and geometry unaffected by image or material edits reuse their cooked identities. This command prepares CPU data and does not render or play audio; its `runtimeConsumers` flags describe that invocation. Static models and base-color textures use the same packet renderer in `project view` and `project capture`. Add `daedalus.model_renderer` with one matching `asset_refs` entry and `data.model`; the [model execution contract](docs/03-architecture/model-texture-runtime.md) defines the supported material subset and bounded resource lifetime.
 
-For 2D, add `daedalus.sprite_renderer` with `data.atlas`, `data.region`, one matching atlas reference, optional linear RGBA tint and painter order. A project containing sprites requires one `daedalus.camera_2d` entity. The [sprite contract](docs/03-architecture/sprite-runtime-and-orthographic-view.md) defines coordinates, pivot/PPU, stable sorting, camera fields, and limits. Sprites share one quad and the model renderer's texture/resource lifetime. PNG capture preserves straight alpha; ordinary native windows are opaque. The 2D diagnostic camera uses WASD/drag to pan and the wheel to zoom. Capture and native reports include the actual camera/projection pair. Animation, tile rendering/lighting, and imported-audio playback remain unfinished under the [consumer plan](docs/03-architecture/asset-runtime-consumers.md).
+For 2D, add `daedalus.sprite_renderer` with `data.atlas`, `data.region`, one matching atlas reference, optional linear RGBA tint and painter order. A project containing sprites requires one `daedalus.camera_2d` entity. The [sprite contract](docs/03-architecture/sprite-runtime-and-orthographic-view.md) defines coordinates, pivot/PPU, stable sorting, camera fields, and limits. Sprites share one quad and the model renderer's texture/resource lifetime. PNG capture preserves straight alpha; ordinary native windows are opaque. The 2D diagnostic camera uses WASD/drag to pan and the wheel to zoom. Capture and native reports include the actual camera/projection pair. Animation and tile rendering/lighting remain unfinished under the [consumer plan](docs/03-architecture/asset-runtime-consumers.md).
+
+Imported WAV clips can be controlled through the same session's protocol 2:
+
+```sh
+cargo run -p daedalus-cli --features audio -- project serve /path/to/project --protocol 2 --clock manual --audio offline
+cargo run -p daedalus-cli --features native-audio -- project serve /path/to/project --protocol 2 --clock manual --audio native
+```
+
+The [audio contract](docs/03-architecture/imported-audio-runtime.md) defines Play, Stop, volume/pan, full-clip looping, bounded voice queries, and caller-ID replay. Offline mode mixes actual imported PCM into bounded summaries without an output device. Native mode opens the actual backend and fails explicitly if unavailable. Clips are shared by cooked identity and do not auto-play. Gameplay audio components, spatial audio, compressed streaming, live bank replacement, and managed bindings remain pending.
 
 ## Build a local CLI package
 
@@ -65,7 +74,7 @@ With the pinned Rust toolchain and Python 3.11 or newer, run:
 python3 scripts/package_cli.py
 ```
 
-This builds a native release CLI with window and GPU capture enabled, verifies the extracted executable, and stores a versioned archive, build manifest, dependency notices, and checksum under ignored `dist/local/`. Run the extracted `daedalus view` to open the engine window. Each build records its source commit and whether the working tree was dirty. The initial packaging targets are macOS arm64 and Linux x64, built on their respective native hosts.
+This builds a native release CLI with window, GPU capture, and native/offline audio enabled, verifies the extracted executable including imported offline audio, and stores a versioned archive, build manifest, dependency notices, and checksum under ignored `dist/local/`. Run the extracted `daedalus view` to open the engine window. Each build records its source commit and whether the working tree was dirty. The initial packaging targets are macOS arm64 and Linux x64, built on their respective native hosts. Linux hosts must provide `libasound.so.2`; the archive does not bundle ALSA.
 
 The release workflow builds packages for PR inspection. A future `v<CLI version>` tag on main history triggers GitHub Release publication after both platform builds succeed. No public release has been issued. The initial CLI archive does not bundle the C# SDK, .NET runtime, or game export tools. See the [CLI build and release contract](docs/03-architecture/cli-build-and-release.md) for boundaries.
 

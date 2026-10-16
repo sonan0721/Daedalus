@@ -25,6 +25,7 @@ from smoke_project import (
     _v2_submit,
     _decode_glb,
     _write_asset_project,
+    _write_audio_project,
     _write_model_view_project,
     _write_sprite_view_project,
     ENTITY_ID,
@@ -86,6 +87,30 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertTrue((project / "atlases" / "sprites.json").is_file())
         with wave.open(os.fspath(project / "audio" / "tone.wav"), "rb") as audio:
             self.assertEqual((audio.getnchannels(), audio.getframerate(), audio.getnframes()), (1, 8_000, 4))
+
+    def test_audio_fixture_has_two_aliases_for_one_finite_pcm_source(self) -> None:
+        project = self.root / "audio-fixture"
+        project.mkdir()
+        _write_audio_project(project)
+        manifest = json.loads((project / "daedalus.project.json").read_text(encoding="utf-8"))
+        scene = json.loads((project / "scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "offline-audio-smoke")
+        self.assertEqual(scene["entities"], [])
+        self.assertEqual(
+            [(asset["id"], asset["uri"]) for asset in scene["assets"]],
+            [
+                ("asset:smoke-tone", "audio/tone.wav"),
+                ("asset:smoke-tone-alias", "audio/tone.wav"),
+            ],
+        )
+        with wave.open(os.fspath(project / "audio" / "tone.wav"), "rb") as audio:
+            self.assertEqual(
+                (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getnframes()),
+                (1, 2, 8_000, 2_000),
+            )
+            samples = struct.unpack("<2000h", audio.readframes(2_000))
+        self.assertGreater(max(samples), 10_000)
+        self.assertLess(min(samples), -10_000)
 
     def test_model_view_fixture_reuses_offline_textured_gltf_and_authority_entity(self) -> None:
         project = self.root / "model-view-fixture"
@@ -169,6 +194,8 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertFalse(arguments.assets)
         self.assertFalse(arguments.models)
         self.assertFalse(arguments.sprites)
+        self.assertFalse(arguments.audio)
+        self.assertFalse(arguments.audio_native)
         view_arguments = _parse_args(["--cli", "/bin/true", "--view"])
         self.assertTrue(view_arguments.view)
         asset_arguments = _parse_args(["--cli", "/bin/true", "--assets"])
@@ -177,6 +204,10 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertTrue(model_arguments.models)
         sprite_arguments = _parse_args(["--cli", "/bin/true", "--sprites"])
         self.assertTrue(sprite_arguments.sprites)
+        audio_arguments = _parse_args(["--cli", "/bin/true", "--audio"])
+        self.assertTrue(audio_arguments.audio)
+        native_audio_arguments = _parse_args(["--cli", "/bin/true", "--audio-native"])
+        self.assertTrue(native_audio_arguments.audio_native)
         combined_arguments = _parse_args(["--cli", "/bin/true", "--assets", "--view"])
         self.assertTrue(combined_arguments.assets)
         self.assertTrue(combined_arguments.view)
@@ -187,6 +218,10 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         combined_sprites = _parse_args(["--cli", "/bin/true", "--models", "--sprites"])
         self.assertTrue(combined_sprites.models)
         self.assertTrue(combined_sprites.sprites)
+        combined_audio = _parse_args(["--cli", "/bin/true", "--assets", "--audio", "--audio-native"])
+        self.assertTrue(combined_audio.assets)
+        self.assertTrue(combined_audio.audio)
+        self.assertTrue(combined_audio.audio_native)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])

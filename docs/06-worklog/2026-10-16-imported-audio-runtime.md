@@ -75,6 +75,35 @@ Rust checkpoint `f918c2c` 이후 조정자가 `cargo test --workspace --all-feat
 
 수정 뒤 조정자가 workspace all-features를 다시 실행해281pass/0fail/10ignored와 strict workspace all-target/all-feature Clippy, fmt를 확인했다. 최종 raw 로그는 `dist/project-evidence/p03-audio-workspace-tests-final.log`와 `p03-audio-workspace-clippy-final.log`다. 첫 Clippy 실패 파일은 덮어쓰지 않았다. 별도 Luna read-only source 리뷰도 backend 선택·bank/voice 수명·pre-effect 준비·clock·CPAL 종료 설명에서 구체적 blocker를 찾지 못했다. 실제 consumer/native·managed/GPU·clean package·CI/main 인수는 계속 대기다. feature별 compile 통과를 해당 조합의 strict Clippy 통과로 대체하지 않는다.
 
+## CLI·Python 통합과 첫 hardware 회귀
+
+Rust source `fdae55d`를 push하고 all-feature debug CLI를 다시 빌드했다. 실행 파일 SHA-256은 `391fb7ac22a03467433814c54d4d2fcc1a935b5d165f3079f9c84207bfd8afbb`이며 이후 Python adapter 변경과 구분한다. Luna의 Python56·default CPU18·offline24·native19 보고 후 조정자도 전체 Python discovery56/56을 독립 확인했다. raw 로그는 `dist/project-evidence/p03-audio-root-python.log`다.
+
+반복 기본 검사와 임시 project 준비를 줄이기 위해 기존 helper의 `--assets --view --models --sprites --audio --audio-native`를 한 번 호출했다. 첫 실행은 기존 sprite helper의 `global_write_count >= 2`에서 실패했다. 실제 final authority camera·presented/final RenderView 일치 검사는 통과했으나 global write1/instance write2/geometry upload1이었다. 실패 stderr는 `dist/project-evidence/p03-audio-debug-combined-smoke.stderr`에 보존한다. 실패 실행의 stdout JSON은 비어 있으며 성공 report로 인용하지 않는다. 초기 화면의 실제 표시를 확인하지 않은 채 camera 변경을 보내 두 global write를 기대하는지 조사하고, 실제 초기 표시를 확인하는 경로로 검증을 보강한다. 임의 sleep·허용치 완화·실패 없는 것으로 덮어쓰지 않는다.
+
+별도 공개 WAV QA driver의 첫 offline 실행도 mixer 검사 전에 실패했다. authored source를 disk 전체 rglob과 비교해 loader가 정상 생성한 `.daedalus/cache`까지 입력으로 센 시험 오류다. `dist/project-evidence/p03-public-audio-offline-initial-failure.json`에 보존하고, 실제 source report의 세 authored 파일/hash를 대조하도록 driver를 수정한다. cache 삭제나 원본 변경으로 통과시키지 않는다. 이 ignored 일회성 검증 코드도 Luna xhigh에게 맡겼다.
+
+패키지·notice feature는 `native-audio,window`로 맞추고 기존 extracted project smoke에 offline audio를 추가한다. macOS/Linux package의 기존 asset smoke는 **`Verify packaged CLI asset and offline audio smoke` 한 step**에서 `--assets --audio`를 함께 실행한다. Linux에는 ALSA 개발/런타임 library와 실제 linkage 확인을 추가하며 native 장치를 CI에 요구하지 않는다. 실제 clean archive/CI 통과는 아직 기록하지 않는다.
+
+## Hardware 회귀의 증거 분담과 실제 imported 출력
+
+후속 source 리뷰에서 initial actor frame은 protocol 시작 전 이미 게시됨을 확인했다. `latest_frame`을 두 번 조회하는 Luna의 첫 수정안은 present ACK가 아니므로 채택하지 않고 제거했다. [sprite 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)을 먼저 고쳐 native helper는 final 실제 presented authority view·geometry1회·globals 초기화를 확인하고, 정확한 camera dirty-write delta는 순서를 명시한 기존 real-GPU library 시험이 담당하도록 분담했다. native smoke의 invalid total `>=2` 추정을 `>=1` 초기화 확인으로 바꾼 이유와 남은 관찰 한계를 코드·TESTING에도 표시했다. 실패를 엔진 camera 갱신 성공으로 바꾸거나 same-window 최초 camera 표시를 인증한 것은 아니다.
+
+이후 조정자의 단일 통합 invocation `--assets --view --models --sprites --audio --audio-native`는 **46/46,14.966788초**로 통과했다. 같은 debug SHA를 사용했고 final JSON/stderr는 `dist/project-evidence/p03-audio-debug-combined-smoke-final.*`다. sprite run에서도 global1/geometry1/88bytes였으며 최종 authority view는 일치했다. 별도 `cargo test -p daedalus-renderer --all-features --locked -- --ignored --nocapture --test-threads=1`는 **Metal9/9**를 통과했다. 이 중 ordered backpressure 시험은 camera 이동의 실제 globals delta1·instance delta1·geometry/material 추가0을 검사한다. raw 로그는 `p03-audio-metal-regression.log`다.
+
+공개 WAV driver도 authored source 세 파일만 열거하도록 수정 후 조정자가 두 mode를 실행했다. source digest는 `sha256:bc40583411a4e055250b5ce127e3c32c2eea0846af80e07e5850c24bd7f64d4a`, WAV와 실행 파일은 위 SHA다.
+
+| 경로 | 실제 결과 | ignored JSON |
+| --- | --- | --- |
+| offline | aliases2/unique1/converted1/Frame21,512bytes, autoplay0. 실제1,024frame mix의 left/right peak0.89178765·RMS0.11890393, finite/nonzero2,048samples. Play/Render ACK 후 replay는 voice1/clock1,024 유지. Stop+128frame 후 Ended/active0, 정상 exit0. 전체0.156131초 | `dist/project-evidence/p03-public-audio-offline.json` |
+| native | 실제 native backend 선택·autoplay0, 같은 공개 finite clip의 session1/sequence1이 backend-reported Ended, 정상 actor/CLI exit0. 전체0.266303초 | `dist/project-evidence/p03-public-audio-native.json` |
+
+이는 출력 device의 실제 backend 진행 관찰이다. speaker audibility·loopback·열린 stream의 sample rate·detached CPAL thread 동기 join을 측정한 것이 아니다. 두 QA 총시간은 startup/요청/teardown 포함 단1회 관찰이며 시간 개선율이나 오디오 지연 benchmark로 해석하지 않는다. WAV는 source44100Hz, offline 설정48000Hz이므로 원본 전체통계와 일부 mixed block 통계를 직접 동등 비교하지 않는다.
+
+별도 명시적 장치 probe1건도 통과했다. 해당 시점 default는 AirPods·24,000Hz·2channels였다(`p03-audio-output-device-probe.log`). 이전 checkpoint의48kHz default와 다르며 장치는 실행 사이 바뀔 수 있다. probe config를 앞선 Play가 실제 연 stream 설정으로 단정하지 않는다.
+
+별도 bridge를 실제 다시 빌드하고 pinned .NET10.0.402의 Release build0warning/0error, Rust-backed self-test와 module lifecycle integration2scenarios를 통과했다. `p03-audio-bridge-build.log`, `p03-audio-managed-build.log`, `p03-audio-managed-selftest.log`, `p03-audio-managed-integration.log`에 남긴다. 기본 PATH의 `/usr/local/share/dotnet`은 SDK6/7뿐이라 첫 version 조회가 실패했고 이미 설치된 `/Users/danny/.dotnet`을 명시해 진행했다. SDK를 다시 설치하거나 global.json을 낮추지 않았다. 이것은 transform SDK 회귀이며 audio managed binding 구현은 아니다.
+
 ## 조사 한계
 
 버전 고정 docs.rs API 세 페이지 조회는 실패했다. local registry의 Kira0.12.5 source를 읽어 Frame Arc sharing/loop/state/final clamp를 확인했다. 이후 local VCS metadata의 commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`로 upstream StaticSoundData raw 원문을 확보·대조했으며 다른 raw 페이지 일부는 실패했다. browser audio·loopback/audibility·다른 장치/플랫폼은 현재 미검증이다.

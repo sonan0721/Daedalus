@@ -14,7 +14,7 @@ Rust 의존성의 package ID·버전·license 선언·source checksum과 배포 
 
 2026-10-16 보완: 고정된 배포 crate와 upstream commit 모두 별도 license 파일 없이 Cargo의 표준 SPDX 선언만 제공하는 경우가 있다. Cargo는 `license`를 package가 배포되는 라이선스의 SPDX expression으로 정의한다. 이런 확인된 package는 checksum·선언 파일의 pinned URL·SPDX 식별자를 묶어 명시적으로 등록하고, 고정한 공식 SPDX license-list-data의 해당 reference text를 함께 제공할 수 있다. 이를 `declared_spdx_reference`로 표시해 upstream 원문과 구분하며 author/year/copyright holder를 만들어 채우지 않는다. 임의 expression의 자동 추정·미등록 누락·버전 변경은 여전히 오류다. 이는 알려진 선언을 보존하는 packaging 정책이며 법적 적합성 보증이 아니다. [Cargo license 의미](https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields), [공식 SPDX 목록](https://github.com/spdx/license-list-data)
 
-기본 CPU 제어 경로와 capture/window feature를 manifest에 기록한다. native live checkpoint부터 package의 명시적 feature는 `window`이며, 이것이 `capture`와 실제 renderer도 포함한다. `daedalus view` 실행·GPU 부재의 오류 계약을 유지하되 CI의 archive smoke는 display가 필요 없는 CPU 경로로 수행한다. 실행 파일 하나를 배포했다고 C# SDK·CoreCLR runtime·외부 에셋·게임 export가 모두 포함됐다고 하지 않는다. 초기 archive의 실제 포함 범위를 사용 안내에 명시한다.
+기본 CPU 제어 경로와 capture/window feature를 manifest에 기록한다. native live checkpoint의 `window` feature에 imported audio consumer checkpoint부터 `native-audio`를 추가한다. 실제 package feature는 `native-audio,window`이며 capture·renderer·offline mixer·실제 CPAL backend를 포함한다. Linux host에는 `libasound.so.2`가 필요하고 archive는 ALSA를 bundle하지 않는다. 두 native CI package는 `--assets --audio`의 공통 smoke를 실행하고 Linux linkage를 별도로 확인한다. `daedalus view` 실행·GPU 부재의 오류 계약을 유지하되 CI의 archive smoke는 display가 필요 없는 CPU 경로로 수행한다. 실행 파일 하나를 배포했다고 C# SDK·CoreCLR runtime·외부 에셋·게임 export가 모두 포함됐다고 하지 않는다. 초기 archive의 실제 포함 범위를 사용 안내에 명시한다.
 
 ## 버전과 로컬 관리
 

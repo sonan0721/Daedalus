@@ -21,7 +21,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 
-REQUESTED_FEATURES = ("daedalus-cli/window",)
+REQUESTED_FEATURES = ("daedalus-cli/native-audio", "daedalus-cli/window")
 NOTICES_FILENAME = "THIRD_PARTY_NOTICES.txt"
 INVENTORY_FILENAME = "dependency-inventory.json"
 MAX_LICENSE_FILE_BYTES = 1024 * 1024
@@ -63,7 +63,8 @@ def collect_cli_notices(
     """Create third-party notices and a sanitized inventory in an existing staging directory.
 
     `metadata` may be a Cargo metadata object or JSON path. If omitted, the helper runs a
-    locked, platform-filtered Cargo metadata query for `daedalus-cli/window`.
+    locked, platform-filtered Cargo metadata query for the packaged `native-audio` and `window`
+    feature set.
     `strict=False` is for local diagnostics only and records every missing license text.
     """
 
@@ -981,7 +982,7 @@ def _render_notices(
         "Daedalus CLI third-party notices",
         "",
         f"Target: {target}",
-        "This file contains license and notice texts for Cargo-resolved dependencies reachable from the CLI window build.",
+        "This file contains license and notice texts for Cargo-resolved dependencies reachable from the CLI native-audio and window feature build.",
         "The included package set is conservative and feature-unified; it is not a binary-symbol SBOM or a legal-compliance certification.",
         "",
     ]

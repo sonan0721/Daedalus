@@ -104,3 +104,7 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 실제 반복 GPU 검사에서 같은 packet 재표시는 geometry/texture/sampler/pair/instance/material 증가0이었다. authority transform만 변경한10draw는 instance write10회만 증가했고 geometry/texture/material과 장치 resource 생성은 증가하지 않았다. 공개 Cube 두 entity도 geometry upload1회/1296 bytes와 texture upload1회/1,398,100 bytes를 공유했고12초 native redraw1409회 동안 geometry/texture/instance/material upload 수가 더 증가하지 않았다.
 
 같은 smoke helper의 `--view --models`는24건/11.015236초로 통과했다. viewer ready 뒤 별도 capture를 실행하고 viewer 생존 확인→authority set/step/query→실제 presented packet 대조까지 자동화해 cache 잠금 회귀를 검사한다. GPU frame capture와 별도 batch process의 의미를 섞지 않는다. 기존 실패/timeout/cleanup 회귀를 포함한 Python54건도 통과했다. 이 값은 현재 검사 실행의 관찰이며 이전 작업 대비 개발 시간 개선율은 측정하지 않았다. 실제 source/binary와 command는 [작업 기록](../06-worklog/2026-10-16-model-texture-runtime.md)에 둔다.
+
+## P03.2b 착수 시 반복 제거 계약
+
+[스프라이트·정사영 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)은 model의 texture/cache/submission 경로와 기존 authority native helper를 재사용한다. slot당16-byte UV row와88-byte unit quad1개를 선택해 region마다 geometry key/upload/entry를 늘리지 않는다. 실제표시 RenderView/PacketViewSubmission은 창·capture·후속 AI 관찰이 camera/projection을 다시 추측하는 중복을 줄인다. 입력 없는 local override가 authority camera를 가리는 source 문제도 함께 다룬다. 이는 구현 대상으로 고정한 내용이고 actual sprite counter/제작시간 효과는 아직 검증하지 않았다.

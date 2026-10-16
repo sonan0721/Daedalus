@@ -1,6 +1,6 @@
 # P03.2b 스프라이트·정사영 실행 작업 기록
 
-상태: 상세 계약 확정·Luna 구현 착수 전·인수 미통과 · 2026-10-16
+상태: 상세 계약 확정·Luna 구현 진행·인수 미통과 · 2026-10-16
 
 ## 두 문서를 만든 이유
 
@@ -23,9 +23,15 @@
 
 | 소유자 | 범위 | 상태 |
 | --- | --- | --- |
-| Luna xhigh content | private sprite/camera2d binding·strict schema/revalidation·metadata precharge·CPU 검사 | 착수 전 |
-| Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | 착수 전 |
-| Luna xhigh CLI | 기존 공통 report·opt-in sprite smoke·timeout/cleanup 회귀 | 착수 전 |
+| Luna xhigh content | private sprite/camera2d binding·strict schema/revalidation·metadata precharge·CPU 검사 | 구현 진행 |
+| Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | 구현 진행 |
+| Luna xhigh CLI | 기존 공통 report·opt-in sprite smoke·timeout/cleanup 회귀 | 구현 진행 |
 | 조정자 | MD·source/API 리뷰·통합/실제 Mac·원본 QA·Git/PR | 계약 확정; 구현 검사 미실행 |
 
 content→renderer→CLI→조정자 순서로 Cargo/shared target 소유권을 넘긴다. source 파일 소유권을 분리하고 새 dependency/두 번째 cold target/새 packaging backend는 계획하지 않는다. focused→통합→hardware→clean package→최종 다섯 PR CI/main 동일 tree가 모두 필요하다. 검사 명령/입력/소스·binary identity/counter는 실제 실행 후에만 추가한다.
+
+## 착수 checkpoint
+
+상세 계약은 `5d1be86`에 code보다 먼저 커밋했다. Luna xhigh 세 담당자에게 content/renderer/CLI·scripts 소유권과 public accessor 계약을 전달했다. content만 Cargo owner로 focused 검사를 시작하고 renderer/CLI는 의존 API를 공유해 disjoint source 편집을 진행한다. default smoke와 CPU CI에 GPU를 강제하지 않으며 후속 실제 hardware/원본 QA/clean package와 최종 CI는 여전히 미실행이다.
+
+공개 원본 QA 입력은 ignored `dist/qa-assets/sprite-runtime-project/`에 준비했다. Tiny Dungeon의 원본 PNG5294 bytes/SHA-256 `d24e60a41e4ac7a745c0304dfde121143688557f40215f23221c29cfe683825f`를 그대로 복사했고 atlas descriptor의16×16 region4개만 별도 작성했다. 두 atlas StableId·네 sprite와 camera-only entity로 unit quad/texture 공유 및 실제 픽셀 아트를 확인할 예정이다. 현재는 입력 준비만 했으며 새 sprite binary의 validation/render는 미실행이다.

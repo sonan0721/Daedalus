@@ -357,6 +357,8 @@ pub struct PreparedProject {
     digest: String,
     asset_catalog: Option<PreparedAssetCatalog>,
     asset_import_report: Option<AssetImportReport>,
+    /// Validated model renderer components keyed by their owning entity ID.
+    model_renderers: BTreeMap<StableId, PreparedModelRendererBinding>,
 }
 
 impl PartialEq for PreparedProject {
@@ -368,6 +370,7 @@ impl PartialEq for PreparedProject {
             && self.files == other.files
             && self.digest == other.digest
             && self.asset_catalog == other.asset_catalog
+            && self.model_renderers == other.model_renderers
     }
 }
 
@@ -404,9 +407,42 @@ impl PreparedProject {
         self.asset_import_report.as_ref()
     }
 
+    /// Returns validated model renderer bindings keyed by entity ID.
+    pub fn model_renderers(&self) -> &BTreeMap<StableId, PreparedModelRendererBinding> {
+        &self.model_renderers
+    }
+
+    /// Releases only cache eviction pins while retaining all owned cooked asset data.
+    ///
+    /// Clones of this project retain their own shared pin references until they are released or
+    /// dropped. The default loaders do not detach pins automatically.
+    pub fn release_asset_cache_pins(mut self) -> Self {
+        if let Some(catalog) = self.asset_catalog.as_mut() {
+            catalog.release_cache_pins();
+        }
+        self
+    }
+
     /// Revalidates every public prepared value before runtime construction.
     pub fn validate(&self) -> Result<(), ProjectError> {
         validate_prepared_project(self, ProjectLimits::default())
+    }
+}
+
+/// A validated reference from an authored entity to an imported static model asset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedModelRendererBinding {
+    component_id: StableId,
+    model_asset_id: StableId,
+}
+
+impl PreparedModelRendererBinding {
+    pub fn component_id(&self) -> &StableId {
+        &self.component_id
+    }
+
+    pub fn model_asset_id(&self) -> &StableId {
+        &self.model_asset_id
     }
 }
 
@@ -608,6 +644,7 @@ pub fn prepare_project_from_bytes(
         digest,
         asset_catalog: None,
         asset_import_report: None,
+        model_renderers: BTreeMap::new(),
     };
     validate_prepared_project(&prepared, limits)?;
     Ok(prepared)
@@ -913,9 +950,10 @@ fn prepare_project_with_asset_sources(
         .map(project_file_identity_from_blob)
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.source_id.cmp(&right.source_id));
-    let entities = decode_entities(&scene_source, &scene, &meshes)?;
+    let binding_metadata_bytes = estimate_model_binding_metadata_bytes(&scene, &scene_source)?;
     let catalog_metadata_bytes = estimate_catalog_metadata_bytes(
         &imported_assets,
+        binding_metadata_bytes,
         &files,
         &context,
         context.cache_pin_count(),
@@ -924,6 +962,8 @@ fn prepare_project_with_asset_sources(
         catalog_metadata_bytes,
         crate::assets::ImportLocation::new(&scene_source, "catalog_metadata"),
     )?;
+    let (entities, model_renderers) =
+        decode_entities_with_assets(&scene_source, &scene, &meshes, &imported_assets)?;
     let mut dependencies = BTreeMap::<StableId, Vec<AssetDependencySummary>>::new();
     for id in imported_assets.keys() {
         let mut entries = Vec::new();
@@ -960,6 +1000,7 @@ fn prepare_project_with_asset_sources(
         digest,
         asset_catalog: Some(catalog),
         asset_import_report: Some(report),
+        model_renderers,
     };
     validate_prepared_project(&prepared, ProjectLimits::default())?;
     Ok(prepared)
@@ -1142,6 +1183,12 @@ struct MeshRendererData {
     mesh: StableId,
     #[serde(default)]
     material: Option<ProjectMaterial>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelRendererData {
+    model: StableId,
 }
 
 fn validate_manifest(manifest: &ProjectManifest) -> Result<(), ProjectError> {
@@ -1337,7 +1384,38 @@ fn decode_entities(
     scene: &SceneDocument,
     meshes: &BTreeMap<StableId, ProjectMesh>,
 ) -> Result<Vec<PreparedEntity>, ProjectError> {
+    decode_entities_inner(source_id, scene, meshes, None).map(|(entities, _)| entities)
+}
+
+fn decode_entities_with_assets(
+    source_id: &str,
+    scene: &SceneDocument,
+    meshes: &BTreeMap<StableId, ProjectMesh>,
+    assets: &BTreeMap<StableId, ImportedAsset>,
+) -> Result<
+    (
+        Vec<PreparedEntity>,
+        BTreeMap<StableId, PreparedModelRendererBinding>,
+    ),
+    ProjectError,
+> {
+    decode_entities_inner(source_id, scene, meshes, Some(assets))
+}
+
+fn decode_entities_inner(
+    source_id: &str,
+    scene: &SceneDocument,
+    meshes: &BTreeMap<StableId, ProjectMesh>,
+    assets: Option<&BTreeMap<StableId, ImportedAsset>>,
+) -> Result<
+    (
+        Vec<PreparedEntity>,
+        BTreeMap<StableId, PreparedModelRendererBinding>,
+    ),
+    ProjectError,
+> {
     let mut prepared = Vec::with_capacity(scene.entities.len());
+    let mut model_renderers = BTreeMap::new();
     for (entity_index, entity) in scene.entities.iter().enumerate() {
         let entity_path = format!("entities[{entity_index}]");
         if entity.parent.is_some() {
@@ -1347,21 +1425,28 @@ fn decode_entities(
                 "parented entities and hierarchy are not supported by this project loader",
             ));
         }
-        prepared.push(decode_entity(source_id, entity_index, entity, meshes)?);
+        let (prepared_entity, model_renderer) =
+            decode_entity_inner(source_id, entity_index, entity, meshes, assets)?;
+        if let Some(binding) = model_renderer {
+            model_renderers.insert(entity.id.clone(), binding);
+        }
+        prepared.push(prepared_entity);
     }
-    Ok(prepared)
+    Ok((prepared, model_renderers))
 }
 
-fn decode_entity(
+fn decode_entity_inner(
     source_id: &str,
     entity_index: usize,
     entity: &SceneEntity,
     meshes: &BTreeMap<StableId, ProjectMesh>,
-) -> Result<PreparedEntity, ProjectError> {
+    assets: Option<&BTreeMap<StableId, ImportedAsset>>,
+) -> Result<(PreparedEntity, Option<PreparedModelRendererBinding>), ProjectError> {
     let entity_path = format!("entities[{entity_index}]");
     let mut transform = ProjectTransform::default();
     let mut mesh = None;
     let mut material = None;
+    let mut model_renderer = None;
     let mut seen = BTreeSet::new();
     for (component_index, component) in entity.components.iter().enumerate() {
         let path = format!("{entity_path}.components[{component_index}]");
@@ -1386,6 +1471,13 @@ fn decode_entity(
                 validate_transform(source_id, &path, &transform)?;
             }
             "daedalus.mesh_renderer" => {
+                if model_renderer.is_some() {
+                    return Err(invalid(
+                        source_id,
+                        format!("{path}.type_id"),
+                        "an entity cannot combine daedalus.mesh_renderer and daedalus.model_renderer",
+                    ));
+                }
                 let renderer: MeshRendererData =
                     decode_component_data(source_id, &path, &component.data)?;
                 if component.asset_refs.as_slice() != [renderer.mesh.clone()] {
@@ -1411,6 +1503,59 @@ fn decode_entity(
                 mesh = Some(renderer.mesh);
                 material = renderer.material;
             }
+            "daedalus.model_renderer" => {
+                let Some(assets) = assets else {
+                    return Err(unsupported(
+                        source_id,
+                        format!("{path}.type_id"),
+                        "component type 'daedalus.model_renderer' requires the asset-aware project loader",
+                    ));
+                };
+                if mesh.is_some() {
+                    return Err(invalid(
+                        source_id,
+                        format!("{path}.type_id"),
+                        "an entity cannot combine daedalus.mesh_renderer and daedalus.model_renderer",
+                    ));
+                }
+                let renderer: ModelRendererData =
+                    decode_component_data(source_id, &path, &component.data)?;
+                if component.asset_refs.as_slice() != [renderer.model.clone()] {
+                    return Err(invalid(
+                        source_id,
+                        format!("{path}.asset_refs"),
+                        "asset_refs must contain exactly the same model ID as data.model",
+                    ));
+                }
+                match assets.get(&renderer.model) {
+                    Some(ImportedAsset::Model(_)) => {}
+                    Some(asset) => {
+                        return Err(invalid(
+                            source_id,
+                            format!("{path}.data.model"),
+                            format!(
+                                "'{}' identifies a {:?} asset, not a static model",
+                                renderer.model,
+                                asset.kind()
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(invalid(
+                            source_id,
+                            format!("{path}.data.model"),
+                            format!(
+                                "'{}' does not identify a prepared model asset",
+                                renderer.model
+                            ),
+                        ));
+                    }
+                }
+                model_renderer = Some(PreparedModelRendererBinding {
+                    component_id: component.id.clone(),
+                    model_asset_id: renderer.model,
+                });
+            }
             _ => {
                 return Err(unsupported(
                     source_id,
@@ -1420,13 +1565,16 @@ fn decode_entity(
             }
         }
     }
-    Ok(PreparedEntity {
-        id: entity.id.clone(),
-        name: entity.name.clone(),
-        transform,
-        mesh,
-        material,
-    })
+    Ok((
+        PreparedEntity {
+            id: entity.id.clone(),
+            name: entity.name.clone(),
+            transform,
+            mesh,
+            material,
+        },
+        model_renderer,
+    ))
 }
 
 fn decode_component_data<T: for<'de> Deserialize<'de>>(
@@ -1606,11 +1754,11 @@ fn validate_prepared_project(
         ));
     }
     let expected_entities = decode_entities(&scene_source, &project.scene, &project.meshes)?;
-    if expected_entities != project.entities {
+    if expected_entities != project.entities || !project.model_renderers.is_empty() {
         return Err(invalid(
             &scene_source,
             "entities",
-            "prepared entity projection does not match the scene's supported components",
+            "prepared entity projection or model renderer bindings do not match the legacy scene components",
         ));
     }
 
@@ -1782,12 +1930,17 @@ fn validate_prepared_asset_project(
             "prepared typed asset IDs do not match scene descriptors",
         ));
     }
-    let entities = decode_entities(scene_source, &project.scene, &project.meshes)?;
-    if entities != project.entities {
+    let (entities, model_renderers) = decode_entities_with_assets(
+        scene_source,
+        &project.scene,
+        &project.meshes,
+        catalog.assets_map(),
+    )?;
+    if entities != project.entities || model_renderers != project.model_renderers {
         return Err(invalid(
             scene_source,
             "entities",
-            "prepared entity projection does not match the full authored scene",
+            "prepared entity or model renderer projection does not match the full authored scene",
         ));
     }
     let mut total_bytes = 0u64;
@@ -2012,8 +2165,68 @@ fn project_file_identity_from_blob(source: &SourceBlob) -> ProjectFileIdentity {
     }
 }
 
+fn estimate_model_binding_metadata_bytes(
+    scene: &SceneDocument,
+    source_id: &str,
+) -> Result<u64, AssetImportError> {
+    let mut bytes = 0u64;
+    for entity in &scene.entities {
+        for component in &entity.components {
+            if component.type_id.as_str() != "daedalus.model_renderer" {
+                continue;
+            }
+            let model_id_len = component
+                .data
+                .get("model")
+                .and_then(Value::as_str)
+                .map_or(0, |value| value.len().min(128));
+            let string_bytes = entity
+                .id
+                .as_str()
+                .len()
+                .checked_add(component.id.as_str().len())
+                .and_then(|value| value.checked_add(model_id_len))
+                .and_then(|value| value.checked_add(3 * 64))
+                .ok_or_else(|| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        crate::assets::ImportLocation::new(source_id, "entities.components"),
+                        "model renderer binding string metadata size overflow",
+                    )
+                })?;
+            let record_bytes = std::mem::size_of::<(StableId, PreparedModelRendererBinding)>()
+                .checked_add(96)
+                .ok_or_else(|| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        crate::assets::ImportLocation::new(source_id, "entities.components"),
+                        "model renderer binding record metadata size overflow",
+                    )
+                })?;
+            bytes = bytes
+                .checked_add(u64::try_from(string_bytes).map_err(|_| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        crate::assets::ImportLocation::new(source_id, "entities.components"),
+                        "model renderer binding string metadata is not representable",
+                    )
+                })?)
+                .and_then(|value| value.checked_add(record_bytes as u64))
+                .ok_or_else(|| {
+                    AssetImportError::new(
+                        AssetImportErrorCode::LimitExceeded,
+                        crate::assets::ImportLocation::new(source_id, "entities.components"),
+                        "model renderer binding metadata total overflow",
+                    )
+                })?;
+        }
+    }
+    Ok(bytes)
+}
+
 fn estimate_catalog_metadata_bytes(
     assets: &BTreeMap<StableId, ImportedAsset>,
+    model_binding_metadata_bytes: u64,
     files: &[ProjectFileIdentity],
     context: &AssetImportContext<'_>,
     cache_pin_count: usize,
@@ -2249,6 +2462,10 @@ fn estimate_catalog_metadata_bytes(
                     })?)?;
                 }
             }
+
+            // Binding IDs are estimated from borrowed scene strings before the prepared map is
+            // allocated, then charged here with the rest of retained catalog metadata.
+            add(model_binding_metadata_bytes)?;
             let copied_dependencies = dependency_count.checked_mul(3).ok_or_else(|| {
                 AssetImportError::new(
                     AssetImportErrorCode::LimitExceeded,
@@ -2480,7 +2697,7 @@ fn length_squared(vector: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2529,6 +2746,137 @@ mod tests {
 
     fn empty_scene() -> Vec<u8> {
         serde_json::to_vec(&SceneDocument::default()).unwrap()
+    }
+
+    fn minimal_model_sources() -> BTreeMap<String, Vec<u8>> {
+        let mut buffer = Vec::new();
+        for value in [
+            0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, // POSITION
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, // NORMAL
+        ] {
+            buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        let gltf = serde_json::to_vec(&json!({
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}}]}],
+            "buffers": [{"uri": "triangle.bin", "byteLength": buffer.len()}],
+            "bufferViews": [
+                {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                {"buffer": 0, "byteOffset": 36, "byteLength": 36}
+            ],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]},
+                {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"}
+            ]
+        }))
+        .unwrap();
+        BTreeMap::from([
+            ("models/triangle.gltf".to_owned(), gltf),
+            ("models/triangle.bin".to_owned(), buffer),
+        ])
+    }
+
+    fn png_rgba(pixel: [u8; 4]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&pixel).unwrap();
+        }
+        bytes
+    }
+
+    fn model_renderer_component(id: &str, refs: Value, data: Value) -> Value {
+        json!({
+            "id": id,
+            "type_id": "daedalus.model_renderer",
+            "asset_refs": refs,
+            "data": data
+        })
+    }
+
+    fn scene_with_components(components: Vec<Value>) -> SceneDocument {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "revision": 0,
+            "entities": [{
+                "id": "entity:hero",
+                "components": components
+            }],
+            "assets": []
+        }))
+        .unwrap()
+    }
+
+    fn dummy_model_asset() -> ImportedAsset {
+        let model = crate::assets::StaticModel::new(
+            crate::assets::LeafCookKey::from_digest([7; 32]),
+            vec![0],
+            vec![crate::assets::ModelNode::new(
+                None,
+                [
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ],
+                Vec::new(),
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &ImportLimits::default(),
+            crate::assets::ImportLocation::default(),
+        )
+        .unwrap();
+        ImportedAsset::Model(Arc::new(model))
+    }
+
+    fn model_project_scene(with_image: bool) -> Vec<u8> {
+        let mut assets = vec![json!({
+            "id": "asset:model",
+            "kind": "daedalus.model",
+            "uri": "models/triangle.gltf",
+            "metadata": {}
+        })];
+        if with_image {
+            assets.push(json!({
+                "id": "asset:image",
+                "kind": "daedalus.image",
+                "uri": "sprites/pixel.png",
+                "metadata": {}
+            }));
+        }
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "revision": 3,
+            "entities": [{
+                "id": "entity:hero",
+                "name": "Hero",
+                "components": [
+                    {
+                        "id": "component:transform",
+                        "type_id": "daedalus.transform",
+                        "asset_refs": [],
+                        "data": {
+                            "translation": [1.0, 2.0, 3.0],
+                            "rotation": [0.0, 0.0, 0.0, 1.0],
+                            "scale": [1.0, 1.0, 1.0]
+                        }
+                    },
+                    {
+                        "id": "component:model-renderer",
+                        "type_id": "daedalus.model_renderer",
+                        "asset_refs": ["asset:model"],
+                        "data": {"model": "asset:model"}
+                    }
+                ]
+            }],
+            "assets": assets
+        }))
+        .unwrap()
     }
 
     fn triangle_mesh() -> Vec<u8> {
@@ -2874,6 +3222,55 @@ mod tests {
     }
 
     #[test]
+    fn asset_aware_and_legacy_loaders_keep_legacy_mesh_source_identity_equal() {
+        let manifest_bytes = manifest("scene.json");
+        let mesh_bytes = triangle_mesh();
+        let scene_bytes = mesh_scene(None);
+        let mesh_sources = one_mesh_source(mesh_bytes.clone());
+        let legacy_bytes = prepare_project_from_bytes(
+            &manifest_bytes,
+            &scene_bytes,
+            &mesh_sources,
+            ProjectLimits::default(),
+        )
+        .unwrap();
+
+        let mut resolver = crate::assets::ByteMapSourceResolver::from_bytes(mesh_sources).unwrap();
+        let mut byte_cache = crate::assets::MemoryCookCache::default();
+        let aware_bytes = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut resolver,
+            &mut byte_cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+
+        let project = TempProject::new();
+        project.write(PROJECT_MANIFEST_FILE, &manifest_bytes);
+        project.write("scene.json", &scene_bytes);
+        project.write("assets/triangle.json", &mesh_bytes);
+        let legacy_native = load_project(project.path()).unwrap();
+        let mut native_cache = crate::assets::MemoryCookCache::default();
+        let aware_native = load_project_with_assets(
+            project.path(),
+            &mut native_cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+
+        assert_eq!(legacy_bytes.digest(), aware_bytes.digest());
+        assert_eq!(legacy_bytes.digest(), legacy_native.digest());
+        assert_eq!(legacy_bytes.digest(), aware_native.digest());
+        assert_eq!(legacy_bytes.files(), aware_bytes.files());
+        assert!(aware_bytes.model_renderers().is_empty());
+        aware_bytes.validate().unwrap();
+        aware_native.validate().unwrap();
+    }
+
+    #[test]
     fn asset_aware_byte_and_native_entrypoints_share_catalog_identity_and_accounting() {
         let manifest_bytes = manifest("scene.json");
         let scene_bytes = empty_scene();
@@ -2914,6 +3311,256 @@ mod tests {
         assert_eq!(byte_metrics.source_bytes, native_metrics.source_bytes);
         from_bytes.validate().unwrap();
         from_native.validate().unwrap();
+    }
+
+    #[test]
+    fn asset_aware_model_renderer_binding_is_validated_and_native_byte_equivalent() {
+        let manifest_bytes = manifest("scene.json");
+        let scene_bytes = model_project_scene(false);
+        let sources = minimal_model_sources();
+        let mut resolver =
+            crate::assets::ByteMapSourceResolver::from_bytes(sources.clone()).unwrap();
+        let mut byte_cache = crate::assets::MemoryCookCache::default();
+        let from_bytes = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut resolver,
+            &mut byte_cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+
+        let project = TempProject::new();
+        project.write(PROJECT_MANIFEST_FILE, &manifest_bytes);
+        project.write("scene.json", &scene_bytes);
+        for (source_id, bytes) in sources {
+            project.write(&source_id, &bytes);
+        }
+        let mut native_cache = crate::assets::MemoryCookCache::default();
+        let from_native = load_project_with_assets(
+            project.path(),
+            &mut native_cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+
+        assert_eq!(from_bytes.digest(), from_native.digest());
+        assert_eq!(from_bytes.files(), from_native.files());
+        assert_eq!(from_bytes.asset_catalog(), from_native.asset_catalog());
+        assert_eq!(from_bytes.model_renderers(), from_native.model_renderers());
+        assert_eq!(from_bytes.model_renderers().len(), 1);
+        let binding = &from_bytes.model_renderers()[&StableId::new("entity:hero").unwrap()];
+        assert_eq!(binding.component_id().as_str(), "component:model-renderer");
+        assert_eq!(binding.model_asset_id().as_str(), "asset:model");
+        assert!(from_bytes.entities()[0].mesh.is_none());
+        from_bytes.validate().unwrap();
+        from_native.validate().unwrap();
+
+        let mut corrupted_projection = from_bytes.clone();
+        corrupted_projection.model_renderers.clear();
+        assert!(corrupted_projection.validate().is_err());
+    }
+
+    #[test]
+    fn model_renderer_component_reports_schema_reference_and_conflict_errors() {
+        let model_id = StableId::new("asset:model").unwrap();
+        let model_assets = BTreeMap::from([(model_id.clone(), dummy_model_asset())]);
+        let valid = || {
+            model_renderer_component(
+                "component:model-renderer",
+                json!(["asset:model"]),
+                json!({"model": "asset:model"}),
+            )
+        };
+        let decode_error = |components: Vec<Value>, assets: &BTreeMap<StableId, ImportedAsset>| {
+            decode_entities_with_assets(
+                "scene.json",
+                &scene_with_components(components),
+                &BTreeMap::new(),
+                assets,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+
+        let error = decode_error(
+            vec![model_renderer_component(
+                "component:model-renderer",
+                json!(["asset:model"]),
+                json!({"model": "asset:model", "material": {}}),
+            )],
+            &model_assets,
+        );
+        assert!(error.contains("components[0].data"));
+
+        let error = decode_error(
+            vec![model_renderer_component(
+                "component:model-renderer",
+                json!([]),
+                json!({"model": "asset:model"}),
+            )],
+            &model_assets,
+        );
+        assert!(error.contains("components[0].asset_refs"));
+
+        let error = decode_error(
+            vec![model_renderer_component(
+                "component:model-renderer",
+                json!(["asset:other"]),
+                json!({"model": "asset:model"}),
+            )],
+            &model_assets,
+        );
+        assert!(error.contains("components[0].asset_refs"));
+
+        let error = decode_error(
+            vec![model_renderer_component(
+                "component:model-renderer",
+                json!(["asset:model"]),
+                json!({}),
+            )],
+            &model_assets,
+        );
+        assert!(error.contains("components[0].data"));
+
+        let error = decode_error(
+            vec![model_renderer_component(
+                "component:model-renderer",
+                json!(["asset:missing"]),
+                json!({"model": "asset:missing"}),
+            )],
+            &model_assets,
+        );
+        assert!(error.contains("components[0].data.model"));
+
+        let wrong_kind = crate::assets::AudioAsset::new(
+            48_000,
+            1,
+            vec![0.0],
+            &ImportLimits::default(),
+            crate::assets::ImportLocation::default(),
+        )
+        .unwrap();
+        let wrong_kind_assets =
+            BTreeMap::from([(model_id.clone(), ImportedAsset::Audio(Arc::new(wrong_kind)))]);
+        let error = decode_error(vec![valid()], &wrong_kind_assets);
+        assert!(error.contains("components[0].data.model"));
+        assert!(error.contains("Audio"));
+
+        let duplicate = vec![
+            valid(),
+            model_renderer_component(
+                "component:model-renderer-duplicate",
+                json!(["asset:model"]),
+                json!({"model": "asset:model"}),
+            ),
+        ];
+        let error = decode_error(duplicate, &model_assets);
+        assert!(error.contains("components[1].type_id"));
+        assert!(error.contains("duplicate 'daedalus.model_renderer'"));
+
+        let mesh_component = json!({
+            "id": "component:mesh-renderer",
+            "type_id": "daedalus.mesh_renderer",
+            "asset_refs": ["asset:mesh"],
+            "data": {"mesh": "asset:mesh"}
+        });
+        let meshes = BTreeMap::from([(
+            StableId::new("asset:mesh").unwrap(),
+            serde_json::from_slice::<ProjectMesh>(&triangle_mesh()).unwrap(),
+        )]);
+        let conflict_scene = scene_with_components(vec![valid(), mesh_component]);
+        let error =
+            decode_entities_with_assets("scene.json", &conflict_scene, &meshes, &model_assets)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("components[1].type_id"));
+        assert!(error.contains("cannot combine"));
+
+        let legacy_error = decode_entities(
+            "scene.json",
+            &scene_with_components(vec![valid()]),
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(legacy_error.contains("unsupported"));
+        assert!(legacy_error.contains("requires the asset-aware project loader"));
+    }
+
+    #[test]
+    fn detaching_asset_pins_preserves_owned_resources_and_waits_for_pinned_clones() {
+        let project = TempProject::new();
+        let manifest_bytes = manifest("scene.json");
+        let scene_bytes = model_project_scene(true);
+        let mut sources = minimal_model_sources();
+        sources.insert("sprites/pixel.png".into(), png_rgba([23, 47, 89, 255]));
+        project.write(PROJECT_MANIFEST_FILE, &manifest_bytes);
+        project.write("scene.json", &scene_bytes);
+        for (source_id, bytes) in sources {
+            project.write(&source_id, &bytes);
+        }
+        let cache_root = project.path().join("cache");
+        let mut cache =
+            crate::assets::FileCookCache::open(&cache_root, crate::assets::CacheLimits::default())
+                .unwrap();
+        let prepared = load_project_with_assets(
+            project.path(),
+            &mut cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+        let pinned_clone = prepared.clone();
+        let digest = prepared.digest().to_owned();
+        let catalog_digest = prepared.asset_catalog().unwrap().digest().to_owned();
+        drop(cache);
+        assert!(
+            crate::assets::FileCookCache::open(&cache_root, crate::assets::CacheLimits::default())
+                .is_err()
+        );
+
+        let detached = prepared.release_asset_cache_pins();
+        assert_eq!(detached.digest(), digest);
+        assert_eq!(detached.asset_catalog().unwrap().digest(), catalog_digest);
+        assert!(
+            crate::assets::FileCookCache::open(&cache_root, crate::assets::CacheLimits::default())
+                .is_err()
+        );
+        drop(pinned_clone);
+
+        let reopened =
+            crate::assets::FileCookCache::open(&cache_root, crate::assets::CacheLimits::default())
+                .expect("detached project should no longer retain the cache owner lock");
+        match detached
+            .asset_catalog()
+            .unwrap()
+            .asset(&StableId::new("asset:model").unwrap())
+            .unwrap()
+        {
+            ImportedAsset::Model(model) => {
+                assert_eq!(
+                    model.primitives()[0].geometry().positions()[1],
+                    [1.0, 0.0, 0.0]
+                );
+            }
+            _ => panic!("model asset should remain owned after pin release"),
+        }
+        match detached
+            .asset_catalog()
+            .unwrap()
+            .asset(&StableId::new("asset:image").unwrap())
+            .unwrap()
+        {
+            ImportedAsset::Image(image) => {
+                assert_eq!(image.decoded().rgba8(), &[23, 47, 89, 255]);
+            }
+            _ => panic!("image asset should remain owned after pin release"),
+        }
+        assert!(detached.validate().is_ok());
+        assert_eq!(reopened.stats().pinned_entries, 0);
     }
 
     #[test]

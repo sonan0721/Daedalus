@@ -33,6 +33,7 @@ scene schema 1의 기존 component envelope 안에 아래 component를 추가한
 | `ProjectRenderResources::prepare`/`extract` | model binding까지 준비하고 같은 authority snapshot에서 packet을 추출 |
 | `Renderer::into_packet_renderer_with_asset_limits` | 기존 packet limits와 별도의 `PacketAssetLimits`를 받는 additive constructor |
 | `PacketRenderer::asset_resource_stats()` | 기존 stats를 깨지 않고 texture·sampler·bind group·합산 resident/staging·재사용 계측 제공 |
+| `run_packet_windowed_reported_with_asset_limits` | 기존 window/packet outcome을 유지하고 `PacketAssetWindowOutcome { packet: PacketWindowOutcome, asset_resource_stats: PacketAssetResourceStats }` wrapper 반환 |
 
 기존 `load_project`/`prepare_project_from_bytes`는 legacy 범위와 오류 의미를 보존한다. 새 component는 asset-aware loader/validator가 처리한다. `PreparedProject::validate()`도 불변 catalog와 source scene에서 binding을 재검증하며 private map을 무조건 신뢰하지 않는다. 새 불변 field는 PartialEq에 반영한다. asset-aware와 legacy loader가 같은 legacy project를 읽을 때 source digest는 같아야 한다. 빈 catalog domain을 추가해 기존 source identity를 바꾸지 않는다.
 
@@ -92,9 +93,13 @@ packet validation, slot 계획, 신규 byte/entry/staging/scratch 합산, evicti
 
 모든 fallible 준비 뒤 slot write와 해당 draw를 같은 queue 순서/submission으로 commit한다. write를 queue에 넣고 후보를 포기한 뒤 old packet을 변경된 slot으로 그리지 않는다. 이후에도 실패 가능한 단계가 남으면 alternate slot 또는 이전 값 복구라는 실제 transaction을 구현해야 한다. staging은 completion callback/watermark가 지난 뒤 회수하고 submit 성공을 완료로 보지 않는다. redraw에서 GPU 완료를 기다리는 Poll::Wait를 새로 넣지 않는다. 기존 batch capture의 명시적 완료 대기는 live path와 구분한다.
 
+staging 계측에는 loading overlay uniform도 포함한다. 후보가 Busy여도 old packet의 필요한 frame write를 감당할 수 있으면 실제 old draw를 submit하고 그 identity를 반환한다. old frame조차 submit할 수 없으면 typed ResidencyBusy를 반환한다. window loop는 그 acquired surface frame을 drop하고 다음 redraw를 기다리며 present·frame count·presented metadata를 갱신하지 않는다. 실제 draw 없이 Ok(old packet)을 반환해 미초기화 frame을 present하는 경로를 금지한다.
+
 ## 실제 실행·보고와 반복 검사
 
 project view와 project capture 모두 `PreparedProject → ProjectRenderResources → RenderPacket → PacketRenderer`를 사용한다. capture의 기존 JSON identity/authority/projection field는 의미를 유지하고 packet 통계에서 산출한다. 기존 공개 `project_snapshot` API는 보존하지만 CLI capture의 별도 legacy renderer 분기는 제거한다. batch capture는 새 session이며 live presentation capture라고 보고하지 않는다.
+
+기존 `projection.expanded_geometry_bytes`는 vertex/index에 `RenderObject` record까지 더하던 값이다. 호환성을 위해 각 draw의 정확한 packed mesh bytes(`MeshHandle::gpu_bytes()`)와 `size_of::<RenderObject>()` allowance를 checked 합산한다. legacy 입력의 값은 이전 API와 같아야 한다. imported UV layout은 새 packed byte 수를 사용한다. 실제 RenderObject를 만들거나 geometry를 복제하지 않는다. `expanded_geometry_bytes_basis`로 `per_draw_packed_geometry_plus_legacy_object_record`를 명시하고 `packet_expanded_gpu_geometry_bytes`에 mesh bytes만의 합을 별도 제공한다. 전자는 호환용 논리 추정치이며 실제 CPU allocation·공유 GPU resident bytes가 아니다. GPU instance128 bytes를 전자에 새로 더해 기존 값을 바꾸지 않는다.
 
 공통 CLI 준비는 runtime actor 전에 eager I/O/CPU cook를 끝낸다. fixed tick/redraw에서 file read/decode를 하지 않는다. `project cook.runtimeConsumers`의 false는 해당 CPU-only invocation에서 GPU/audio 소비를 수행하지 않았다는 의미로 유지한다. capability probe나 엔진 전체의 영구 미지원 상태와 혼동하지 않도록 문서를 고친다. view/capture는 실제 model draw·texture upload/reuse 수를 보고하며 image summary를 실제 draw 증거로 쓰지 않는다.
 

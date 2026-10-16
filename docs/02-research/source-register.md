@@ -80,10 +80,17 @@
 | S70 | [hound 3.5.1 manifest](https://docs.rs/crate/hound/3.5.1/source/Cargo.toml), [API](https://docs.rs/hound/3.5.1/hound/) | 2026-10-16: PCM/float WAV·runtime dependency 없음·Apache-2.0 | bounded WAV importer 후보. 미채택·재생/streaming 완료 아님 |
 | S71 | [MCP 2026-07-28 versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning), [legacy lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle) | 2026-10-16: 현대 per-request/discover와 legacy initialize·transport 종료 차이 | 같은 engine session에 대한 MCP adapter의 버전별 검증. 현재 MCP 미구현 |
 | S72 | [rmcp 3.5.1 manifest](https://docs.rs/crate/rmcp/3.5.1/source/Cargo.toml), [features](https://docs.rs/crate/rmcp/3.5.1/features) | 2026-10-16 Luna 조사: Rust/MSRV/license·server/stdio/macros 기능과 전이 의존성 | exact-version SDK 후보. actual lock/build·두 protocol 시험 전 미채택 |
+| S73 | [Rust File::try_lock](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock) | 2026-10-16: 1.89 안정화·nonblocking lock·WouldBlock/Error·descriptor 수명/플랫폼 제약 | cache exclusive ownership 후보. inode unlink/clone 재잠금 회피, 실제 OS 시험 별도 |
+| S74 | [Khronos Cube](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/edc7c9e67c639d230715049ee31f9a96a6babbbe/Models/Cube) | 2026-10-16: 고정 원본 payload·모델별 CC0와 metadata CC-BY 구분·외부 BIN/PNG | 실제 import 입력. 다운로드 hash/구조 확인만 했으며 cook/표시 성공 아님 |
+| S75 | [Kenney Tiny Dungeon](https://kenney.nl/assets/tiny-dungeon) | 2026-10-16: 공식 CC0·archive license·palette PNG 원본 확보 | 실제 2D decode/atlas 입력. 게임 아트 선정·sprite runtime 검증 아님 |
+| S76 | [Kenney Interface Sounds](https://kenney.nl/assets/interface-sounds) | 2026-10-16: 공식 CC0·실제 archive는 OGG, 외부 FFmpeg 6.0으로 WAV 파생 | WAV importer 실제 오디오 입력. engine OGG/FFmpeg 통합·재생 검증 아님 |
+| S77 | [Kenney Nature Kit](https://kenney.nl/assets/nature-kit) | 2026-10-16: 공식/archive CC0·선택 GLB의 KHR_materials_unlit 선언 | 첫 subset의 미지원 진단 입력. 확장을 삭제해 성공으로 간주하지 않음 |
 
 S67~S70의 확인 결과와 CPU cook/GPU resource identity 적용안은 [에셋 상세 계약](../03-architecture/asset-import-cook-and-residency.md)에 둔다. 해당 추가는 포맷 조사이며 새 dependency를 Cargo에 설치한 결과가 아니다.
 
 S71~S72는 [session service의 MCP 기준선](../03-architecture/session-control-service.md)에 연결한다. 조사 확인과 실제 SDK 조합/stdio conformance 통과를 구분한다.
+
+S74~S77의 실제 원본·archive·변환 hash와 라이선스 범위는 [에셋 출처 기록](asset-validation-provenance.md)에 둔다. 에셋은 ignored 로컬 QA 자료이며 engine source/package에 포함하지 않는다.
 
 ## 조사 실패·부족 기록
 

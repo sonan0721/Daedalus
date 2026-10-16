@@ -14,7 +14,7 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | 미구현 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1 공통 CPU import/cache 구현 계약·API handoff 진행. 실제 cook 검증 전 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 제한된 root mesh project의 공통 parser·불변 PreparedProject·native/byte adapter 검증. 일반 importer/실행 중 patch 후속 |
 | DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
@@ -37,7 +37,7 @@
 
 반복 루프별로 `source/build commit·입력 규모·cold/warm·환경·변경 종류·실행 명령·wall time·재컴파일/recook 항목 수·수동 단계 수·오류/회귀·출력 identity`를 남긴다. cache hit만 세지 않고 잘못된 reuse와 불필요한 invalidation을 함께 확인한다. 한 번 관찰한 시간으로 일반적인 개선 배율을 보장하지 않는다.
 
-에셋 cache의 후보 key는 `source bytes + importer/version + settings + target/format + transitive dependency hashes + schema/toolchain 필요분`이다. timestamp만으로 성공 판정을 내리지 않는다. cache entry는 검증 후 원자적으로 게시하고 동일 project의 미완료 세대와 섞지 않는다.
+에셋 container의 ImportKey는 source/parser/settings/실제 dependency identity를 사용한다. LeafCookKey는 해당 geometry/image/audio 출력이 소비한 descriptor/payload·cooker/layout/settings/target만 사용한다. GLB 전체 hash를 geometry key에 넣으면 embedded image 변경에도 geometry를 다시 cook하므로 두 key를 분리한다. PNG base decode는 role/mip variant와 분리해 공유한다. timestamp만으로 성공 판정을 내리지 않는다. cache entry는 검증 후 원자적으로 게시하고 동일 project의 미완료 세대와 섞지 않는다. 정확한 경계는 [P03.1 계약](../03-architecture/asset-import-foundation.md)을 따른다.
 
 SDK 생성은 Rust의 모든 내부 type을 그대로 export하는 방식으로 만들지 않는다. 외부 API schema·소유권·수명·오류를 먼저 정하고, 생성 산출물의 conformance 시험을 유지한다. 초기 구현을 시작하기 전에 공개 ABI와 code generation의 변경 범위를 문서화한다.
 
@@ -80,3 +80,5 @@ P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0
 P02.1c는 [legacy 결과 수명](../03-architecture/legacy-session-result-lifetimes.md)의 CreditPool/RAII를 사용해 제출·소비·실패마다 수동 반환하는 중복을 줄인다. fixture actor/일반 project의 의미는 그대로 나눈다. pop 직후 panic의 lost ID는 단순 accounting 변경과 별개로 Unknown terminal을 검증한다. 공통 credit 구현과 failure/종료 회귀는 root workspace CPU 200건·기존 project CPU18·실제 loading window 종료로 확인했다. 코드량·개발 시간 개선율을 측정한 것은 아니며 전체 DEV01 완료도 아니다.
 
 P02.3a의 [live capture 계약](../03-architecture/live-capture-and-artifacts.md)은 동일 ticket→render handoff→실제 frame PNG→artifact lease로 AI 관찰 경로를 만든다. image bytes는 별도 budget이며 blocking batch capture로 대체하지 않는다. 아직 설계 리뷰 중이다. 기존 smoke backend를 확장하고 필요한 실제 GPU/OS 검증을 유지해 새로운 자동화가 검증을 생략하지 않도록 한다.
+
+P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복을 줄이는 다음 구현이다. native/byte resolver→bounded 공통 context→포맷 driver→immutable catalog를 한 pipeline으로 만들고 CLI cook은 adapter만 둔다. 새 smoke framework 대신 기존 helper의 opt-in `--assets`를 사용한다. 실제 공개 원본 확인은 별도 [출처 기록](../02-research/asset-validation-provenance.md)에 두며 CI smoke에 네트워크 의존을 추가하지 않는다. 현재는 API handoff/구현 중이고 시간 단축·reuse 통과를 아직 측정하지 않았다.

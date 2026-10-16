@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a bounded CPU smoke against an already-built Daedalus CLI binary."""
+"""Run bounded external-project smoke checks against an existing Daedalus CLI binary."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import time
 import wave
 import zlib
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 
 PROTOCOL_VERSION = 1
@@ -378,6 +378,48 @@ def _write_asset_project(directory: Path) -> None:
     (directory / "scene.json").write_text(
         json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8"
     )
+
+
+def _write_model_view_project(directory: Path) -> None:
+    """Build the offline textured glTF fixture with the shared authority entity shape."""
+
+    _write_asset_project(directory)
+    manifest_path = directory / "daedalus.project.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["name"] = "offline-model-view-smoke"
+    manifest_path.write_text(
+        json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+    scene_path = directory / "scene.json"
+    scene = json.loads(scene_path.read_text(encoding="utf-8"))
+    scene["assets"] = [
+        asset for asset in scene["assets"] if asset["id"] == "asset:model-external"
+    ]
+    scene["entities"] = [
+        {
+            "id": ENTITY_ID,
+            "name": "Smoke Textured Model",
+            "components": [
+                {
+                    "id": "component:smoke-transform",
+                    "type_id": "daedalus.transform",
+                    "data": {
+                        "translation": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                },
+                {
+                    "id": "component:smoke-model-renderer",
+                    "type_id": "daedalus.model_renderer",
+                    "asset_refs": ["asset:model-external"],
+                    "data": {"model": "asset:model-external"},
+                },
+            ],
+        }
+    ]
+    scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -1510,6 +1552,7 @@ def _run_native_project_view(
     root: Path,
     timeout: float,
     expected_source_digest: str,
+    on_ready: Callable[[_JsonlProjectServer, str], None] | None = None,
 ) -> dict[str, Any]:
     report_path = root / "native-view-report.json"
     command = _project_view_command(project, report_path, seconds=NATIVE_VIEW_SECONDS)
@@ -1549,6 +1592,9 @@ def _run_native_project_view(
             info,
         )
         _v2_ack(server, "view-info-ack", info_ticket)
+
+        if on_ready is not None:
+            on_ready(server, session)
 
         get_operation = {"op": "get_transform", "target": {"stable_id": ENTITY_ID}}
         get_ticket, reused = _v2_submit(server, "view-get-zero", get_operation)
@@ -1717,6 +1763,184 @@ def _run_native_project_view(
         expected_exit_reason="TimeLimit",
         latest_frame=latest_frame,
     )
+
+
+def _run_model_project_capture(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+    expected_source_digest: str,
+) -> dict[str, Any]:
+    image_path = root / "textured-model-capture.png"
+    command = [
+        "project",
+        "capture",
+        os.fspath(project),
+        "--output",
+        os.fspath(image_path),
+        "--width",
+        str(NATIVE_VIEW_WIDTH),
+        "--height",
+        str(NATIVE_VIEW_HEIGHT),
+        "--ticks",
+        "1",
+    ]
+    output = _json_output(_run_cli(binary, command, cwd=cwd, timeout=timeout), command)
+    _expect(output.get("command") == "project_capture", "model capture returned another command", output)
+    _expect(
+        isinstance(output.get("session"), str) and output["session"],
+        "model capture omitted its new session identity",
+        output,
+    )
+    _expect(
+        output.get("authority_tick") == 1
+        and output.get("snapshot_tick") == 1
+        and output.get("source_digest") == expected_source_digest,
+        "model capture identity/tick differs from its authored project",
+        output,
+    )
+    projection = output.get("projection")
+    _expect(isinstance(projection, dict), "model capture omitted packet projection counters", output)
+    _expect(
+        projection.get("object_count") == 1
+        and isinstance(projection.get("packet_expanded_gpu_geometry_bytes"), int)
+        and projection["packet_expanded_gpu_geometry_bytes"] > 0
+        and projection.get("expanded_geometry_bytes_basis")
+        == "per_draw_packed_geometry_plus_legacy_object_record",
+        "model capture did not report one packed imported draw with the compatibility basis",
+        projection,
+    )
+    resources = output.get("resources")
+    _expect(
+        isinstance(resources, dict)
+        and resources.get("geometry_upload_count") == 1
+        and isinstance(resources.get("geometry_upload_bytes"), int)
+        and resources["geometry_upload_bytes"] > 0,
+        "model capture did not upload its imported geometry exactly once",
+        resources,
+    )
+    asset_resources = output.get("asset_resources")
+    _expect(isinstance(asset_resources, dict), "model capture omitted imported asset GPU counters", output)
+    _expect(
+        asset_resources.get("texture_upload_count") == 1
+        and isinstance(asset_resources.get("texture_upload_bytes"), int)
+        and asset_resources["texture_upload_bytes"] > 0,
+        "model capture did not upload the referenced base-color texture",
+        asset_resources,
+    )
+    _expect(image_path.is_file(), "model capture did not write a PNG artifact", image_path)
+    image_bytes = image_path.stat().st_size
+    _expect(image_bytes > 64, "model capture wrote an unexpectedly small PNG artifact", image_bytes)
+    with image_path.open("rb") as image_file:
+        _expect(
+            image_file.read(8) == b"\x89PNG\r\n\x1a\n",
+            "model capture output is not a PNG file",
+            image_path,
+        )
+    capture = output.get("capture")
+    _expect(
+        isinstance(capture, dict)
+        and capture.get("path") == os.fspath(image_path)
+        and capture.get("width") == NATIVE_VIEW_WIDTH
+        and capture.get("height") == NATIVE_VIEW_HEIGHT
+        and capture.get("rgba8_bytes") == NATIVE_VIEW_WIDTH * NATIVE_VIEW_HEIGHT * 4,
+        "model capture returned unexpected image dimensions",
+        output,
+    )
+    return {
+        "report": output,
+        "image_artifact": {"format": "PNG", "byte_len": image_bytes},
+    }
+
+
+def _run_model_project_smoke(
+    binary: Path,
+    *,
+    cwd: Path,
+    root: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    project = root / "authored-textured-model-project"
+    _write_model_view_project(project)
+    validate_args = ["project", "validate", os.fspath(project)]
+    validated = _json_output(_run_cli(binary, validate_args, cwd=cwd, timeout=timeout), validate_args)
+    _expect(validated.get("valid") is True, "textured model project did not validate", validated)
+    _expect(
+        validated.get("entity_count") == 1 and validated.get("asset_count", 0) >= 1,
+        "textured model project did not contain its authored entity/assets",
+        validated,
+    )
+    source_digest = validated.get("source_digest")
+    _expect(isinstance(source_digest, str) and source_digest, "model validation omitted source identity", validated)
+
+    capture_during_view: dict[str, Any] = {}
+
+    def capture_when_view_is_ready(server: _JsonlProjectServer, view_session: str) -> None:
+        capture_during_view["result"] = _run_model_project_capture(
+            binary,
+            project,
+            cwd=cwd,
+            root=root,
+            timeout=timeout,
+            expected_source_digest=source_digest,
+        )
+        _expect(
+            server.process.poll() is None,
+            "native model viewer exited while its concurrent batch capture was running",
+            {"view_session": view_session, "capture": capture_during_view["result"]},
+        )
+        capture_during_view["view_session"] = view_session
+
+    view = _run_native_project_view(
+        binary,
+        project,
+        cwd=cwd,
+        root=root,
+        timeout=timeout,
+        expected_source_digest=source_digest,
+        on_ready=capture_when_view_is_ready,
+    )
+    capture = capture_during_view.get("result")
+    _expect(
+        isinstance(capture, dict),
+        "native model view did not run its concurrent batch capture after project_info",
+        capture_during_view,
+    )
+    view_asset_resources = view.get("asset_resources")
+    _expect(
+        isinstance(view_asset_resources, dict)
+        and view_asset_resources.get("texture_upload_count") == 1
+        and isinstance(view_asset_resources.get("texture_upload_bytes"), int)
+        and view_asset_resources["texture_upload_bytes"] > 0,
+        "native model view did not upload its referenced base-color texture",
+        view,
+    )
+    capture_session = capture["report"].get("session")
+    view_session = view.get("session")
+    _expect(
+        isinstance(capture_session, str)
+        and capture_session
+        and isinstance(view_session, str)
+        and view_session,
+        "batch capture and native view must each report their own session identity",
+        {"capture": capture["report"], "view": view},
+    )
+    return {
+        "source_digest": source_digest,
+        "capture": {
+            "invocation_kind": "batch_capture_process_while_native_window_active",
+            "concurrent_with_native_view": True,
+            "native_view_session": capture_during_view["view_session"],
+            **capture,
+        },
+        "native_view": {
+            "invocation_kind": "native_window_process",
+            "report": view,
+        },
+    }
 
 
 def _run_native_project_close(
@@ -1997,8 +2221,9 @@ def run_project_smoke(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     view: bool = False,
     assets: bool = False,
+    models: bool = False,
 ) -> dict[str, Any]:
-    """Exercise empty and authored external projects using an existing CLI binary."""
+    """Exercise CPU lifecycle checks plus any explicitly requested native/model checks."""
 
     if not 0 < timeout <= MAX_TIMEOUT_SECONDS:
         raise SmokeError(f"timeout must be greater than zero and at most {MAX_TIMEOUT_SECONDS:g} seconds")
@@ -2182,6 +2407,21 @@ def run_project_smoke(
                 "blocked_stdout": blocked_stdout_view,
             }
 
+        model_results: dict[str, Any] | None = None
+        if models:
+            model_results = _run_model_project_smoke(
+                binary,
+                cwd=working_directory,
+                root=root,
+                timeout=timeout,
+            )
+            checks.extend(
+                [
+                    "textured_model_project_batch_capture",
+                    "textured_model_project_native_view_and_authority_control",
+                ]
+            )
+
     result = {
         "schema_version": 1,
         "smoke": "external_project_cpu",
@@ -2199,12 +2439,14 @@ def run_project_smoke(
         result["native_view"] = view_results
     if asset_results is not None:
         result["asset_cook"] = asset_results
+    if model_results is not None:
+        result["models"] = model_results
     return result
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view adds native GPU/window checks."
+        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view and --models add opt-in native GPU checks."
     )
     parser.add_argument("--cli", type=Path, required=True, help="already-built daedalus executable")
     parser.add_argument(
@@ -2223,6 +2465,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also run offline multi-format CPU asset-cook and selective-cache-reuse checks",
     )
+    parser.add_argument(
+        "--models",
+        action="store_true",
+        help="also capture and open an offline textured glTF project in the native GPU viewer",
+    )
     return parser.parse_args(argv)
 
 
@@ -2234,6 +2481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=arguments.timeout,
             view=arguments.view,
             assets=arguments.assets,
+            models=arguments.models,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

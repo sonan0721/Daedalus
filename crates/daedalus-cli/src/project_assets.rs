@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use daedalus_content::assets::{
     AssetImportError, AssetImportErrorCode, AssetImportMetrics, AssetKind, CacheLimits,
-    CookedResourceKind, FileCookCache, ImportCancellation, ImportLimits,
+    CookedResourceKind, CpuCookCache, FileCookCache, ImportCancellation, ImportLimits,
+    MemoryCookCache,
 };
 use daedalus_content::project::{PreparedProject, load_project_with_assets};
 use serde::Serialize;
@@ -18,6 +19,139 @@ const MAX_JSON_LINE_BYTES: usize = 1024 * 1024;
 const MAX_ERROR_FIELD_BYTES: usize = 8 * 1024;
 const MAX_ERROR_CHAIN_ENTRIES: usize = 256;
 const MAX_ERROR_CHAIN_ITEM_BYTES: usize = 512;
+
+/// Maps imported-asset renderer counters into one CLI JSON shape shared by capture and view.
+#[cfg(any(feature = "capture", feature = "window"))]
+pub(super) fn asset_resource_stats_json(
+    stats: &daedalus_renderer::PacketAssetResourceStats,
+) -> Value {
+    json!({
+        "texture_upload_count":stats.texture_upload_count,
+        "texture_upload_bytes":stats.texture_upload_bytes,
+        "texture_cache_hit_count":stats.texture_cache_hit_count,
+        "texture_cache_miss_count":stats.texture_cache_miss_count,
+        "sampler_create_count":stats.sampler_create_count,
+        "sampler_cache_hit_count":stats.sampler_cache_hit_count,
+        "sampler_cache_miss_count":stats.sampler_cache_miss_count,
+        "bind_group_create_count":stats.bind_group_create_count,
+        "bind_group_cache_hit_count":stats.bind_group_cache_hit_count,
+        "bind_group_cache_miss_count":stats.bind_group_cache_miss_count,
+        "active_texture_entries":stats.active_texture_entries,
+        "retired_texture_entries":stats.retired_texture_entries,
+        "active_sampler_entries":stats.active_sampler_entries,
+        "retired_sampler_entries":stats.retired_sampler_entries,
+        "active_bind_group_entries":stats.active_bind_group_entries,
+        "retired_bind_group_entries":stats.retired_bind_group_entries,
+        "resident_active_bytes":stats.resident_active_bytes,
+        "resident_retired_bytes":stats.resident_retired_bytes,
+        "resident_total_bytes":stats.resident_total_bytes,
+        "upload_staging_in_flight_bytes":stats.upload_staging_in_flight_bytes,
+        "upload_staging_peak_bytes":stats.upload_staging_peak_bytes,
+        "in_flight_submissions":stats.in_flight_submissions,
+        "upload_staging_write_count":stats.upload_staging_write_count,
+        "upload_staging_write_bytes":stats.upload_staging_write_bytes,
+        "cpu_upload_scratch_current_bytes":stats.cpu_upload_scratch_current_bytes,
+        "cpu_upload_scratch_peak_bytes":stats.cpu_upload_scratch_peak_bytes,
+        "bookkeeping_reserved_bytes":stats.bookkeeping_reserved_bytes,
+        "overlay_write_count":stats.overlay_write_count,
+        "overlay_write_bytes":stats.overlay_write_bytes,
+        "pending_candidate_count":stats.pending_candidate_count,
+        "busy_count":stats.busy_count,
+        "rejected_count":stats.rejected_count,
+        "pending_candidate":stats.pending_candidate,
+    })
+}
+
+/// Maps packet geometry/instance counters into the legacy CLI `resources` JSON shape.
+#[cfg(any(feature = "capture", feature = "window"))]
+pub(super) fn packet_resource_stats_json(stats: &daedalus_renderer::PacketResourceStats) -> Value {
+    json!({
+        "active_bytes":stats.active_bytes,
+        "active_entries":stats.active_entries,
+        "retired_bytes":stats.retired_bytes,
+        "retired_entries":stats.retired_entries,
+        "geometry_upload_count":stats.geometry_upload_count,
+        "geometry_upload_bytes":stats.geometry_upload_bytes,
+        "cache_hit_count":stats.cache_hit_count,
+        "cache_miss_count":stats.cache_miss_count,
+        "instance_write_count":stats.instance_write_count,
+        "instance_write_bytes":stats.instance_write_bytes,
+        "material_write_count":stats.material_write_count,
+        "material_write_bytes":stats.material_write_bytes,
+        "global_write_count":stats.global_write_count,
+        "global_write_bytes":stats.global_write_bytes,
+        "depth_target_recreation_count":stats.depth_target_recreation_count,
+        "cache_eviction_count":stats.cache_eviction_count,
+        "pending_candidate_count":stats.pending_candidate_count,
+        "pending_candidate":stats.pending_candidate,
+    })
+}
+
+/// The shared asset-aware loader seam used by lifecycle commands and `project cook`.
+/// Callers choose the cache lifetime explicitly; all project parsing/importing stays in content.
+pub(super) fn load_project_with_cache(
+    directory: &Path,
+    cache: &mut dyn CpuCookCache,
+) -> Result<PreparedProject, AssetImportError> {
+    load_project_with_assets(
+        directory,
+        cache,
+        ImportLimits::default(),
+        &ImportCancellation::never(),
+    )
+}
+
+/// Read-only lifecycle commands use a bounded invocation-local cache and never acquire a disk lock.
+pub(super) fn load_project_read_only(
+    directory: &Path,
+) -> Result<PreparedProject, AssetImportError> {
+    let mut cache = MemoryCookCache::default();
+    load_project_with_cache(directory, &mut cache)
+}
+
+/// Runtime commands eagerly cook into the project-local disk cache, then detach its pins and drop
+/// the exclusive cache owner before starting a session or renderer. The returned catalog remains
+/// fully owned by its Arc-backed prepared data.
+pub(super) fn load_project_runtime(directory: &Path) -> Result<PreparedProject, AssetImportError> {
+    let cache_root = directory.join(".daedalus/cache");
+    load_project_runtime_with_cache_root(directory, &cache_root)
+}
+
+fn load_project_runtime_with_cache_root(
+    directory: &Path,
+    cache_root: &Path,
+) -> Result<PreparedProject, AssetImportError> {
+    let directory = validate_runtime_project_root(directory)?;
+    let mut cache = FileCookCache::open(cache_root, CacheLimits::default())?;
+    let prepared = load_project_with_cache(&directory, &mut cache)?;
+    let prepared = prepared.release_asset_cache_pins();
+    drop(cache);
+    Ok(prepared)
+}
+
+fn validate_runtime_project_root(directory: &Path) -> Result<PathBuf, AssetImportError> {
+    let canonical_root = std::fs::canonicalize(directory).map_err(|error| {
+        AssetImportError::new(
+            AssetImportErrorCode::Io,
+            daedalus_content::assets::ImportLocation::new(
+                directory.display().to_string(),
+                "project_root",
+            ),
+            error.to_string(),
+        )
+    })?;
+    if !canonical_root.is_dir() {
+        return Err(AssetImportError::new(
+            AssetImportErrorCode::InvalidPath,
+            daedalus_content::assets::ImportLocation::new(
+                canonical_root.display().to_string(),
+                "project_root",
+            ),
+            "project root must be a directory",
+        ));
+    }
+    Ok(canonical_root)
+}
 
 pub(super) fn run(
     directory: PathBuf,
@@ -46,13 +180,7 @@ pub(super) fn run(
 fn execute(directory: &Path, cache_root: &Path) -> Result<Vec<u8>, CookFailure> {
     let mut cache =
         FileCookCache::open(cache_root, CacheLimits::default()).map_err(CookFailure::Import)?;
-    let prepared = load_project_with_assets(
-        directory,
-        &mut cache,
-        ImportLimits::default(),
-        &ImportCancellation::never(),
-    )
-    .map_err(CookFailure::Import)?;
+    let prepared = load_project_with_cache(directory, &mut cache).map_err(CookFailure::Import)?;
     let report = prepared.asset_import_report().ok_or_else(|| {
         CookFailure::Import(AssetImportError::new(
             AssetImportErrorCode::Internal,
@@ -119,6 +247,7 @@ struct CookOutput<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeConsumers {
+    // These describe this CPU-only `project cook` invocation, not engine capability support.
     model_rendering: bool,
     image_rendering: bool,
     sprite_playback: bool,
@@ -320,6 +449,129 @@ impl CookFailure {
         match self {
             Self::Import(error) => error,
         }
+    }
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use daedalus_content::assets::{AssetImportErrorCode, CacheLimits, FileCookCache};
+    use daedalus_content::project::ProjectManifest;
+    use daedalus_content::scene::{AssetDescriptor, SceneDocument, StableId};
+
+    use super::{load_project_read_only, load_project_runtime_with_cache_root};
+
+    fn write_audio_project(path: &std::path::Path) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(
+            path.join("daedalus.project.json"),
+            serde_json::to_vec(&ProjectManifest::new("loader-test")).unwrap(),
+        )
+        .unwrap();
+        let mut scene = SceneDocument::default();
+        scene.assets.push(AssetDescriptor {
+            id: StableId::new("asset:tone").unwrap(),
+            kind: StableId::new("daedalus.audio").unwrap(),
+            uri: "tone.wav".into(),
+            content_hash: None,
+            metadata: Default::default(),
+        });
+        fs::write(path.join("scene.json"), serde_json::to_vec(&scene).unwrap()).unwrap();
+
+        // One short mono 16-bit PCM WAV; the importer produces a real cache entry and catalog pin.
+        let samples = [0_u8, 0, 0xff, 0x7f];
+        let mut wav = Vec::with_capacity(48);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((36 + samples.len()) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&8_000_u32.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&samples);
+        fs::write(path.join("tone.wav"), wav).unwrap();
+    }
+
+    fn temporary_root() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "daedalus-cli-loader-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn lifecycle_loaders_share_asset_aware_digest_and_release_runtime_cache_owner() {
+        let root = temporary_root();
+        let project_path = root.join("project");
+        let cache_root = root.join("cache");
+        write_audio_project(&project_path);
+
+        let checked = load_project_read_only(&project_path).unwrap();
+        assert!(checked.asset_catalog().is_some());
+        assert!(checked.asset_import_report().is_some());
+        assert!(!project_path.join(".daedalus").exists());
+
+        let runtime = load_project_runtime_with_cache_root(&project_path, &cache_root).unwrap();
+        assert_eq!(runtime.digest(), checked.digest());
+        assert!(runtime.asset_catalog().is_some());
+        runtime.validate().unwrap();
+        let audio_id = StableId::new("asset:tone").unwrap();
+        assert!(matches!(
+            runtime.asset_catalog().unwrap().asset(&audio_id),
+            Some(daedalus_content::assets::ImportedAsset::Audio(_))
+        ));
+
+        // The helper must detach catalog pins and drop its FileCookCache before returning.
+        let reopened = FileCookCache::open(&cache_root, CacheLimits::default()).unwrap();
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_loader_rejects_missing_or_file_root_before_creating_cache() {
+        let root = temporary_root();
+        fs::create_dir_all(&root).unwrap();
+
+        let missing = root.join("missing-project");
+        let missing_cache = root.join("missing-cache");
+        let missing_error = match load_project_runtime_with_cache_root(&missing, &missing_cache) {
+            Ok(_) => panic!("missing project root unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert_eq!(missing_error.code(), AssetImportErrorCode::Io);
+        assert_eq!(missing_error.source_id(), Some(missing.to_str().unwrap()));
+        assert_eq!(missing_error.path(), Some("project_root"));
+        assert!(!missing.exists());
+        assert!(!missing_cache.exists());
+
+        let file_root = root.join("not-a-project-directory");
+        fs::write(&file_root, b"not a directory").unwrap();
+        let file_cache = root.join("file-cache");
+        let file_error = match load_project_runtime_with_cache_root(&file_root, &file_cache) {
+            Ok(_) => panic!("file project root unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert_eq!(file_error.code(), AssetImportErrorCode::InvalidPath);
+        let canonical_file_root = fs::canonicalize(&file_root).unwrap();
+        assert_eq!(
+            file_error.source_id(),
+            Some(canonical_file_root.to_str().unwrap())
+        );
+        assert_eq!(file_error.path(), Some("project_root"));
+        assert!(!file_cache.exists());
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

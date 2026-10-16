@@ -87,9 +87,9 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 
 실제 공개 입력의 단1회 debug 관찰은 cold0.34초/warm0.21초다. 두 실행 모두 source read8·container parse7·range hash2448 bytes가 남았고 전체 source는583,313 bytes다. 따라서 모든 제작 비용 제거·일반적인 속도 개선 배율·P03.4 인수로 해석하지 않는다. 초기 parser/IR 준비와 별도 process의 source 검증은 남은 비용이며, 다음 실제 consumer·in-session generation/reload 단계에서 영향과 비용을 구분한다. 전체 결과·binary hash·command는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)을 따른다. 이후 clean package/PR10 CI까지 인수했으나 DEV03/DEV05 전체 완료는 아니다.
 
-## P03.2a에서 제거할 다음 반복
+## P03.2a의 반복 제거와 로컬 근거
 
-[모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)은 다음 중복과 실패를 source 감사로 확인해 구현 대상으로 고정했다. 아래는 검증할 항목이며 아직 달성 결과가 아니다.
+[모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)은 다음 중복과 실패를 source 감사로 확인해 구현 대상으로 고정했다. 공통 loader·packet·stats 변환·cache pin 해제·기존 opt-in smoke로 구현했고 로컬 CPU/GPU/native를 검증했다. clean package/PR CI는 대기다.
 
 | 현재 반복 또는 장애 | 이번 공통 책임 | 효과를 확인할 근거 |
 | --- | --- | --- |
@@ -100,3 +100,7 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 | 실제 GPU 회귀마다 subprocess·project JSON·deadline·cleanup을 새로 조립 | 기존 smoke helper의 opt-in model mode | CPU18/assets31/native22 의미 유지, GPU 미사용 기본 mode와 실패 cleanup 회귀 |
 
 새 renderer·framework·cache를 추가한 개수보다 실제로 공유되는 경로와 제거된 작업을 평가한다. 별도 process의 source read/parse는 이 변경만으로 없어지지 않으며 후속 in-session generation 작업에서 측정한다. 효과가 없는 범용화는 진행률로 계산하지 않는다.
+
+실제 반복 GPU 검사에서 같은 packet 재표시는 geometry/texture/sampler/pair/instance/material 증가0이었다. authority transform만 변경한10draw는 instance write10회만 증가했고 geometry/texture/material과 장치 resource 생성은 증가하지 않았다. 공개 Cube 두 entity도 geometry upload1회/1296 bytes와 texture upload1회/1,398,100 bytes를 공유했고12초 native redraw1409회 동안 geometry/texture/instance/material upload 수가 더 증가하지 않았다.
+
+같은 smoke helper의 `--view --models`는24건/11.015236초로 통과했다. viewer ready 뒤 별도 capture를 실행하고 viewer 생존 확인→authority set/step/query→실제 presented packet 대조까지 자동화해 cache 잠금 회귀를 검사한다. GPU frame capture와 별도 batch process의 의미를 섞지 않는다. 기존 실패/timeout/cleanup 회귀를 포함한 Python54건도 통과했다. 이 값은 현재 검사 실행의 관찰이며 이전 작업 대비 개발 시간 개선율은 측정하지 않았다. 실제 source/binary와 command는 [작업 기록](../06-worklog/2026-10-16-model-texture-runtime.md)에 둔다.

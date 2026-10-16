@@ -53,6 +53,10 @@ PcmClip에 `from_interleaved_slice(sample_rate, channels, &[f32])`를 추가하�
 
 bank는 actor 실행 동안 Frame backing을 소유한다. callback에서 decode/I/O/큰 변환 allocation을 하지 않고 실행 중 voice 종료가 bank의 마지막 PCM owner를 해제하지 않게 한다. actor 종료 때 backend/mixer owner를 먼저 drop한 뒤 bank를 해제한다. 단, pinned Kira의 desktop CPAL backend Drop은 stop atomic만 설정하고 detached stream-manager thread가 이후 정리하므로 actor join을 callback/장치 thread의 동기 join이나 즉시 PCM 해제로 보고하지 않는다. Kira가 보유한 Frame Arc는 eventual cleanup까지 남을 수 있다. 종료 순간 마지막 PCM 해제가 어느 thread에서 일어나는지와 teardown 최대 지연은 이번 backend로 보장하지 않는다. ticket/replay/query 결과에는 PCM/bank owner를 노출하지 않는다.
 
+low-level AudioConfig validator·기존 limit·`PCM_FRAME_BYTES`를 공개해 runtime이 검증과 Frame layout을 다시 정의하지 않게 한다.
+
+추가 source 리뷰에서 기존 reap이 호출마다 stopped-index Vec를 새로 할당하고 offline process 뒤에도 allocation 오류를 낼 수 있음을 확인했다. 공통 voice arena는 free-slot 저장 공간을 사전 확보한 뒤 stopped slot을 직접 정리해 반복 scratch를 없앤다. offline 출력 Vec와 reap의 필요한 용량은 mixer clock을 진행하기 전에 확보한다. PCM을 이미 진행한 뒤 발생한 allocation 실패를 clock 미진행으로 보고하지 않는다. bank 준비·native 출력에 같은 arena를 사용하고 별도 reaper를 만들지 않는다.
+
 ## 공통 operation·voice ID와 결과
 
 runtime이 feature-gated `SessionOperation::Audio(SessionAudioOperation)`와 `SessionRequestResult::Audio(SessionAudioResult)`를 제공한다. 새 공개 audio 값/보고는 가능한 private field+accessor로 확장하며 기존 struct literal은 보존한다. bank/operation/result는 GPU/DCC/JSONL과 무관한 typed Rust 값이다.
@@ -87,7 +91,7 @@ protocol request_id는 ticket 보유 중의 correlation일 뿐이다. ack/forget
 
 command_id=None이면 기존 server-generated namespace를 사용한다. 이것을 응답 유실/attachment 교체 이후의 caller replay 보장으로 광고하지 않는다. AI/네트워크 adapter가 그 보장을 원하면 명시적 caller ID를 유지해야 한다. generated high-half ID는 기존 caller 제출 제한을 유지한다.
 
-RenderOffline도 mixer clock을 진행하는 mutation이므로 동일 replay 규칙을 적용한다. 반환하는 OfflineAudioSummary는 실제 mixed PCM의 frames/rate/channel peak/RMS/nonzero count와 누적 audio frame clock이다. 통계는 f64 누적 등 overflow/finite를 고려해 계산하고 nonfinite 출력은 명시적 오류다. 긴 PCM 배열을 ticket/JSON에 복사하지 않는다. Engine Manual Step은 audio clock을 암묵적으로 진행시키지 않는다.
+RenderOffline도 mixer clock을 진행하는 mutation이므로 동일 replay 규칙을 적용한다. 반환하는 OfflineAudioSummary는 실제 mixed PCM의 frames/rate, 좌·우 채널별 peak/RMS, 전체 peak/RMS/nonzero count와 누적 audio frame clock이다. 채널 통계로 실제 pan 결과를 공개 경로에서도 검사한다. 통계는 f64 누적 등 overflow/finite를 고려해 계산하고 nonfinite 출력은 명시적 오류다. 긴 PCM 배열을 ticket/JSON에 복사하지 않는다. Engine Manual Step은 audio clock을 암묵적으로 진행시키지 않는다.
 
 기존 정상/Step credit·client 보유 result 수명·forget/ACK·Close 우선권을 그대로 적용한다. audio 요청은 normal lane이며 별도의 무한 lane이나 Step reserve를 쓰지 않는다. accepted Play는 ticket을 잊어도 취소되지 않는다. actor panic 중 효과 후 원래 결과가 확정되지 않으면 기존 OutcomeUnknown 의미를 사용한다. 종료는 queued not-applied와 이미 효과가 발생한 작업을 구분하고 공통 join을 사용한다.
 

@@ -14,7 +14,7 @@ scene asset descriptor는 기존 schema 1과 StableId/uri를 유지한다. 기�
 
 | kind / importer | 이번 실제 출력 | 오류로 진단할 요구 |
 | --- | --- | --- |
-| daedalus.model / gltf2-static-v1 | glTF/GLB static triangle·indexed/nonindexed 정규화·node hierarchy/local transform·primitive ordinal·POSITION/NORMAL/optional UV0·PBR scalar factor·base-color PNG·sampler | skin/animation/morph·다른 primitive topology·없는 필수 normal/texture UV·JPEG/data URI·unsupported used/required extension·미지원 texture role/alpha/double-sided 요구 |
+| daedalus.model / gltf2-static-v1 | glTF/GLB static triangle·indexed/nonindexed 정규화·node hierarchy/local transform·primitive ordinal·POSITION/NORMAL/optional UV0·PBR scalar factor·base-color PNG·sampler | skin/animation/morph·sparse accessor·다른 primitive topology·없는 필수 normal/texture UV·JPEG/data URI·unsupported used/required extension·미지원 texture role/alpha/double-sided 요구 |
 | daedalus.image / png-rgba8-v1 | PNG palette/gray/RGB/RGBA·tRNS 확장→RGBA8, usage/sampler/mip 의미 | 16-bit/HDR/특수 color-profile 변환은 첫 버전에서 명시 unsupported. 알 수 없는 gamma 보정으로 색을 바꾸지 않음 |
 | daedalus.sprite_atlas / sprite-atlas-json-v1 | versioned JSON·declared image StableId·region StableId/pixel rect/pivot/pixels-per-unit·nearest/no-mip pixel policy | 경계 초과/중복 ID/잘못된 image kind·지원하지 않는 atlas filter/mip policy |
 | daedalus.audio / wav-pcm-f32-v1 | WAV integer PCM 8/16/24/32 또는 float32→f32 mono/stereo·sample rate/frame count | 비지원 codec/channel/rate·잘린 payload·비유한 sample. finite float sample을 임의 clamp하지 않음 |

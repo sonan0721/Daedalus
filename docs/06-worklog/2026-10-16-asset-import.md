@@ -32,6 +32,16 @@ root 독립 Python 회귀는 `python3 -m unittest discover -s scripts -p 'test_*
 
 Rust1.94.0의 native target만 설치되어 있던 환경에 `rustup target add wasm32-unknown-unknown --toolchain 1.94.0`으로 std component를 준비했다. 설치 후 target 목록에 native/Wasm 두 개가 있는 것을 확인했다. Cargo 소유자는 유지했고 아직 content Wasm compile이나 browser 실행을 통과했다고 기록하지 않는다.
 
+glTF 담당자는 첫 driver의 sparse accessor를 명시적인 located Unsupported 경계로 보고했다. 이를 첫 subset 표에 반영하며 일반 static triangle·indexed/nonindexed·interleaved·지원 UV normalization 경로의 실제 결과와 구분한다. 전체 glTF conformance나 이 기능의 영구 제외 결정은 아니다.
+
+통합 후 첫 `cargo check -p daedalus-content --lib`는 통과했다. 테스트 target의 import/type 오류와 strict Clippy 진단은 파일 소유자에게 위치를 전달해 수정하고 있으며, 이 library compile만으로 포맷 인수를 통과시키지 않는다. 신규 여섯 dependency의 실제 registry license 파일도 확인했다. hound의 소문자 `license`는 기존 collector가 처리하므로 불필요한 override·두 번째 notice 경로를 만들지 않는다. notice 생성 실행은 Cargo 소유권 반환 후 진행한다.
+
+content 담당자의 최종 `cargo test -p daedalus-content --locked`는57건 통과, strict all-target Clippy·Wasm library check·content fmt도 통과했다. source를 고정하고 Cargo 소유권을 CLI 담당자에게 넘겼다. root는 smoke fixture에서 같은 외부/embedded geometry를2개 key로 기대한 오류를 찾아1개 shared key/1회 cook과 geometry edit 후 분리 검증으로 수정하도록 했다. no-change/node/material 경로에는 PNG decode0도 대조한다. 수정 후 root Python 전체53건/5.054초/exit0을 확인했다. 이전 run과 부하가 통제되지 않아 시간 개선 배율로 해석하지 않는다.
+
+후속 [실제 실행 소비 초안](../03-architecture/asset-runtime-consumers.md)을 만든 이유는 import 성공과 실제 model/texture·sprite·audio 사용을 구분하고 공통 packet/resource 경로를 재사용하기 위해서다. 현재 code 감사에서 발견한 공개 PreparedEntity 필드 호환성, primitive가 여러 node에서 반복될 때의 draw ID 충돌, authority × full node matrix, 실제 sampler와 공통 image cook policy 구분을 먼저 기록했다. numeric device budget·JSON/API는 각 하위 착수 전에 확정하며 아직 구현 착수/인수 문서가 아니다.
+
+CLI 담당자의 실제 assets smoke는 payload corruption 복구 다음 두 결함을 드러냈다. 전체 header를 깨면 검증하지 않은 kind byte 때문에 CacheConflict가 났고, required Draco 선언은 library의 자동 validation이 먼저 실행되어 Unsupported 대신 Json 오류가 났다. smoke 기대를 약화하지 않고 core/glTF 소유자에게 각각 회귀와 수정을 맡겼다. 정상 다른-kind cache 보호·완전한 accepted glTF validation은 유지한다. CLI 담당자의33건 CPU test·strict Clippy·fmt·기존 CPU18 통과와 이 assets 실패는 다른 근거로 기록한다.
+
 ## 실제 입력 확보 결과
 
 고정 Khronos Cube glTF/BIN/512×512 PNG, Kenney Tiny Dungeon palette PNG, Kenney Interface Sounds OGG 원본 및 외부 FFmpeg 6.0 변환 PCM16 WAV, Kenney Nature Kit GLB를 확보하고 source 구조와 hash를 확인했다. 원본은 ignored `dist/qa-assets/`에만 있다. 자동 smoke는 별도 offline 입력을 사용한다.

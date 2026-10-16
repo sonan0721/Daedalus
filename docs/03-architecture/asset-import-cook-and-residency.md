@@ -1,6 +1,6 @@
 # 외부 에셋 import·cook·resource generation
 
-상태: P03 세부 설계·미구현 · 2026-10-16 · D1 제품 인수 미통과
+상태: P03 전체 설계·P03.1 CPU 구현 검증 중 · 2026-10-16 · D1 제품 인수 미통과
 
 ## 만든 이유와 현재 경계
 
@@ -10,7 +10,9 @@
 
 ## 실제 기준선과 조사
 
-현재 lock은 wgpu 27.0.1, png 0.18.1, sha2 0.10.9, Kira 0.12.5를 포함한다. `gltf`, `image`, `hound`, Symphonia는 없다. content의 source digest에는 입력 file identity가 있지만 importer/settings/target/dependency graph는 없다. renderer의 PNG capture와 single-mip render target은 texture asset import/mipmap 지원의 근거가 아니다. Kira는 defaults 없이 `cpal`만 켰으므로 현재 WAV decoder가 있다고 가정하지 않는다.
+착수 전 감사의 lock은 wgpu 27.0.1, png 0.18.1, sha2 0.10.9, Kira 0.12.5를 포함했고 `gltf`, `image`, `hound`, Symphonia는 없었다. 당시 content의 source digest에는 입력 file identity만 있었고 importer/settings/target/dependency graph는 없었다. P03.1 구현 branch에는 gltf1.4.1·hound3.5.1을 추가했고 첫 content library compile을 확인했다. 최종 채택/인수 상태는 [의존성 기준선](../02-research/implementation-dependency-baseline.md)과 [작업 기록](../06-worklog/2026-10-16-asset-import.md)을 따른다. 아래 후보 표는 착수 전 조사 이력이다.
+
+renderer의 PNG capture와 single-mip render target은 texture asset import/mipmap 지원의 근거가 아니다. Kira는 defaults 없이 `cpal`만 켰고, hound CPU decode와 실제 AudioService 소비는 P03.1/P03.2의 다른 경계다.
 
 공식 자료 확인일은 2026-10-16이다. Luna xhigh가 read-only로 조사했고, 아래는 source 문서의 확인 내용과 다이달로스 제안을 구분한다.
 
@@ -111,7 +113,7 @@ CLI load/validate/inspect/capture와 후속 MCP는 같은 importer/IR/cache/serv
 
 첫 CPU 경계는 host-neutral `daedalus_content::assets`와 byte-map/native-contained resolver·versioned model/image/atlas/PCM catalog다. 기존 public `ProjectMesh`/`ProjectVertex`·`.meshes()`·renderer `Vertex`·schema 1 의미를 불필요하게 바꾸지 않는다. 신규 모델의 UV/material/primitive/node 정보는 별도 IR/cooked payload에 담고, 기존 내부 GPU layout에는 명시 layout version으로 연결한다. skin/animation 등 미지원 요구는 위치 있는 오류로 거부한다. 미래 기능을 위해 지금 모든 generic accessor/animation runtime을 구현하는 것으로 범위를 늘리지 않는다.
 
-아래는 아직 채택/빌드 결과가 아닌 **수치 후보**다. P02 foundation 통과 뒤 public API·native/byte 일치·aggregate 계산·취소/resident 수명을 리뷰해 확정한다.
+아래는 착수 전의 **수치 후보 이력**이다. 현재 P03.1의 확정 계약은 [구현 계약](asset-import-foundation.md)의 한도·settings·cache·검증 표를 따른다. 후보 표를 구현 한도의 또 다른 원본으로 사용하지 않는다.
 
 | 항목 | 후보와 구분 |
 | --- | --- |
@@ -123,4 +125,4 @@ CLI load/validate/inspect/capture와 후속 MCP는 같은 importer/IR/cache/serv
 | disk cache | project/engine-owned 512 MiB·1,024 entries 후보. active/in-flight entry를 무조건 지워 hit인 척하지 않음 |
 | GPU | 기존 preferred/hard 64/128 MiB와 texture budget을 합쳐 다시 계약. 무제한 별도 image cache 금지 |
 
-P03.1 CPU import/cook 뒤 P03.2가 실제 model primitive·texture·sprite/audio adapter를 연결한다. 전체 P03는 invalidation·연속 reload·last-good·실제 소비 증거를 모두 필요로 한다. 최종 2D/audio/animation 인수는 관련 P05/P07/P09 기능과 함께 검증하며 P번호를 엄격한 숫자 순서 phase로 오해하지 않는다. dependency 채택·새 notice/lock·Wasm compile·실제 외부 asset provenance는 아직 미검증이다.
+P03.1 CPU import/cook 뒤 P03.2가 실제 model primitive·texture·sprite/audio adapter를 연결한다. 전체 P03는 invalidation·연속 reload·last-good·실제 소비 증거를 모두 필요로 한다. 최종 2D/audio/animation 인수는 관련 P05/P07/P09 기능과 함께 검증하며 P번호를 엄격한 숫자 순서 phase로 오해하지 않는다. 실제 외부 asset provenance는 [별도 기록](../02-research/asset-validation-provenance.md)에 있고 import 성공과 구분한다. 나머지 실행 검증 상태는 위 작업 기록으로 갱신한다.

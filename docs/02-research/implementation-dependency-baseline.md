@@ -1,6 +1,6 @@
 # 초기 구현 의존성 기준선
 
-상태: manifest·배포 source 확인 + 모듈별 빌드 검증 진행 · 확인일 2026-10-15
+상태: manifest·배포 source 확인 + 모듈별 빌드 검증 진행 · 확인일 2026-10-16
 
 ## 이 문서를 둔 이유
 
@@ -16,6 +16,7 @@
 | wgpu | 27.0.1 | 첫 실제 Metal capture 검증 버전. 최신 버전이라는 이유로 채택한 것은 아님 |
 | winit | 0.30.12 | native OS event·window. macOS main thread 제약을 실행 통합에서 유지 |
 | glam / png | 0.30.9 / 0.18.1 | 렌더 수학·실제 readback PNG 인코딩 |
+| gltf / hound | 1.4.1 / 3.5.1 | P03.1 CPU glTF/GLB static subset·WAV decoder. 렌더·재생 소비와 별도 |
 | oxijolt / Jolt | 1.1.0+jolt-5.6.0 / 5.6.0 | Rust safe adapter를 통해 C++ Jolt를 호출. 최소 shape·step·query부터 검증 |
 | Rapier 2D | 0.36.1 | 별도 2D rigid-body world. 타일 유체와 다른 기능 |
 | Kira | 0.12.5 | native audio manager와 실제 offline mixer. CPAL 장치 계층 사용 |
@@ -40,3 +41,11 @@ oxijolt는 process-wide 초기화를 한 번 수행하고 process lifetime 동�
 ## 실행 근거
 
 첫7개 Rust crate의 CPU·Metal 결과는 [첫 구현 기록](../06-worklog/2026-10-15-e01-foundation.md)에 있다. physics/audio/managed의 결과는 실제 명령을 수행한 뒤 후속 작업 기록과 루트 TESTING에 추가한다. source에서 읽은 버전·기능과 실행 통과를 같은 상태로 표기하지 않는다.
+
+## P03.1 importer dependency 검토
+
+`daedalus-content`는 gltf1.4.1의 default features를 끄고 `utils`만 켠다. 범용 glTF import feature의 image·base64·URL decoder를 추가하지 않고, 외부 URI·embedded PNG·이미지 한도는 엔진의 공통 resolver/PNG cooker로 처리한다. hound3.5.1은 WAV sample decode를 맡고 엔진이 frame/channel/finite sample·aggregate 한도를 검사한다. 정확한 실제 feature와 전이 graph는 manifest와 Cargo.lock이 기준이다.
+
+이번 lock 변경의 신규 package는 gltf·gltf-json·gltf-derive1.4.1, hound3.5.1, inflections1.1.1, lazy_static1.5.1이다. 로컬 registry에 내려받은 manifest와 원문 license 파일을 확인했다. gltf 세 crate와 lazy_static은 MIT OR Apache-2.0, hound는 Apache-2.0, inflections는 MIT다. hound의 원문 파일명은 소문자 `license`이며 기존 notice collector의 대소문자 정규화 검색 대상이다. 따라서 파일명만 보고 license override를 추가하지 않는다.
+
+새 graph의 첫 `cargo check -p daedalus-content --lib`는 통과했다. 이 시점의 단위/통합·strict Clippy·Wasm·실제 공개 에셋·배포 notice 검사는 진행 중이다. 최종 결과는 [P03.1 작업 기록](../06-worklog/2026-10-16-asset-import.md)에 따로 남긴다. 이 단일 library compile을 workspace·브라우저·runtime consumer 호환 증거로 확장하지 않는다.

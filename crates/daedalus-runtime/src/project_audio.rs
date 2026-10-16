@@ -770,9 +770,10 @@ impl ProjectAudioBank {
         project: &PreparedProject,
         limits: AudioBankLimits,
         max_voices: usize,
+        backend: BackendSelection,
     ) -> Result<Self, SessionAudioStartError> {
         let catalog = project.asset_catalog();
-        let plan = BankPlan::preflight(catalog, limits, max_voices)?;
+        let plan = BankPlan::preflight(catalog, limits, max_voices, backend)?;
         let mut aliases = Vec::new();
         aliases
             .try_reserve_exact(plan.aliases)
@@ -851,13 +852,16 @@ impl BankPlan {
         catalog: Option<&PreparedAssetCatalog>,
         limits: AudioBankLimits,
         max_voices: usize,
+        backend: BackendSelection,
     ) -> Result<Self, SessionAudioStartError> {
         let mut aliases = 0_usize;
         let mut unique_clips = 0_usize;
         let mut resident_frame_bytes = 0_u64;
         let mut conversion_scratch_bytes = 0_u64;
+        let backend_owner_bytes = backend_owner_metadata_bytes(backend)?;
         let mut metadata_bytes = checked_size_of::<ProjectAudioBank>()?
             .checked_add(checked_size_of::<ProjectAudioRuntime>()?)
+            .and_then(|value| value.checked_add(backend_owner_bytes))
             .and_then(|value| {
                 value.checked_add(
                     u64::try_from(max_voices)
@@ -1030,11 +1034,30 @@ fn map_operation_audio_error(error: AudioError) -> SessionAudioError {
 
 enum RuntimeAudioBackend {
     Offline {
-        service: AudioService<OfflineBackend>,
+        service: Box<AudioService<OfflineBackend>>,
         sample_rate: u32,
     },
     #[cfg(feature = "native-audio")]
-    Native(NativeAudioService),
+    Native(Box<NativeAudioService>),
+}
+
+fn backend_owner_metadata_bytes(
+    selection: BackendSelection,
+) -> Result<u64, SessionAudioStartError> {
+    let bytes = match selection {
+        BackendSelection::Offline { .. } => size_of::<AudioService<OfflineBackend>>(),
+        BackendSelection::Native => {
+            #[cfg(feature = "native-audio")]
+            {
+                size_of::<NativeAudioService>()
+            }
+            #[cfg(not(feature = "native-audio"))]
+            {
+                return Err(SessionAudioStartError::NativeAudioFeatureUnavailable);
+            }
+        }
+    };
+    u64::try_from(bytes).map_err(|_| SessionAudioStartError::ArithmeticOverflow)
 }
 
 impl RuntimeAudioBackend {
@@ -1047,7 +1070,7 @@ impl RuntimeAudioBackend {
             BackendSelection::Offline { sample_rate } => {
                 AudioService::<OfflineBackend>::offline(config, sample_rate)
                     .map(|service| Self::Offline {
-                        service,
+                        service: Box::new(service),
                         sample_rate,
                     })
                     .map_err(map_start_audio_error)
@@ -1056,7 +1079,7 @@ impl RuntimeAudioBackend {
                 #[cfg(feature = "native-audio")]
                 {
                     NativeAudioService::native(config)
-                        .map(Self::Native)
+                        .map(|service| Self::Native(Box::new(service)))
                         .map_err(map_start_audio_error)
                 }
                 #[cfg(not(feature = "native-audio"))]
@@ -1176,7 +1199,12 @@ impl ProjectAudioRuntime {
         if options.backend == BackendSelection::Native && !cfg!(feature = "native-audio") {
             return Err(SessionAudioStartError::NativeAudioFeatureUnavailable);
         }
-        let bank = ProjectAudioBank::prepare(project, options.bank_limits, options.max_voices)?;
+        let bank = ProjectAudioBank::prepare(
+            project,
+            options.bank_limits,
+            options.max_voices,
+            options.backend,
+        )?;
         let mut voices = Vec::new();
         voices
             .try_reserve_exact(options.max_voices)
@@ -2018,12 +2046,31 @@ pub(super) mod tests {
         let legacy =
             prepare_project_from_bytes(MANIFEST, scene, &BTreeMap::new(), ProjectLimits::default())
                 .unwrap();
-        let runtime = ProjectAudioRuntime::start(
+        let options = SessionAudioOptions::offline(8_000);
+        let expected_empty_bank_metadata = size_of::<ProjectAudioBank>() as u64
+            + size_of::<ProjectAudioRuntime>() as u64
+            + (options.max_voices() * size_of::<TrackedVoice>()) as u64
+            + size_of::<AudioService<OfflineBackend>>() as u64;
+        let metadata_limited = match ProjectAudioRuntime::start(
             &legacy,
             SessionId::fresh(),
-            SessionAudioOptions::offline(8_000),
-        )
-        .unwrap();
+            options.with_bank_limits(
+                AudioBankLimits::default()
+                    .with_max_metadata_bytes(expected_empty_bank_metadata - 1),
+            ),
+        ) {
+            Ok(_) => panic!("empty audio bank ignored backend-owner metadata"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            metadata_limited,
+            SessionAudioStartError::BudgetExceeded {
+                resource: AudioBankResource::MetadataBytes,
+                required: expected_empty_bank_metadata,
+                limit: expected_empty_bank_metadata - 1,
+            }
+        );
+        let runtime = ProjectAudioRuntime::start(&legacy, SessionId::fresh(), options).unwrap();
         let status = runtime.status().unwrap();
         assert_eq!(status.alias_count(), 0);
         assert_eq!(status.unique_clip_count(), 0);

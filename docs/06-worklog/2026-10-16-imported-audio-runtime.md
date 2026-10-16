@@ -65,6 +65,16 @@ native-audio feature가 켜진 CPU 검사도 실제 장치 출력 검사는 아�
 
 CLI window+audio 첫 compile은 args.audio를 borrowed args와 함께 `'static` coordinator로 capture해 실패했다. spawn 전에 Copy flag를 만들도록 고친 뒤39tests/strict Clippy를 재실행했다. native 창을 실행하다 실패한 것으로 기록하지 않는다. 실제 project smoke·public WAV mixer/native·workspace/managed/GPU·clean package·CI/main 인수는 아직 대기다. **P03.2c와 D1/D2/D3는 계속 열려 있다.**
 
+## 첫 workspace 통합 — native 조합의 Clippy 실패
+
+Rust checkpoint `f918c2c` 이후 조정자가 `cargo test --workspace --all-features --locked`를 실행해281pass/0fail/10hardware ignored를 확인했다. `cargo fmt --all --check`도 통과했다. raw 로그는 ignored `dist/project-evidence/p03-audio-workspace-tests.log`다. 이는 장치 출력·실제 GPU 검사와 별개다.
+
+`cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`는 RuntimeAudioBackend의 large_enum_variant로 실패했다. 이 Mac compile에서 offline variant2388bytes/native760bytes·enum2400bytes로 보고됐다. 이 수치는 Rust layout의 해당 빌드 관찰이지 플랫폼 ABI 보장이 아니다. audio-only strict 검사에는 native variant가 없어 이 경고가 나오지 않았다. raw 실패 로그는 `dist/project-evidence/p03-audio-workspace-clippy.log`로 보존한다.
+
+계약 `7c359f6`에 따라 두 private backend owner를 startup 한 번만 Box로 두고 선택한 service pointee 크기도 metadata admission에 포함했다. pointer만 세어 owned memory를 숨기지 않으며 Play/query마다 새 Box를 만들지 않는다. Luna의 audio77/native76·strict all-feature runtime 검사가 통과했다.
+
+수정 뒤 조정자가 workspace all-features를 다시 실행해281pass/0fail/10ignored와 strict workspace all-target/all-feature Clippy, fmt를 확인했다. 최종 raw 로그는 `dist/project-evidence/p03-audio-workspace-tests-final.log`와 `p03-audio-workspace-clippy-final.log`다. 첫 Clippy 실패 파일은 덮어쓰지 않았다. 별도 Luna read-only source 리뷰도 backend 선택·bank/voice 수명·pre-effect 준비·clock·CPAL 종료 설명에서 구체적 blocker를 찾지 못했다. 실제 consumer/native·managed/GPU·clean package·CI/main 인수는 계속 대기다. feature별 compile 통과를 해당 조합의 strict Clippy 통과로 대체하지 않는다.
+
 ## 조사 한계
 
 버전 고정 docs.rs API 세 페이지 조회는 실패했다. local registry의 Kira0.12.5 source를 읽어 Frame Arc sharing/loop/state/final clamp를 확인했다. 이후 local VCS metadata의 commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`로 upstream StaticSoundData raw 원문을 확보·대조했으며 다른 raw 페이지 일부는 실패했다. browser audio·loopback/audibility·다른 장치/플랫폼은 현재 미검증이다.

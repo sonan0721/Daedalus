@@ -20,9 +20,11 @@
 | `try_shutdown(&mut self)` | `Result<NativeProjectActivationShutdown, NativeProjectActivationShutdownError>`. 이미 finished인 thread만 join. `Stopping`/`Stopped` enum으로 진행을 구분 |
 | `shutdown_report(&self)` | `Option<&SessionShutdownReport>`. actor가 실제 끝나고 join한 뒤의 기존 report |
 
-start error는 기존 preparation start 또는 session start 오류를 원인으로 보존한다. shutdown error는 `WorkerPanicked`/`ActorFailed`를 구분하며 기존 actor report의 termination을 덮지 않는다. 오류 관찰 전에도 두 소유자의 stop/cleanup을 요청하고, 아직 reclamation이 진행 중이면 완료를 주장하지 않는다. `Stopped`는 actor 종료와 worker/cache/project 회수가 모두 끝난 경우다. Drop은 stop만 요청하며 join하지 않는다.
+start error variant는 `Preparation(NativeProjectPreparationStartError)`와 `Session(SessionControlStartError)`이며 원인을 보존한다. shutdown error의 unit variant는 `WorkerPanicked`/`ActorFailed`이며 기존 actor report의 termination을 덮지 않는다. 오류 관찰 전에도 두 소유자의 stop/cleanup을 요청하고, 아직 reclamation이 진행 중이면 완료를 주장하지 않는다. `Stopped`는 actor 종료와 worker/cache/project 회수가 모두 끝난 경우다. Drop은 stop만 요청하며 join하지 않는다.
 
 `SessionControlService`와 `SessionControlClient`에 `asset_activation_enabled(&self) -> bool`을 추가한다. 기본/기존 factory는 false, 새 factory만 true다. public `SessionControlConfig` 필드를 늘리거나 기존 constructor signature를 바꾸지 않는다. Wasm factory는 기존 native-unavailable 의미로 실패하고 content 비교기 Wasm compile을 native service 지원으로 해석하지 않는다.
+
+기존 client의 feature 사전 검사 경계에는 `SessionSubmitError::AssetActivationUnavailable` unit variant를 추가해 ticket 효과 전에 거부한다. actor 쪽 `SessionRequestError::AssetActivationUnavailable`와 wire code는 같으며 권한 없는 client의 기존 CapabilityDenied 의미도 유지한다.
 
 공통 operation/result 경계는 다음과 같다. 아래 native 정수 타입과 기존 decimal-string wire 표현은 별개다.
 
@@ -48,7 +50,9 @@ pub enum AssetActivationOperation {
 
 `ActivationId`는 private session/sequence와 `from_parts(SessionId,u64)`, `session()`, `sequence()`를 가진 `Clone + Copy + Debug + Eq + Hash + PartialEq` 타입이다. sequence0/foreign/future는 invalid, 이전에 만료한 ID는 expired다. 준비 epoch·activation sequence·committed generation·CommandId는 서로 다른 식별자다. 모두 checked 증가하고 wrap/reuse하지 않는다.
 
-`SessionOperation::AssetActivation(AssetActivationOperation)`과 `SessionRequestResult::AssetActivation(AssetActivationRequestResult)`를 추가한다. request result는 `Status(Box<AssetActivationStatus>)` 또는 `Command(AssetActivationCommandResult)`다. command result는 private field와 `command_id()`, `observed_tick()`, `outcome()` getter를 제공한다. outcome은 `StageAccepted { activation, candidate }`, `CommitApplied { activation, generation }`, `CancelAccepted { activation }`다. ticket admission은 actor 적용보다 앞서며 StageAccepted는 Staged가 아니다. CommitApplied는 actor source swap을 마쳤다는 뜻이고 화면 표시를 뜻하지 않는다.
+`SessionOperation::AssetActivation(AssetActivationOperation)`과 `SessionRequestResult::AssetActivation(AssetActivationRequestResult)`를 추가한다. request result는 `Status(Box<AssetActivationStatus>)` 또는 `Command(AssetActivationCommandResult)`다. command result는 private field와 `command_id() -> CommandId`, `observed_tick() -> Tick`, `outcome() -> &AssetActivationCommandOutcome` getter를 제공한다. `AssetActivationCommandOutcome` variant는 `StageAccepted { activation: ActivationId, candidate: PreparationId }`, `CommitApplied { activation: ActivationId, generation: u64 }`, `CancelAccepted { activation: ActivationId }`다. ticket admission은 actor 적용보다 앞서며 StageAccepted는 Staged가 아니다. CommitApplied는 actor source swap을 마쳤다는 뜻이고 화면 표시를 뜻하지 않는다.
+
+operation/result/outcome은 기존 preparation과 같은 `Clone + Debug + PartialEq`를 제공한다. Status는 기존 inspect capability, Stage/Commit/Cancel은 mutate capability를 사용한다. 새로운 `SessionCapabilities` field/독립 권한 ledger는 추가하지 않는다.
 
 ## bounded status와 오류
 
@@ -65,12 +69,13 @@ metadata 타입은 `Clone + Debug + PartialEq`와 private field/read-only getter
 
 status logical cap은 기존 preparation과 같은32KiB, wire encoded-result는 기존1MiB다. failure code64/message2048 UTF-8 bytes와 기존 bounded StableId 진단만 보관한다. 큰 JSON/source path/payload를 오류에 복사하지 않는다. compatibility failure code는 `incompatible_topology`, 기타 비동기 실패는 기존 bounded capacity/internal 의미를 유지한다.
 
-공통 request error에 다음 의미를 추가하고 CLI 연결 시 이름을 그대로 사용한다: `asset_activation_unavailable`, `invalid_activation`, `activation_expired`, `activation_not_staged`, `active_generation_mismatch`, `activation_sequence_exhausted`, `project_generation_exhausted`, `activation_capacity`. 기존 `busy`, `invalid_candidate`, `candidate_expired`, `preparation_stopped`, replay/권한 오류는 재사용한다. new enum variant의 Rust 이름은 해당 PascalCase다. capability 없음은 unavailable이고 해당 factory에서 지원하지 않는 consumer 조합을 수락한 것으로 표시하지 않는다.
+공통 request error에 다음 의미를 추가하고 CLI 연결 시 이름을 그대로 사용한다: `asset_activation_unavailable`, `invalid_activation`, `activation_expired`, `activation_not_staged`, `active_generation_mismatch`, `activation_sequence_exhausted`, `project_generation_exhausted`, `activation_capacity`. 기존 `busy`, `invalid_candidate`, `candidate_expired`, `candidate_not_active`, `preparation_stopped`, replay/권한 오류는 재사용한다. new enum variant의 Rust 이름은 해당 PascalCase인 unit variant다. capability 없음은 unavailable이고 해당 factory에서 지원하지 않는 consumer 조합을 수락한 것으로 표시하지 않는다.
 
 ## Stage와 Commit의 순서
 
 1. Prepare/Cancel/Status는 기존 의미를 유지한다. CPU-valid 후보와 authored-compatible 후보를 혼동하지 않기 위해 비교는 **Stage worker 작업**에서 수행한다.
 2. Stage actor는 ID/session/current desired와 expected generation·bounded slot/replay/result 여유를 먼저 확인한다. 효과 전 Busy/invalid/capacity는 caller ID를 소비하지 않는다. 수락 때 activation sequence와 StagePending metadata만 게시하며 결과 receipt를 고정한다.
+   pending/running Prepare는 Busy, 실제 ready가 없는 취소/실패 후보는 candidate_not_active다. 같은 candidate가 이미 StagePending/Staging/Staged이면 다른 CommandId의 Stage도 effect-free Busy다. 동일 CommandId는 공통 replay가 원래 receipt를 반환하며 두 번째 activation/lease를 만들지 않는다. 취소로 backing이 사라진 후보를 다시 Stage하려면 새 Prepare가 필요하다.
 3. 같은 preparation worker가 ready payload를 빌려 현재 active source와 공통 비교기를 실행한다. 별도 importer/cache/스레드를 만들지 않는다. 비교/오류 반환 뒤 current desired·cancel·stop·expected active를 재확인하고 capacity-one private handoff에 non-Clone candidate lease를 넘긴다. 오래된 성공/오류는 최신 status를 덮지 않는다.
 4. actor가 유효한 handoff를 받으면 Staged다. payload는 actor-private이고 공통 control client/status에 노출하지 않는다. active Engine/source는 아직 그대로다. invalid topology는 마지막 정상 source를 보존하고 bounded Failed를 기록한다.
 5. Commit은 Staged·동일 candidate/activation·expected generation·current desired·retirement 여유·u64 증가 가능 여부를 다시 검사한다. 작은 shared-state transaction/try-lock으로 source swap과 generation/ledger identity를 연계한다. lock 확보 실패 뒤 swap부터 하는 순서를 금지한다.
@@ -99,6 +104,22 @@ cooked/catalog 총 상한은 기존 옵션의 최대256MiB다. active+candidate/
 mailbox 포화로 즉시 게시하지 못한 경우 actor commit을 되감지 않는다. 실제 committed identity와 published frame identity를 구분하고 후속 actor 진행에서 최신 generation의 게시를 재시도한다. 반복 게시가 새 logical project payload를 복제하지 않는다. frame 독자가 source backing을 장부 밖으로 꺼낼 새 Arc getter는 추가하지 않는다.
 
 렌더러의 explicit packet sequence·stage-only device 준비·actual-present ACK는 후속 계약이다. 이번 headless frame 재게시가 기존 창을 자동 지원하게 하는 것은 아니다.
+
+## CLI/protocol2 adapter 계약
+
+runtime API를 위대로 공유한 뒤 별도 Luna가 disjoint CLI source를 작성할 수 있다. native opt-in은 `project serve DIR --protocol 2 --asset-activation`이며 preparation도 함께 활성화한다. `--asset-preparation`을 함께 쓰는 것은 허용한다. protocol1·view·audio 조합은 source/cache/worker/device 시작 전에 명시적으로 거부한다. view가 지원하지 않는 flag를 단순히 무시하지 않는다. 기본 명령의 동작은 유지한다.
+
+기존 protocol2에 `asset_activation_status`, `asset_activation_stage`, `asset_activation_commit`, `asset_activation_cancel`을 추가한다. Stage는 candidate, expected_active_generation, optional command_id; Commit은 activation, expected_active_generation, optional command_id; Cancel은 activation, optional command_id를 받는다. candidate는 기존 `{session, epoch}`, activation은 `{session, sequence}` object다. 모든 ID/expected generation/committed generation/tick/frame/authority snapshot sequence는 decimal string으로 encode/decode하며 unknown field·범위 밖·외국 session을 기존처럼 거부한다.
+
+result는 기존 tagged operation result의 `asset_activation` 안에 `status` 또는 `command`를 둔다. status/summary/failure/memory의 JSON field는 위 native getter의 snake_case 이름이고 state·outcome·compatibility kind는 enum variant의 snake_case다. command result는 command_id, observed_tick, outcome이며 outcome payload는 위 Rust variant와 같다. memory byte/count는 기존 bounded memory summary와 같이 JSON number다. compatibility 오류는 kind와 optional entity_id/component_id/asset_id만 보내며 전체 authored JSON을 포함하지 않는다. latest_frame에는 authority_snapshot_sequence를 추가해 frame.sequence와 구분한다.
+
+capabilities는 asset_activation_enabled와 네 operation을 실제 feature에 맞게 알린다. 기존 base7 이름을 audio/preparation 조합마다 네 번 복사한 배열은 이번 adapter에서 base7·audio extension5·preparation extension3·activation extension4의 고정 목록을 한 bounded composer로 합친다. 이전 네 조합의 순서/이름을 보존하고 최대19개의 이름을 한 번 조립한다. 새 범용 registry/schema framework는 만들지 않는다. feature 선언과 operation 이름의 실제 중복을 제거하는 좁은 DEV02 개선이며 unavailable/권한 검사를 생략하지 않는다.
+
+종료는 같은 owner가 actor/worker를 멈추고 기존 유한2초 관찰을 사용한다. stderr report에 actor 종료와 generation worker stopping/stopped를 구분하며 stdout JSONL을 오염시키지 않는다. timeout을 성공한 회수로 바꾸지 않는다.
+
+기존 `smoke_project.py`에 CPU-only `--asset-activation` opt-in을 추가한다. 같은 authored project와 실제 service 한 개에서 live transform/Step→Prepare→Stage 실제 Staged 대기→Commit→source/generation/frame/state assert를 반복한다. PNG/model 또는 legacy geometry/atlas/WAV의 변경을 실제로 적용하고 동일 handle·revision/tick 보존, replay의 generation 증가0, topology 거부/취소/stale/expected-generation 거부 뒤 last-good을 확인한다. 별도 window/capture를 activation 실제 표시 근거로 붙이지 않는다. existing subprocess/JSONL/ticket/ACK/deadline/fixture 생성기를 재사용하고 stub tests는 transport/timeout/cleanup 회귀만 증명한다. 실제 CLI 실행과 구분한다.
+
+새 process helper는 기존 smoke 결과에 별도 asset_activation 요약과 checks를 추가한다. 기존 preparation/audio/native mode의 의미와 counts를 조용히 교체하지 않는다. CLI 자체의 activation+audio/view 거부도 실제 invalid 옵션/없는 project 경로로 확인한다. CI/package step 확대는 local runtime/CLI 실제 smoke 인수 후 명세와 함께 별도 배정한다.
 
 ## 구현과 검증 책임
 

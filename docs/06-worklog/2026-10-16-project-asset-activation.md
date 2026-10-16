@@ -50,8 +50,16 @@ Luna project 담당에게 content 새 module·lib re-export·필요한 기존 pr
 
 focused attempt01은8개 중6개 통과·2개 실패였다. 하나는 기존 loader가 parent/hierarchy를 거부해 valid PreparedProject fixture를 만들 수 없는 사례였고 허위 입력으로 비교기 지원을 증명하지 않는다. 다른 하나는 entity mismatch를 기대하면서 asset set도 다른 fixture여서 deterministic 우선순위상 AssetSet이 올바르게 먼저 반환된 test 구성 오류였다. 작업자는 같은 asset set의 valid 입력으로 수정 중이며 최초 raw를 보존했다. 아직 최종 통과가 아니다.
 
+후속 focused10/content84·strict content Clippy·content Wasm/scoped fmt는 통과했다. 조정자 review는 동시에 살아 있는 asset/entity/component index 합산·entity마다 반환·checked overflow와 실제 legacy mesh 변경의 source identity를 보강하도록 요청했다. 마지막 review에서 immutability test가 실제 비교한 changed 대신 무관한 candidate의 불변성을 assert하는 빈틈을 발견해 해당 test만 수정/집중 재검증하도록 배정했다. production 비교기 오류로 보고하지 않으며 최종 source hash/로컬 선행 인수는 수정 뒤 기록한다.
+
+수정 후 실제 입력 active/changed의 source digest/files 불변 assertion을 조정자가 확인했다. final focused attempt05는10/10·0.01초로 통과했고 scoped fmt attempt03/diff도 확인했다. module SHA-256 `2398f756a9ee09295d9aaf3310df8e6110d9f74b500c0f048792453882ab14ab`, lib re-export `62137e4082e610b73cf71f105a78ad9ba5568128ea37bdd1d87003e211097662`다. 전체 content84/5.76초·strict Clippy·Wasm은 test-only 마지막 assertion 수정 전 attempt02이며 production 함수는 변경하지 않았다. source review와 이 로컬 선행 근거로 b.1을 다음 runtime 구현의 입력으로 사용한다. PR/main·실제 activation·b/c 전체 인수는 계속 열려 있다.
+
+raw는 `p03-compatibility-focused-luna-attempt01..05.log`, `...content-luna-attempt01..02.log`, `...clippy-luna-attempt01..02.log`, `...wasm-luna-attempt01..02.log`, `...fmt-luna-attempt01..03.log`다. 최초6/8을 포함한 실패를 보존했다. unsupported hierarchy/scene schema branch는 valid loader test로 증명하지 않았고 실제 같은 engine의 activation은 이 단계에서 실행하지 않았다.
+
 ## P03.3b.2 다음 소유권 계약
 
 [headless CPU 세대 계약](../03-architecture/headless-asset-generation.md)을 작성했다. 공통 Stage/Commit/Cancel/Status·consuming owner·worker reclamation Arc·같은 snapshot의 새 frame sequence를 명시했다. renderer/audio를 지원한 것으로 우회하지 않고 CPU identity/수명을 먼저 검사하는 b의 내부 단계다. b.1 검증/source 리뷰와 다음 계약의 구현 가능성 확인을 마친 뒤 runtime 코드를 배정한다.
+
+runtime read-only 재검토는 동일 worker/cache·기존 public API 보존과 새 headless factory가 구현 가능함을 확인했다. 같은 후보의 두 번째 다른 Stage는 effect-free Busy, 같은 CommandId는 공통 replay로 고정했다. operation/result/outcome/status/getter·오류 unit variant·inspect/mutate 권한·단조 frame/authority snapshot sequence·CLI decimal wire도 먼저 공유했다. CLI는 기존 네 capability 조합의 base7 반복을 bounded extension composer로 줄이는 좁은 개선을 함께 구현할 계획이다. source 구현/실제 process 통과는 아직 아니다.
 
 audio read-only 리뷰도 마쳤다. pinned Kira0.12.5의 render-owned sound가 실제 Frame Arc를 잡고 있고 handle reap은 이를 증명하지 않는다. weak observer만으로 callback의 마지막 큰 free를 막을 수 없어 실제 leaf 공유 store·generation alias/voice·cleanup strong sentinel과 정확한 owner baseline이 필요하다. project-audio/service source map은 명세에 반영했으며 audio 새 API·multibank/실제 회수는 아직 구현하지 않았다. 리뷰 담당은 source 수정과 tests를 실행하지 않았다.

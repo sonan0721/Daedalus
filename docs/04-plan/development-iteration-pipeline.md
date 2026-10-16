@@ -179,3 +179,9 @@ Luna의 workflow diff는 `push.branches`의 main 두 줄만 추가한다. 기존
 PR15의 다섯 체크 성공·Publish skipped를 확인했다. head `9c7e27103309840a99546baac8778dd54f42c128`, CI synthetic merge `a4fd0183bb5b3f65b23a7e15b80b7b40d8aac66c`, squash main `c2283cb686ff7eb5589d6e38f66d5e357993531e`의 tree는 `9d484f6be44d7ea1b4359eeb6328e675e6a28388`로 같다. main push가 실제 [run38909669190](https://github.com/sonan0721/Daedalus/actions/runs/38909669190)을 시작했으며 결과는 별도로 확인한다. source가 바뀌지 않은 doc/YAML 개선에 local Rust/Metal/package 전체를 중복 실행하지 않았고 실제 CI의 locked build/smoke는 유지했다. DEV06/07 전체와 엔진 제품 gate는 계속 열려 있다.
 
 그 main push run도 두 package·두 staged CPU50·Linux linkage를 통과했고 Publish는 skipped였다. 양쪽 로그에서 실제 primary-key main cache restore를 확인했다. 따라서 이번 좁은 개선의 manual 초기 공급→후속 PR 복원→자동 main 실행은 검증했다. raw는 ignored `p03-preparation-cache-main-push-{jobs,macos,linux}-01.*`다. 공개 tag/Release는 만들지 않았다. 이후 dependency/toolchain key가 바뀌면 새 main 공급이 필요하며 cache eviction/runner 부하에 관계없이 항상 같은 시간을 얻는다는 보장은 없다.
+
+## P03.3b에서 공통화할 반복
+
+[호환성 계약](../03-architecture/asset-replacement-compatibility.md)은 content의 단일 비교기를 두고 consumer마다 authored field 판단·정렬/진단을 중복 구현하지 않도록 한다. [headless 세대 계약](../03-architecture/headless-asset-generation.md)은 새 session 생성 대신 기존 worker·actor/replay·현재 Engine을 이어 쓰며 source 변경→Stage/Commit→같은 상태 조회를 한 실행에서 검증한다. authored topology 비교의 reference index만 한도 내에 만들고 payload 재복사/해시/parse는 하지 않는다. 이는 구현/검증 전 계약이며 실제 개발 시간 개선율을 주장하지 않는다.
+
+CLI adapter는 실제 네 capability 배열의 base7 반복을 base/extension composer로 제거한다. 기존 feature-off 오류·네 조합의 operation 순서·새 headless-only 지원 경계를 함께 검사한 뒤에만 구현 결과로 기록한다. 범용 schema generator를 이번 선행 작업에 끼워 넣지 않고 source에서 확인한 작은 중복만 제거한다. runtime public type/getter·wire decimal ID를 먼저 고정해 별도 작업자가 private source를 추측하며 재작성하는 반복도 줄인다. compile/test 소유권과 focused→통합 순서는 유지한다.

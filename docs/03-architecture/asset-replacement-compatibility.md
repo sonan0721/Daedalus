@@ -1,6 +1,6 @@
 # P03.3b.1 에셋 교체의 authored 호환성
 
-상태: 아래 CPU 비교 계약 동결·구현/검증 전 · 2026-10-16
+상태: CPU 비교기 구현·로컬 집중/content/Clippy/Wasm 검증. activation/PR 통합 인수 전 · 2026-10-16
 
 ## 이 문서를 먼저 만드는 이유
 
@@ -74,3 +74,9 @@ Luna xhigh가 `daedalus-content`의 새 `asset_replacement` module·root re-expo
 - focused tests와 strict content Clippy·fmt, 기존 content 전체 회귀, content Wasm compile. runtime/frame/GPU/PCM/CLI 교체 성공으로 해석하지 않음.
 
 검증 raw는 ignored `dist/project-evidence/p03-compatibility-*`의 고유 attempt 파일에 저장한다. 한 Cargo owner가 shared target을 사용한다. focused 결과를 받은 뒤 변경 범위에 필요한 통합 검사를 선택하며 MD만 바뀐 단계의 hardware/package를 반복하지 않는다.
+
+## 로컬 선행 검증
+
+실제 구현은 `daedalus-content::check_asset_replacement_compatibility`와 read-only 오류 타입이다. source payload/URI·legacy mesh 변경, 배열/revision 허용과 authored field 거부, 동시에 살아 있는 index의 aggregate/해제·checked overflow를 검사했다. content84·strict all-target Clippy·content Wasm compile·scoped fmt를 통과했고, 조정자 review의 test-only 불변성 assertion 수정 뒤 focused10개를 다시 통과했다. final module SHA-256은 `2398f756a9ee09295d9aaf3310df8e6110d9f74b500c0f048792453882ab14ab`다. [작업 기록](../06-worklog/2026-10-16-project-asset-activation.md)이 최초 실패와 source 한계를 보존한다.
+
+현재 loader는 parented entity와 schema1 이외 scene을 거부하므로 EntityParent/SceneSchema 비교 branch를 valid loaded fixture로 실행하지 않았다. API에 미래 guard로 남기고 임의 invalid PreparedProject를 만들지 않았다. 이 로컬 CPU 선행 결과는 다음 runtime 구현의 근거이며 화면/audio 전환이나 제품/PR 인수를 뜻하지 않는다.

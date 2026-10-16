@@ -24,9 +24,9 @@
 | 소유자 | 범위 | 상태 |
 | --- | --- | --- |
 | Luna xhigh content | private sprite/camera2d binding·strict schema/revalidation·metadata precharge·CPU 검사 | source 고정·focused72/strict Clippy/Wasm/fmt 통과; 별도 renderer 검사 source 작성 |
-| Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | 구현 진행 |
-| Luna xhigh CLI | 기존 공통 report·opt-in sprite smoke·timeout/cleanup 회귀 | 구현 진행 |
-| 조정자 | MD·source/API 리뷰·통합/실제 Mac·원본 QA·Git/PR | 계약 확정; 구현 검사 미실행 |
+| Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | 초기 focused 통과·투명 PNG 리뷰 보완 중 |
+| Luna xhigh CLI | 기존 공통 report·opt-in sprite smoke·timeout/cleanup 회귀 | source 고정·focused36/strict Clippy/build·Python55 통과 |
+| 조정자 | MD·source/API 리뷰·통합/실제 Mac·원본 QA·Git/PR | 첫 workspace CPU259 통과·추가 리뷰·최종 hardware/package 인수 대기 |
 
 content→renderer→CLI→조정자 순서로 Cargo/shared target 소유권을 넘긴다. source 파일 소유권을 분리하고 새 dependency/두 번째 cold target/새 packaging backend는 계획하지 않는다. focused→통합→hardware→clean package→최종 다섯 PR CI/main 동일 tree가 모두 필요하다. 검사 명령/입력/소스·binary identity/counter는 실제 실행 후에만 추가한다.
 

@@ -38,6 +38,8 @@ envelope는 `{"protocol":2,"request_id":"q1","request":{"op":"submit","operation
 | latest_frame | 같은 service의 complete snapshot identity metadata. presented 화면이나 image/capture 결과가 아님 |
 | close | bounded window Close 요청 수락. 실제 종료는 최종 report/exit로 확인 |
 
+Close receipt는 queued/best-effort다. window 종료가 async stdout flush보다 빠르거나 stdout이 막히면 응답 line이 전달되기 전에 process가 끝날 수 있다. UI를 flush 대기로 붙잡지 않으며 실제 CloseRequested report와 정상 exit를 종료 확인으로 사용한다. 자동 검증도 close 응답 도착을 필수로 가정하지 않는다.
+
 target은 stable ID 또는 session/index/generation handle 중 정확히 하나다. command_id는 request_id와 별개이며 native replay/high-water 규칙을 그대로 적용한다. manual mutation은 AuthorityAccepted 후 Step이 있어야 적용되고 submit/poll이 Step을 숨겨 실행하지 않는다. Step은 reserved admission을 유지하며 realtime에서 거부한다. Busy는 finite retry가 가능하지만 QueueFull/ResultCapacity를 숨겨 반복하지 않는다.
 
 ticket token은 session/client/sequence를 포함하는 opaque string이며 이 coordinator의 book과 정확히 대조한다. 다른 client/session token은 거부한다. book은 native client 기본 최대 8개(일반 최대 7개+reserved Step 1개) 이내이며 일반 요청으로 Step 여유를 점유하지 않는다. ack/forget 때 receipt도 제거한다. retained submit request_id의 같은 payload 재전송은 같은 ticket을 반환하고 다른 payload는 collision 오류다. ack/forget 후 transport replay 보장은 끝나며 재실행 방지가 필요한 mutation은 명시 command_id를 사용한다. poll 등의 correlation ID를 무제한 ledger에 쌓지 않는다.

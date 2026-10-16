@@ -21,7 +21,11 @@ use winit::{
 /// Key code type exposed by the window input observer.
 pub use winit::keyboard::KeyCode as WindowKeyCode;
 
-use crate::{Camera, RenderScene, Renderer, RendererError, RendererInfo};
+use crate::{
+    Camera, PacketRenderError, PacketRenderer, PacketRendererLimits, PacketResourceStats,
+    RenderPacket, RenderScene, Renderer, RendererError, RendererInfo,
+};
+use daedalus_core::{SessionId, Tick};
 
 /// Maximum CPU-side scene geometry accepted by the native window path.
 /// These limits bound the validation-scene upload; they do not describe mesh
@@ -57,6 +61,76 @@ pub enum WindowMessage {
     /// Stops the window with a producer-side bridge failure. This lets a CLI
     /// propagate conversion/runtime errors from its presentation thread.
     Abort(String),
+}
+
+/// Additive packet presentation channel. It leaves the legacy message enum
+/// exhaustive for existing callers.
+#[derive(Clone, Debug)]
+pub enum PacketWindowMessage {
+    Present {
+        packet: Arc<RenderPacket>,
+        loading: bool,
+    },
+    SetLoading(bool),
+    Close,
+    Abort(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PacketWindowError {
+    #[error("invalid packet window options: {0}")]
+    InvalidOptions(String),
+    #[error("packet window event loop failed: {0}")]
+    EventLoop(String),
+    #[error("packet presentation failed: {0}")]
+    Packet(#[from] PacketRenderError),
+    #[error("packet window renderer failed: {0}")]
+    Renderer(#[from] RendererError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PacketTransition {
+    Idempotent,
+    New,
+}
+
+fn validate_packet_transition(
+    previous: &Arc<RenderPacket>,
+    next: &Arc<RenderPacket>,
+    limits: PacketRendererLimits,
+) -> Result<PacketTransition, PacketRenderError> {
+    if Arc::ptr_eq(previous, next) || previous.as_ref() == next.as_ref() {
+        return Ok(PacketTransition::Idempotent);
+    }
+    if next.session() != previous.session() {
+        return Err(PacketRenderError::InvalidPacket(
+            "packet session changed".into(),
+        ));
+    }
+    if next.sequence() <= previous.sequence() {
+        return Err(PacketRenderError::InvalidPacket(
+            "packet sequence moved backwards or was reused with conflicting contents".into(),
+        ));
+    }
+    if next.project_generation() < previous.project_generation() {
+        return Err(PacketRenderError::InvalidPacket(
+            "project generation moved backwards".into(),
+        ));
+    }
+    if next.project_generation() == previous.project_generation()
+        && next.source_digest() != previous.source_digest()
+    {
+        return Err(PacketRenderError::InvalidPacket(
+            "source digest changed without a project generation change".into(),
+        ));
+    }
+    if next.tick() < previous.tick() {
+        return Err(PacketRenderError::InvalidPacket(
+            "packet tick moved backwards".into(),
+        ));
+    }
+    next.validate_reusing(limits, Some(previous))?;
+    Ok(PacketTransition::New)
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +298,29 @@ pub struct WindowOutcome {
     pub final_scene: RenderScene,
 }
 
+/// Identity and view parameters for a packet whose surface frame was submitted
+/// and passed to winit's `present` method.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentedPacket {
+    pub session: SessionId,
+    pub tick: Tick,
+    pub sequence: u64,
+    pub project_generation: u64,
+    pub source_digest: String,
+    pub camera: Camera,
+    pub physical_width: u32,
+    pub physical_height: u32,
+}
+
+/// Packet-window final metadata. It does not claim GPU completion or scanout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PacketWindowOutcome {
+    pub report: WindowReport,
+    pub final_packet: Arc<RenderPacket>,
+    pub last_presented: Option<PresentedPacket>,
+    pub resource_stats: PacketResourceStats,
+}
+
 /// Opens a native winit window and returns its report and final owned scene.
 /// The event loop stays on the calling/main thread. Messages are drained with
 /// a bounded `try_recv` loop; callbacks do not wait for a producer or perform
@@ -241,7 +338,10 @@ pub fn run_windowed_reported(
         .run_app(&mut app)
         .map_err(|error| RendererError::Window(error.to_string()))?;
     if let Some(error) = app.failure.take() {
-        return Err(error);
+        return Err(match error {
+            WindowFailure::Legacy(error) => error,
+            WindowFailure::Packet(error) => RendererError::Window(error.to_string()),
+        });
     }
     Ok(app.into_outcome())
 }
@@ -253,6 +353,34 @@ pub fn run_windowed(
     options: WindowOptions,
 ) -> Result<(), RendererError> {
     run_windowed_reported(initial_scene, messages, options).map(|_| ())
+}
+
+/// Opens the same native presentation loop with persistent packet resources.
+pub fn run_packet_windowed_reported(
+    initial_packet: Arc<RenderPacket>,
+    messages: Receiver<PacketWindowMessage>,
+    options: WindowOptions,
+    limits: PacketRendererLimits,
+) -> Result<PacketWindowOutcome, PacketWindowError> {
+    validate_options(&options)
+        .map_err(|error| PacketWindowError::InvalidOptions(error.to_string()))?;
+    limits.validate().map_err(PacketWindowError::Packet)?;
+    initial_packet
+        .validate(limits)
+        .map_err(PacketWindowError::Packet)?;
+    let event_loop =
+        EventLoop::new().map_err(|error| PacketWindowError::EventLoop(error.to_string()))?;
+    let mut app = WindowApp::new_packet(initial_packet, messages, options, limits);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|error| PacketWindowError::EventLoop(error.to_string()))?;
+    if let Some(error) = app.failure.take() {
+        return Err(match error {
+            WindowFailure::Packet(error) => error,
+            WindowFailure::Legacy(error) => PacketWindowError::Renderer(error),
+        });
+    }
+    Ok(app.into_packet_outcome())
 }
 
 fn validate_options(options: &WindowOptions) -> Result<(), RendererError> {
@@ -436,11 +564,27 @@ impl FrameIntervals {
     }
 }
 
+enum WindowFailure {
+    Legacy(RendererError),
+    Packet(PacketWindowError),
+}
+
+impl From<RendererError> for WindowFailure {
+    fn from(error: RendererError) -> Self {
+        Self::Legacy(error)
+    }
+}
+
 struct WindowApp {
-    messages: Receiver<WindowMessage>,
+    messages: Option<Receiver<WindowMessage>>,
+    packet_messages: Option<Receiver<PacketWindowMessage>>,
     options: WindowOptions,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    packet_renderer: Option<PacketRenderer>,
+    packet_limits: PacketRendererLimits,
+    packet: Option<Arc<RenderPacket>>,
+    last_presented: Option<PresentedPacket>,
     renderer_info: Option<RendererInfo>,
     surface: Option<SurfaceState>,
     scene: RenderScene,
@@ -455,7 +599,7 @@ struct WindowApp {
     next_redraw: Instant,
     started_at: Instant,
     exit_reason: Option<WindowExitReason>,
-    failure: Option<RendererError>,
+    failure: Option<WindowFailure>,
     counters: WindowCounters,
     intervals: FrameIntervals,
     final_width: u32,
@@ -473,14 +617,70 @@ impl WindowApp {
         let initial_loading = options.initial_loading;
         let width = options.width;
         let height = options.height;
+        Self::with_source(
+            Some(messages),
+            None,
+            initial_scene,
+            None,
+            options,
+            PacketRendererLimits::default(),
+            now,
+            initial_loading,
+            width,
+            height,
+        )
+    }
+
+    fn new_packet(
+        initial_packet: Arc<RenderPacket>,
+        messages: Receiver<PacketWindowMessage>,
+        options: WindowOptions,
+        limits: PacketRendererLimits,
+    ) -> Self {
+        let now = Instant::now();
+        let initial_loading = options.initial_loading;
+        let width = options.width;
+        let height = options.height;
+        Self::with_source(
+            None,
+            Some(messages),
+            RenderScene::new(),
+            Some(initial_packet),
+            options,
+            limits,
+            now,
+            initial_loading,
+            width,
+            height,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_source(
+        messages: Option<Receiver<WindowMessage>>,
+        packet_messages: Option<Receiver<PacketWindowMessage>>,
+        scene: RenderScene,
+        packet: Option<Arc<RenderPacket>>,
+        options: WindowOptions,
+        packet_limits: PacketRendererLimits,
+        now: Instant,
+        initial_loading: bool,
+        width: u32,
+        height: u32,
+    ) -> Self {
         Self {
             messages,
+            packet_messages,
             options,
             window: None,
             renderer: None,
+            packet_renderer: None,
+            packet_limits,
+            packet,
+            last_presented: None,
             renderer_info: None,
             surface: None,
-            scene: initial_scene,
+            scene,
             local_camera: None,
             latest_presentation: None,
             loading_since: initial_loading.then_some(now),
@@ -498,6 +698,32 @@ impl WindowApp {
             final_width: width,
             final_height: height,
             window_title: String::new(),
+        }
+    }
+
+    fn current_camera(&self) -> &Camera {
+        self.local_camera.as_ref().unwrap_or_else(|| {
+            self.packet
+                .as_ref()
+                .map_or(&self.scene.camera, |packet| packet.camera())
+        })
+    }
+
+    fn sync_legacy_camera(&mut self) {
+        if self.packet.is_none()
+            && let Some(camera) = &self.local_camera
+        {
+            self.scene.camera = camera.clone();
+        }
+    }
+
+    fn validate_current_dimensions(&self, width: u32, height: u32) -> Result<(), RendererError> {
+        if let Some(renderer) = &self.renderer {
+            renderer.validate_dimensions(width, height)
+        } else if let Some(renderer) = &self.packet_renderer {
+            renderer.validate_dimensions(width, height)
+        } else {
+            Err(RendererError::Window("renderer is not initialized".into()))
         }
     }
 
@@ -532,7 +758,16 @@ impl WindowApp {
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: RendererError) {
-        self.failure = Some(error);
+        self.failure = Some(if self.packet.is_some() {
+            WindowFailure::Packet(PacketWindowError::Renderer(error))
+        } else {
+            WindowFailure::Legacy(error)
+        });
+        event_loop.exit();
+    }
+
+    fn fail_packet(&mut self, event_loop: &ActiveEventLoop, error: PacketWindowError) {
+        self.failure = Some(WindowFailure::Packet(error));
         event_loop.exit();
     }
 
@@ -541,7 +776,7 @@ impl WindowApp {
         event_loop.exit();
     }
 
-    fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), RendererError> {
+    fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), WindowFailure> {
         let attributes = WindowAttributes::default()
             .with_title(self.options.title.clone())
             .with_inner_size(LogicalSize::new(self.options.width, self.options.height));
@@ -611,7 +846,15 @@ impl WindowApp {
         surface.configure(&renderer.device, &config);
         self.renderer_info = Some(renderer.info().clone());
         self.window = Some(window);
-        self.renderer = Some(renderer);
+        if self.packet.is_some() {
+            self.packet_renderer = Some(
+                renderer
+                    .into_packet_renderer(self.packet_limits)
+                    .map_err(|error| WindowFailure::Packet(PacketWindowError::Packet(error)))?,
+            );
+        } else {
+            self.renderer = Some(renderer);
+        }
         self.surface = Some(SurfaceState { surface, config });
         self.update_window_title();
         self.drain_messages(event_loop);
@@ -620,7 +863,59 @@ impl WindowApp {
 
     fn drain_messages(&mut self, event_loop: &ActiveEventLoop) {
         for _ in 0..MAX_MESSAGES_PER_EVENT {
-            match self.messages.try_recv() {
+            let legacy_message = self.messages.as_ref().map(Receiver::try_recv);
+            let packet_message = self.packet_messages.as_ref().map(Receiver::try_recv);
+            if legacy_message.is_none() {
+                match packet_message.expect("one message receiver is configured") {
+                    Ok(PacketWindowMessage::Present { packet, loading }) => {
+                        let previous = self
+                            .packet
+                            .as_ref()
+                            .expect("packet app has an initial packet");
+                        match validate_packet_transition(previous, &packet, self.packet_limits) {
+                            Ok(PacketTransition::Idempotent) => self.set_loading(loading),
+                            Ok(PacketTransition::New) => {
+                                self.latest_presentation = Some(PresentationMetadata {
+                                    sequence: packet.sequence(),
+                                    tick: packet.tick().get(),
+                                    generation: packet.project_generation(),
+                                });
+                                self.packet = Some(packet);
+                                self.set_loading(loading);
+                            }
+                            Err(error) => {
+                                self.fail_packet(event_loop, PacketWindowError::Packet(error));
+                                return;
+                            }
+                        }
+                    }
+                    Ok(PacketWindowMessage::SetLoading(loading)) => self.set_loading(loading),
+                    Ok(PacketWindowMessage::Close) => {
+                        self.exit(event_loop, WindowExitReason::CloseRequested);
+                        return;
+                    }
+                    Ok(PacketWindowMessage::Abort(message)) => {
+                        self.fail_packet(
+                            event_loop,
+                            PacketWindowError::EventLoop(bounded_message(message)),
+                        );
+                        return;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.message_source_disconnected = true;
+                        if let Some(error) = presentation_disconnect_error(
+                            self.options.fail_on_presentation_disconnect,
+                        ) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        break;
+                    }
+                }
+                continue;
+            }
+            match legacy_message.expect("legacy receiver is configured") {
                 Ok(WindowMessage::Present {
                     scene,
                     loading,
@@ -690,9 +985,8 @@ impl WindowApp {
     }
 
     fn apply_camera_movement(&mut self, elapsed: f32) {
-        let camera = self
-            .local_camera
-            .get_or_insert_with(|| self.scene.camera.clone());
+        let initial_camera = self.current_camera().clone();
+        let camera = self.local_camera.get_or_insert(initial_camera);
         let previous = camera.clone();
         let forward = (Vec3::from_array(camera.target) - Vec3::from_array(camera.position))
             .normalize_or_zero();
@@ -719,7 +1013,7 @@ impl WindowApp {
         }
         move_camera(camera, movement, elapsed);
         if *camera != previous {
-            self.scene.camera = camera.clone();
+            self.sync_legacy_camera();
             self.counters.local_camera_changes =
                 self.counters.local_camera_changes.saturating_add(1);
         }
@@ -735,22 +1029,28 @@ impl WindowApp {
         let Some(window) = &self.window else {
             return;
         };
-        let Some(renderer) = &self.renderer else {
-            return;
-        };
         let Some(surface_state) = &mut self.surface else {
             return;
         };
         if surface_state.config.width == 0 || surface_state.config.height == 0 {
             return;
         }
+        let width = surface_state.config.width;
+        let height = surface_state.config.height;
         let frame = match surface_state.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Timeout) => return,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                surface_state
-                    .surface
-                    .configure(&renderer.device, &surface_state.config);
+                let device = self
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| &renderer.device)
+                    .or_else(|| self.packet_renderer.as_ref().map(PacketRenderer::device));
+                if let Some(device) = device {
+                    surface_state
+                        .surface
+                        .configure(device, &surface_state.config);
+                }
                 return;
             }
             Err(wgpu::SurfaceError::OutOfMemory) => {
@@ -768,18 +1068,55 @@ impl WindowApp {
         let loading_elapsed = self
             .loading_since
             .map(|start| now.saturating_duration_since(start).as_secs_f32());
-        if let Err(error) = renderer.render_to_view(
-            &view,
-            surface_state.config.width,
-            surface_state.config.height,
-            &self.scene,
-            loading_elapsed,
-        ) {
-            self.fail(event_loop, error);
-            return;
-        }
+        let rendered_packet = if let Some(packet) = self.packet.as_ref() {
+            let Some(renderer) = self.packet_renderer.as_mut() else {
+                return;
+            };
+            match renderer.render_packet_view(
+                &view,
+                width,
+                height,
+                Arc::clone(packet),
+                self.local_camera.as_ref(),
+                loading_elapsed,
+            ) {
+                Ok(packet) => Some(packet),
+                Err(error) => {
+                    self.fail_packet(event_loop, PacketWindowError::Packet(error));
+                    return;
+                }
+            }
+        } else {
+            let Some(renderer) = self.renderer.as_ref() else {
+                return;
+            };
+            if let Err(error) =
+                renderer.render_to_view(&view, width, height, &self.scene, loading_elapsed)
+            {
+                self.fail(event_loop, error);
+                return;
+            }
+            None
+        };
         window.pre_present_notify();
         frame.present();
+        if let Some(packet) = rendered_packet {
+            let camera = self
+                .local_camera
+                .as_ref()
+                .unwrap_or_else(|| packet.camera())
+                .clone();
+            self.last_presented = Some(PresentedPacket {
+                session: packet.session(),
+                tick: packet.tick(),
+                sequence: packet.sequence(),
+                project_generation: packet.project_generation(),
+                source_digest: packet.source_digest().to_owned(),
+                camera,
+                physical_width: width,
+                physical_height: height,
+            });
+        }
         self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(1);
         if self.is_loading() {
             self.counters.loading_frames = self.counters.loading_frames.saturating_add(1);
@@ -832,9 +1169,9 @@ impl WindowApp {
         }
     }
 
-    fn into_outcome(self) -> WindowOutcome {
+    fn make_report(&self) -> WindowReport {
         let final_loading = self.is_loading();
-        let report = WindowReport {
+        WindowReport {
             rendered_frames: self.counters.rendered_frames,
             loading_frames: self.counters.loading_frames,
             input_events: self.counters.input_events,
@@ -852,7 +1189,7 @@ impl WindowApp {
             focus_events: self.counters.focus_events,
             loading_focus_events: self.counters.loading_focus_events,
             local_camera_changes: self.counters.local_camera_changes,
-            final_camera: self.scene.camera.clone(),
+            final_camera: self.current_camera().clone(),
             resize_count: self.counters.resize_count,
             final_width: self.final_width,
             final_height: self.final_height,
@@ -860,15 +1197,35 @@ impl WindowApp {
             exit_reason: self
                 .exit_reason
                 .unwrap_or(WindowExitReason::EventLoopReturned),
-            renderer: self.renderer_info,
+            renderer: self.renderer_info.clone(),
             message_source_disconnected: self.message_source_disconnected,
             final_loading,
-            latest_presentation: self.latest_presentation,
-            window_title: self.window_title,
-        };
+            latest_presentation: self.latest_presentation.clone(),
+            window_title: self.window_title.clone(),
+        }
+    }
+
+    fn into_outcome(self) -> WindowOutcome {
+        let report = self.make_report();
         WindowOutcome {
             report,
             final_scene: self.scene,
+        }
+    }
+
+    fn into_packet_outcome(self) -> PacketWindowOutcome {
+        let report = self.make_report();
+        let resource_stats = self
+            .packet_renderer
+            .as_ref()
+            .map_or_else(PacketResourceStats::default, PacketRenderer::resource_stats);
+        PacketWindowOutcome {
+            report,
+            final_packet: self
+                .packet
+                .expect("packet app retains its latest accepted packet"),
+            last_presented: self.last_presented,
+            resource_stats,
         }
     }
 }
@@ -879,7 +1236,8 @@ impl ApplicationHandler for WindowApp {
             return;
         }
         if let Err(error) = self.initialize(event_loop) {
-            self.fail(event_loop, error);
+            self.failure = Some(error);
+            event_loop.exit();
         }
     }
 
@@ -904,19 +1262,23 @@ impl ApplicationHandler for WindowApp {
                 self.counters.resize_count = self.counters.resize_count.saturating_add(1);
                 self.final_width = size.width;
                 self.final_height = size.height;
-                if let (Some(renderer), Some(surface_state)) = (&self.renderer, &mut self.surface)
-                    && size.width > 0
-                    && size.height > 0
-                {
-                    if let Err(error) = renderer.validate_dimensions(size.width, size.height) {
+                if size.width > 0 && size.height > 0 {
+                    if let Err(error) = self.validate_current_dimensions(size.width, size.height) {
                         self.fail(event_loop, error);
                         return;
                     }
-                    surface_state.config.width = size.width;
-                    surface_state.config.height = size.height;
-                    surface_state
-                        .surface
-                        .configure(&renderer.device, &surface_state.config);
+                    let device = self
+                        .renderer
+                        .as_ref()
+                        .map(|renderer| &renderer.device)
+                        .or_else(|| self.packet_renderer.as_ref().map(PacketRenderer::device));
+                    if let (Some(device), Some(surface_state)) = (device, &mut self.surface) {
+                        surface_state.config.width = size.width;
+                        surface_state.config.height = size.height;
+                        surface_state
+                            .surface
+                            .configure(device, &surface_state.config);
+                    }
                 }
                 self.emit_input(WindowInput::Resized {
                     width: size.width,
@@ -971,13 +1333,12 @@ impl ApplicationHandler for WindowApp {
                 {
                     let dx = (position.x - previous.x) as f32;
                     let dy = (position.y - previous.y) as f32;
-                    let camera = self
-                        .local_camera
-                        .get_or_insert_with(|| self.scene.camera.clone());
+                    let initial_camera = self.current_camera().clone();
+                    let camera = self.local_camera.get_or_insert(initial_camera);
                     let previous_camera = camera.clone();
                     camera.orbit(-dx * 0.006, -dy * 0.006, 0.0);
                     if *camera != previous_camera {
-                        self.scene.camera = camera.clone();
+                        self.sync_legacy_camera();
                         self.counters.local_camera_changes =
                             self.counters.local_camera_changes.saturating_add(1);
                     }
@@ -993,13 +1354,12 @@ impl ApplicationHandler for WindowApp {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(position) => (position.y as f32) * 0.01,
                 };
-                let camera = self
-                    .local_camera
-                    .get_or_insert_with(|| self.scene.camera.clone());
+                let initial_camera = self.current_camera().clone();
+                let camera = self.local_camera.get_or_insert(initial_camera);
                 let previous_camera = camera.clone();
                 camera.orbit(0.0, 0.0, -lines * 0.12);
                 if *camera != previous_camera {
-                    self.scene.camera = camera.clone();
+                    self.sync_legacy_camera();
                     self.counters.local_camera_changes =
                         self.counters.local_camera_changes.saturating_add(1);
                 }
@@ -1070,17 +1430,122 @@ fn move_camera(camera: &mut Camera, movement: Vec3, elapsed: f32) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use daedalus_core::{SessionId, Tick};
     use glam::Mat4;
     use winit::keyboard::KeyCode;
 
-    use crate::{Material, Mesh, RenderObject, RenderScene, Vertex};
+    use crate::{
+        Camera, DirectionalLight, Material, Mesh, PacketRendererLimits, RenderObject, RenderPacket,
+        RenderScene, Vertex,
+    };
 
     use super::{
-        FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, PresentationMetadata, WindowApp,
-        WindowInput, WindowOptions, apply_presentation, max_frames_reached, max_run_time_reached,
-        presentation_disconnect_error, validate_options, validate_window_scene,
-        window_input_channel,
+        FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, PacketTransition, PresentationMetadata,
+        WindowApp, WindowInput, WindowOptions, apply_presentation, max_frames_reached,
+        max_run_time_reached, presentation_disconnect_error, validate_options,
+        validate_packet_transition, validate_window_scene, window_input_channel,
     };
+
+    fn packet(tick: u64, sequence: u64, generation: u64, digest: &str) -> Arc<RenderPacket> {
+        Arc::new(RenderPacket::new(
+            SessionId::from_raw(44),
+            Tick(tick),
+            sequence,
+            generation,
+            digest,
+            Camera::default(),
+            DirectionalLight::default(),
+            [0.1; 3],
+            [0.02, 0.03, 0.04, 1.0],
+            Vec::new(),
+        ))
+    }
+
+    #[test]
+    fn packet_window_accepts_only_monotone_authority_and_exact_idempotency() {
+        let digest_a = "ab".repeat(32);
+        let digest_b = "cd".repeat(32);
+        let previous = packet(8, 12, 3, &digest_a);
+        assert_eq!(
+            validate_packet_transition(
+                &previous,
+                &Arc::clone(&previous),
+                PacketRendererLimits::default()
+            )
+            .unwrap(),
+            PacketTransition::Idempotent
+        );
+        assert_eq!(
+            validate_packet_transition(
+                &previous,
+                &packet(8, 12, 3, &digest_a),
+                PacketRendererLimits::default()
+            )
+            .unwrap(),
+            PacketTransition::Idempotent
+        );
+        assert_eq!(
+            validate_packet_transition(
+                &previous,
+                &packet(8, 13, 3, &digest_a),
+                PacketRendererLimits::default()
+            )
+            .unwrap(),
+            PacketTransition::New
+        );
+        assert_eq!(
+            validate_packet_transition(
+                &previous,
+                &packet(9, 13, 4, &digest_b),
+                PacketRendererLimits::default()
+            )
+            .unwrap(),
+            PacketTransition::New
+        );
+
+        assert!(
+            validate_packet_transition(
+                &previous,
+                &packet(8, 11, 3, &digest_a),
+                PacketRendererLimits::default()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_packet_transition(
+                &previous,
+                &packet(7, 13, 3, &digest_a),
+                PacketRendererLimits::default()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_packet_transition(
+                &previous,
+                &packet(8, 13, 2, &digest_a),
+                PacketRendererLimits::default()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_packet_transition(
+                &previous,
+                &packet(8, 13, 3, &digest_b),
+                PacketRendererLimits::default()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_packet_transition(
+                &previous,
+                &packet(8, 12, 3, &digest_b),
+                PacketRendererLimits::default()
+            )
+            .is_err()
+        );
+    }
 
     fn triangle_scene() -> RenderScene {
         let mesh = Mesh::new(

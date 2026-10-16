@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec3};
 use wgpu::util::DeviceExt;
 
-use crate::{RenderScene, scene::Vertex};
+use crate::{PacketRenderError, PacketRenderer, PacketRendererLimits, RenderScene, scene::Vertex};
 
 const PNG_ROW_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 const MAP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -139,6 +139,7 @@ pub struct Renderer {
     pub(crate) globals_layout: wgpu::BindGroupLayout,
     pub(crate) materials_layout: wgpu::BindGroupLayout,
     pub(crate) mesh_pipeline: wgpu::RenderPipeline,
+    pub(crate) packet_mesh_pipeline: wgpu::RenderPipeline,
     pub(crate) overlay_pipeline: wgpu::RenderPipeline,
     pub(crate) overlay_globals: wgpu::Buffer,
     pub(crate) overlay_bind_group: wgpu::BindGroup,
@@ -171,6 +172,14 @@ impl Renderer {
 
     pub fn info(&self) -> &RendererInfo {
         &self.info
+    }
+
+    /// Converts this initialized renderer into a persistent packet renderer.
+    pub fn into_packet_renderer(
+        self,
+        limits: PacketRendererLimits,
+    ) -> Result<PacketRenderer, PacketRenderError> {
+        PacketRenderer::new(self, limits)
     }
 
     pub(crate) async fn from_adapter(
@@ -295,6 +304,109 @@ impl Renderer {
             cache: None,
         });
 
+        let packet_mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Daedalus shared PBR packet pipeline"),
+            layout: Some(&mesh_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_packet"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                        ],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: 128,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 0,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 16,
+                                shader_location: 3,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 32,
+                                shader_location: 4,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 48,
+                                shader_location: 5,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 64,
+                                shader_location: 6,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 80,
+                                shader_location: 7,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 96,
+                                shader_location: 8,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 112,
+                                shader_location: 9,
+                            },
+                        ],
+                    },
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let overlay_globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Daedalus local loading overlay state"),
             size: std::mem::size_of::<OverlayUniform>() as u64,
@@ -369,6 +481,7 @@ impl Renderer {
             globals_layout,
             materials_layout,
             mesh_pipeline,
+            packet_mesh_pipeline,
             overlay_pipeline,
             overlay_globals,
             overlay_bind_group,
@@ -425,6 +538,26 @@ impl Renderer {
             },
         );
 
+        self.capture_texture_png(
+            &texture,
+            encoder,
+            options,
+            "Daedalus capture readback buffer",
+        )
+    }
+
+    /// Copies a rendered RGBA texture into a padded staging buffer, performs
+    /// the explicit synchronous readback, strips row padding, and writes PNG.
+    /// Callers supply any already-recorded draw commands so legacy capture
+    /// remains one submission while packet capture copies after its draw.
+    pub(crate) fn capture_texture_png(
+        &self,
+        texture: &wgpu::Texture,
+        mut encoder: wgpu::CommandEncoder,
+        options: &CaptureOptions,
+        readback_label: &'static str,
+    ) -> Result<CaptureArtifact, RendererError> {
+        self.validate_dimensions(options.width, options.height)?;
         let unpadded_bytes_per_row = options
             .width
             .checked_mul(4)
@@ -438,14 +571,14 @@ impl Renderer {
             return Err(RendererError::CaptureBufferTooLarge);
         }
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Daedalus capture readback buffer"),
+            label: Some(readback_label),
             size: padded_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -476,10 +609,10 @@ impl Renderer {
                 timeout: Some(MAP_TIMEOUT),
             })
             .map_err(|error| RendererError::Poll(error.to_string()))?;
-        let map_result = receiver
+        receiver
             .recv_timeout(MAP_TIMEOUT)
+            .map_err(|error| RendererError::Map(error.to_string()))?
             .map_err(|error| RendererError::Map(error.to_string()))?;
-        map_result.map_err(|error| RendererError::Map(error.to_string()))?;
 
         let mapped = slice.get_mapped_range();
         let output_size =
@@ -493,7 +626,6 @@ impl Renderer {
         }
         drop(mapped);
         readback.unmap();
-
         write_png(&options.output, options.width, options.height, &rgba)?;
         Ok(CaptureArtifact {
             path: options.output.clone(),
@@ -782,21 +914,21 @@ struct GpuVertex {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct GlobalsUniform {
-    view_projection: [[f32; 4]; 4],
-    camera_position: [f32; 4],
-    light_direction_intensity: [f32; 4],
-    light_color: [f32; 4],
-    ambient_and_manual_srgb: [f32; 4],
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
+pub(crate) struct GlobalsUniform {
+    pub(crate) view_projection: [[f32; 4]; 4],
+    pub(crate) camera_position: [f32; 4],
+    pub(crate) light_direction_intensity: [f32; 4],
+    pub(crate) light_color: [f32; 4],
+    pub(crate) ambient_and_manual_srgb: [f32; 4],
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct MaterialUniform {
-    base_color: [f32; 4],
-    metallic_roughness: [f32; 4],
-    emissive: [f32; 4],
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
+pub(crate) struct MaterialUniform {
+    pub(crate) base_color: [f32; 4],
+    pub(crate) metallic_roughness: [f32; 4],
+    pub(crate) emissive: [f32; 4],
 }
 
 impl Default for MaterialUniform {
@@ -811,11 +943,11 @@ impl Default for MaterialUniform {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct OverlayUniform {
-    time: f32,
-    width: f32,
-    height: f32,
-    manual_srgb: f32,
+pub(crate) struct OverlayUniform {
+    pub(crate) time: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) manual_srgb: f32,
 }
 
 struct DrawRange {

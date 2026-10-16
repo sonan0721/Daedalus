@@ -35,6 +35,8 @@ This is the first project foundation: hierarchy/prefabs, general model/texture/s
 
 The native Rust library also provides a bounded `SessionControlService` with multiple attached clients, owned request results, Manual/Realtime clocks, and snapshots from one real project engine. Its [control contract](docs/03-architecture/session-control-service.md) is the shared basis for upcoming window/CLI/MCP adapters; those adapters are not yet connected to it.
 
+The renderer's additive [packet API](docs/03-architecture/renderer-resource-reuse.md) shares immutable geometry, retains device-local buffers, and updates changed instance/material rows. Small native GPU tests verify reuse and pixel parity with the original capture path. The external project viewer/control adapter and broader rendering quality gates remain in progress.
+
 ## Build a local CLI package
 
 With the pinned Rust toolchain and Python 3.11 or newer, run:

@@ -1,6 +1,6 @@
 # renderer의 불변 geometry·instance 갱신과 자원 예산
 
-상태: P02.2/DEV08 다음 구현 계약 초안·미구현 · 2026-10-16
+상태: P02.2/DEV08 native library·packet window API 구현, 작은 GPU 시험 통과·외부 live window 연결 검증 대기 · 2026-10-16
 
 ## 만든 이유와 실제 반복
 
@@ -87,6 +87,8 @@ eviction은 active packet과 미완료 submission이 쓰는 자원을 보호한�
 [Queue::on_submitted_work_done](https://docs.rs/wgpu/27.0.1/wgpu/struct.Queue.html) callback에는 실제 poll/event-loop 진행이 필요하다. 첫 native 설계는 submission serial/completion watermark를 추적하고 nonwaiting poll로 retirement를 진행하는 안이다. window callback에서 매 frame GPU 완료를 동기 wait하지 않는다. offscreen blocking capture와 live async readback은 다른 실행 계약이다. [Buffer 수명](https://docs.rs/wgpu/27.0.1/wgpu/struct.Buffer.html)과 장치 손실/회수도 함께 검증한다. 위 API는 registry source 감사와 대조했으나 다이달로스 새 cache의 실행 근거는 아니다.
 
 ## 실패와 검증
+
+첫 구현은 immutable MeshHandle·prepare/extract·persistent PacketRenderer·공통 packet window API를 제공한다. 조정자의 all-feature CPU 33건·strict Clippy, 담당자의 실제 GPU reuse/parity 시험과 공통 capture helper 수정 후 재검사가 통과했다. 세부 수치/출력/source 경계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다. 위 설계 문단의 GPU/layout 세부가 모두 상용 품질이나 외부 project 실행 창의 완료를 뜻하지 않는다. 실제 같은 actor의 window/control·물리 입력·P02 전체 gate는 아직 미통과다.
 
 source 리뷰에서 legacy PNG capture와 packet PNG capture의 row alignment·copy/readback·map/poll·PNG 저장 코드가 중복된 것도 확인했다. 첫 synchronous capture는 renderer-private 공통 helper로 모아 같은 크기/byte 한도·finite timeout·오류 의미를 사용한다. legacy는 이미 기록한 render encoder에 copy를 추가하고 packet은 선행 render submission 뒤 copy를 수행할 수 있다. geometry의 in-flight 추적은 실제 geometry를 참조한 submission을 보호한다. 이 blocking helper를 window callback이나 후속 asynchronous live capture에 그대로 사용하지 않는다.
 

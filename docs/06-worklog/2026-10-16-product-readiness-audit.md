@@ -134,3 +134,11 @@ terminal을 통지한 뒤 actor의 in-flight bookkeeping/완료 함수가 별도
 source 조사에서 ActiveRequest의 중복 credit Arc와 finish_cell의 terminal 통지 뒤 credit drop을 확인했다. Luna xhigh는 불필요한 actor lease를 제거하고 terminal 전의 bookkeeping 참조 반환으로 바꿨다. 실제 progress/reader lease는 유지한다. 2 MiB 예산과 유한 test-only actor pause로 terminal을 관찰한 직후 actor cleanup을 멈춘 상태에서 ack/마지막 reader 해제→다음 Step 수락을 검증했다. root의 수정 후 workspace **158건·check/fmt·strict Clippy**는 통과했다. 기존 ResultCapacity 오류 검사를 retry로 바꾸지 않았다. 이 시점은 로컬 검증이며 수정된 PR CI 통과나 병합 결과는 아니다.
 
 read-only credit 재감사에서는 실제 reader lease·pending/종료·panic correlation의 추가 finding이 없었다. abandoned payload가 폐기되는 동안 새 admission은 placeholder로만 존재하고 actor가 다음 결과를 병렬 생성하지 않는다는 aggregate-bound 근거를 source 계약에도 남겼다. 원래 failed head의 macOS/Linux package는 각각 3분4초/2분40초 통과했으나 이 결과를 수정된 head의 검증으로 대체하지 않는다.
+
+## PR #7 최종 통과와 다음 P02 연결
+
+수정 head `6ab114f0228ec7702be780338db8797c999a9567`은 docs 5초·Rust 1분4초·managed native integration 1분10초·macOS package 1분3초·Linux package 42초를 모두 통과했다. tag publish는 skipped다. 두 package는 실제 추출 CLI smoke를 실행했다. [PR #7](https://github.com/sonan0721/Daedalus/pull/7)은 그 head로 고정해 병합했고 main merge commit은 `5c2cefc05dc5f5b0123a1394cb2b7d53c125bbd2`다. 서로 다른 cache/환경의 소요 시간을 일반적인 성능 향상률로 사용하지 않는다.
+
+수정 head clean source의 로컬 package도 다시 만들었다. `dist/local/daedalus-0.1.0-aarch64-apple-darwin-6ab114f0228e-clean-20261016T012616Z-2e6be7fc9af7477f8b6357a1d9587837/`이며 dirty=false·release/window·동일 18-check extracted smoke가 통과했다. Cargo cached build는 5.76초다. binary SHA-256은 이전에 실제 Metal 창을 검증한 파일과 같은 `e0e124f70b556ac1a489b6fd950bfe0926fb5534a2c04c4d487727d1ae7ed6d4`였다. 새 service가 아직 CLI adapter에서 사용되지 않으므로 source 수정과 CLI executable identity를 같은 개념으로 취급하지 않는다. 같은 binary의 GPU 창을 불필요하게 다시 시험하지 않았고, library 수정은 별도 158건·Linux CI로 검증했다.
+
+다음 branch는 `feat/renderer-resource-reuse`다. renderer-owned immutable mesh handle·project prepare/extract·persistent GPU cache와 packet 창 API를 먼저 구현하고, 같은 service의 외부 project/JSONL control을 연결한다. window source 감사는 accepted metadata와 실제 surface submission identity의 차이, shared event handler와 camera override·in-flight 한도를 명세에 보완했다. 아직 이 새 renderer나 project window를 구현/검증한 결과는 아니다. 전체 D1/D2/D3는 계속 진행 중이다.

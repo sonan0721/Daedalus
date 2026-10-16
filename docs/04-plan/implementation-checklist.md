@@ -107,3 +107,5 @@ P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 
 - [ ] P02.3: live capture/조건/입력·실제 MCP·SDK attach·trace, 필요한 2D/UI/서버 연결까지 제품 인수.
 
 P02.1a/b의 native library 로컬 검증은 수정 후 workspace CPU 158건·check/fmt/strict Clippy와 별도 기존 JSONL·managed·fixture window 회귀로 확인한다. 첫 PR CI의 회수 경쟁 수정과 재검사는 worklog에 별도 기록하며, 실패한 head를 병합하지 않는다. `LiveSession`은 mailbox/stop만 공유하고 count-only result guard/receiver migration이 남아 P02.1c는 미체크다. 새 service에 CLI/window/MCP를 연결한 결과가 아니며 P02 전체/D1은 계속 열려 있다. [구체 근거](../06-worklog/2026-10-16-product-readiness-audit.md).
+
+P02 내부 의존성에서 P02.2의 native project 표시 경로는 P02.1a/b kernel을 사용한다. P02.1c의 나머지 legacy migration과 결과 소유권 정리는 P02 전체 exit 전까지 추적한다. P02.2의 resource library·window API를 먼저 고정하고 그 위에 CLI adapter를 연결하며, full P02 gate 전에 P03 전체 구현으로 건너뛰지 않는다.

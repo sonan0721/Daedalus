@@ -40,6 +40,18 @@ CPU source file hash를 사용할 수도 있지만 공개 Rust procedural mesh�
 
 기존 public `WindowMessage` variant 추가는 외부 exhaustive match를 깨뜨릴 수 있으므로 별도 packet message/entrypoint를 사용한다. window 내부 event·input·resize·overlay·종료 처리는 공통으로 유지한다. 기존 `WindowOutcome.final_scene`를 packet→대용량 scene 복사로 frame마다 채우지 않는다. 새 packet outcome과 legacy outcome의 종료 자료를 구분한다. 이 window 연결은 cache library 구현 후 public 서명을 고정하고 실제 project/JSONL adapter와 함께 검증한다.
 
+## packet 창·호환·실패 API
+
+Luna xhigh의 window source 감사에 따라 별도 `PacketWindowMessage::{Present { packet: Arc<RenderPacket>, loading }, SetLoading(bool), Abort(String)}`를 사용한다. `run_packet_windowed_reported(initial_packet, receiver, WindowOptions, PacketRendererLimits)`는 새 `PacketWindowOutcome`을 반환한다. 기존 WindowMessage/WindowOptions/WindowInput/WindowOutcome의 필드나 variant를 바꾸지 않는다.
+
+새 outcome은 공통 WindowReport, 마지막 accepted packet의 Arc, 마지막으로 surface에 제출·present한 packet/view 정보와 resource 통계를 가진다. `PresentedPacket`은 session/tick/sequence/project generation/source digest identity와 그 frame에 사용한 camera·physical width/height를 함께 기록한다. surface 취득/encoding/submission/present 호출까지 진행한 경우만 갱신한다. GPU 완료나 실제 display scanout을 증명하는 표시는 아니다. accepted metadata와 실제 제출 정보를 혼동하지 않는다.
+
+window 내부는 하나의 ApplicationHandler와 private legacy/packet source/backend enum으로 초기화·bounded message drain·입력/focus reset·camera·resize·loading overlay·surface/disconnect·time/frame limit·종료를 공유한다. packet 모드는 같은 PacketRenderer를 계속 보유한다. local camera 입력 때문에 instance 배열/geometry를 clone하지 않고 draw 시 작은 camera override를 전달한다. 호환 scene의 flatten 경로와 packet의 불변 geometry 경로는 준비 방식이 다르지만 PBR fragment shading·frame pass/readback 공통 코드를 유지한다. layout별 vertex pipeline/entry point가 필요한 것은 독립 shading engine 두 개를 만든다는 뜻이 아니다.
+
+오류는 새 `PacketRenderError`/`PacketWindowError`에서 검증 실패·candidate 자체 working-set 초과·in-flight 때문에 일시적으로 불가능한 residency·기존 RendererError/device/window/capture 실패를 구분한다. 기존 RendererError enum에 variant를 몰래 추가하지 않는다. retry 가능한 압력에서는 마지막 ready packet을 유지하고 최신 candidate를 유한하게 합친다. invalid packet을 성공으로 채택하거나 오래된 packet을 새 identity로 표시하지 않는다. device loss 등 실제로 그릴 수 없는 실패는 정상 last-good 표시로 숨기지 않는다.
+
+outcome의 present 정보는 함수가 종료한 뒤의 근거다. 실행 중 실제 presented 상태/capture를 AI가 조회하는 bounded mailbox·readback API는 후속 P02.3 계약이며 이 함수만 추가해 live capture를 지원한다고 표시하지 않는다.
+
 ## 첫 GPU layout 후보
 
 geometry는 local-space position/normal indexed buffer로 보존한다. instance record는 model mat4, padded inverse-transpose mat3, material index와 padding으로 128 bytes다. normal은 nonuniform scale에서도 올바르게 변환하며 finite inverse 검증을 유지한다. CPU는 instance가 바뀔 때만 해당 record를 준비한다. vertex마다 world transform을 다시 계산하지 않는다.

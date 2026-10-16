@@ -1,6 +1,6 @@
 # P03.2 실제 model·texture·sprite·audio 소비
 
-상태: a 인수 통과, b 상세 계약 확정·c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
+상태: a 인수 통과, b 로컬/clean package 확인·최종 CI 대기, c 상세 설계 전 · 2026-10-16 · P03/DEV03/DEV05/DEV08
 
 ## 목적과 선행 조건
 

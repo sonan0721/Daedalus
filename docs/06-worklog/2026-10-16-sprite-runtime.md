@@ -1,6 +1,6 @@
 # P03.2b 스프라이트·정사영 실행 작업 기록
 
-상태: source/로컬 CPU·Metal·native 검증 통과·clean package/CI 인수 대기 · 2026-10-16
+상태: source/로컬 CPU·Metal·native·clean package 통과·최종 CI 인수 대기 · 2026-10-16
 
 ## 두 문서를 만든 이유
 

@@ -14,7 +14,7 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1 로컬 CPU/실제 원본 cook 확인. warm decode/leaf cook0, read/parse는 남음. clean package/CI와 실제 consumer/reload 후속 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1 CPU/실제 원본·clean package/PR10 CI 인수. warm decode/leaf cook0, read/parse는 남음. 실제 consumer/reload 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | legacy project와 additive asset-aware CPU loader의 공통 resolver/catalog 검증. 실제 model/sprite/audio 실행·실행 중 patch 후속 |
 | DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
@@ -29,7 +29,7 @@
 - CLI `view.rs`는 mesh 변환을 일부 cache하지만, frame마다 RenderObject를 clone하고 renderer의 `flatten_scene`·vertex/index buffer 생성 경로가 geometry를 다시 처리한다. source project/asset identity를 먼저 만들고 그 위에 transform-only extraction·resource cache를 연결한다.
 - 현재 window QA는 R/키/drag/resize/close·이미지·report 대조를 매번 조립한다. 정상 입력 trace·tick/frame capture correlation을 공통 control로 제공한 뒤 물리 OS 검증을 짧은 별도 검사로 유지한다.
 - `TESTING.md`·`managed/README.md`·managed workflow의 .NET/native library/profile 준비는 반복된다. 향후 작은 공통 smoke entrypoint로 줄일 수 있으나 첫 우선순위는 project/service 경로다.
-- `scripts/package_cli.py`와 release workflow는 이미 같은 backend를 사용한다. 이를 새 packaging 도구로 중복 구현하지 않는다. importer/cook/watcher는 현재 없으므로 cache 최적화를 구현됐다고 보고하지 않는다.
+- 초기 감사 당시 `scripts/package_cli.py`와 release workflow는 이미 같은 backend를 사용했다. 새 packaging 도구로 중복 구현하지 않는다. 그때 없었던 importer/cook는 이후 P03.1에서 구현·검증했으며 watcher는 계속 미구현이다.
 
 이 감사는 read-only이며 새 기능·속도 향상 시험 통과가 아니다. 우선순위는 project/common service → source/geometry 재사용 → shared schema/DTO 순서다. project 선행 계약은 [별도 명세](../03-architecture/project-lifecycle.md)에 두었다.
 
@@ -85,4 +85,18 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 
 로컬 source 고정 후 실제 debug CLI의 CPU+assets31건과 native22건이 통과했다. 공개 원본5개 asset/8개 source에서 같은 Cube2개 ID는 geometry1회 cook/key를 공유했고, warm은 PNG decode/geometry/image/atlas/audio cook과 cache write가 모두0이었다. image-only·node/material·geometry·atlas/WAV 수정과 두 cache corruption 경로는 같은 offline helper가 대조한다. color 해석은 공통 decoder에 명시 policy를 전달하며, standalone과 glTF 의미가 다른 경우를 cache identity로 구분하고 no-op은 공유한다. 포맷별 별도 decoder를 만들지 않았다.
 
-실제 공개 입력의 단1회 debug 관찰은 cold0.34초/warm0.21초다. 두 실행 모두 source read8·container parse7·range hash2448 bytes가 남았고 전체 source는583,313 bytes다. 따라서 모든 제작 비용 제거·일반적인 속도 개선 배율·P03.4 인수로 해석하지 않는다. 초기 parser/IR 준비와 별도 process의 source 검증은 남은 비용이며, 다음 실제 consumer·in-session generation/reload 단계에서 영향과 비용을 구분한다. 전체 결과·binary hash·command는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)을 따른다. clean package/PR CI는 아직 다음 검사이며 DEV03/DEV05 전체 완료가 아니다.
+실제 공개 입력의 단1회 debug 관찰은 cold0.34초/warm0.21초다. 두 실행 모두 source read8·container parse7·range hash2448 bytes가 남았고 전체 source는583,313 bytes다. 따라서 모든 제작 비용 제거·일반적인 속도 개선 배율·P03.4 인수로 해석하지 않는다. 초기 parser/IR 준비와 별도 process의 source 검증은 남은 비용이며, 다음 실제 consumer·in-session generation/reload 단계에서 영향과 비용을 구분한다. 전체 결과·binary hash·command는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)을 따른다. 이후 clean package/PR10 CI까지 인수했으나 DEV03/DEV05 전체 완료는 아니다.
+
+## P03.2a에서 제거할 다음 반복
+
+[모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)은 다음 중복과 실패를 source 감사로 확인해 구현 대상으로 고정했다. 아래는 검증할 항목이며 아직 달성 결과가 아니다.
+
+| 현재 반복 또는 장애 | 이번 공통 책임 | 효과를 확인할 근거 |
+| --- | --- | --- |
+| CLI마다 legacy/asset-aware loader를 선택하고 오류·지원 범위를 따로 맞춰야 함 | mode만 다른 공통 asset-aware 준비 helper | 같은 source digest·component 지원·진단과 기존 CPU/assets smoke 회귀 |
+| window packet과 batch capture의 legacy RenderScene 분기가 나뉨 | 같은 ProjectRenderResources/RenderPacket/PacketRenderer | 실제 GPU texture 픽셀·동일 authority/projection identity, 별도 importer/renderer 없음 |
+| 창이 가진 catalog pin 때문에 별도 CLI가 같은 disk cache를 계속 Busy로 만남 | eager owned IR의 명시적 storage-pin detach | project를 유지한 채 cache reopen, pinned clone은 계속 차단, pixels/geometry 유효 |
+| model 확장·image hash/geometry pack을 redraw마다 새로 처리할 위험 | 준비 시 고정 mapping·불변 handle·device resource cache | 반복 frame·transform-only에서 geometry/texture upload0, 필요한 dirty slot write만 증가 |
+| 실제 GPU 회귀마다 subprocess·project JSON·deadline·cleanup을 새로 조립 | 기존 smoke helper의 opt-in model mode | CPU18/assets31/native22 의미 유지, GPU 미사용 기본 mode와 실패 cleanup 회귀 |
+
+새 renderer·framework·cache를 추가한 개수보다 실제로 공유되는 경로와 제거된 작업을 평가한다. 별도 process의 source read/parse는 이 변경만으로 없어지지 않으며 후속 in-session generation 작업에서 측정한다. 효과가 없는 범용화는 진행률로 계산하지 않는다.

@@ -93,6 +93,7 @@
 | [Native live session 검증](06-worklog/2026-10-16-native-live-session.md) | 실제 창·ECS·background terrain 통합과 입력·종료·파이프라인 검증 근거 |
 | [엔진 제품 준비도 감사](06-worklog/2026-10-16-product-readiness-audit.md) | 기반 부품과 실제 제작 기능의 차이·미완료·첫 의존성 기록 |
 | [공통 에셋 import 작업 기록](06-worklog/2026-10-16-asset-import.md) | P03.1의 API 분담·실제 공개 자료 확인·검증 상태를 추적 |
+| [모델·텍스처 실행 작업 기록](06-worklog/2026-10-16-model-texture-runtime.md) | P03.2a의 사전 계약·소유권·반복 경로 공통화·미통과 검증을 추적 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

@@ -1,6 +1,6 @@
 # P03.3a 비동기 에셋 후보 준비 작업 기록
 
-상태: Rust298·Python61·strict Clippy·managed·Metal9·CLI/clean archive CPU50/native60 통과, CI/main 대기 · 2026-10-16 · P03.3/D1 미통과
+상태: P03.3a local/clean archive·PR14 CI/main 인수 · 2026-10-16 · P03.3 전체/D1/D2/D3 미통과
 
 ## 이 기록을 만든 이유
 
@@ -198,3 +198,13 @@ smoke/CI/문서를 `28a68920490533abc74e02bf5c5bc555f390b78f`로 commit하고 tr
 - `--assets --view --models --sprites --audio --audio-native --asset-preparation`:60개/18.835064초 통과, raw `p03-preparation-extracted-native-root-01.json`.
 
 두 report의 executable hash는 manifest와 같았다. 추출본의 같은 preparation view/actor에서 비영 PCM428samples·Stop/reap·실제 tick1/generation1/source present·worker Stopped를 확인했고 별도 native backend voice도 Ended였다. release/debug 단1회 시간은 성능 개선 비교가 아니다. 이 시점에는 로컬 archive만 인수했고 두 native CI package/새 combined step·최종 main tree는 아직 대기다.
+
+## PR14 CI와 main 인수
+
+[PR14](https://github.com/sonan0721/Daedalus/pull/14)의 최종 head는 `d766d0dc8abc1bd97b7f7d32ffdc38f86ebd9bff`다. [docs](https://github.com/sonan0721/Daedalus/actions/runs/38907251300), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38907251316), [managed native integration](https://github.com/sonan0721/Daedalus/actions/runs/38907251324), [두 native package](https://github.com/sonan0721/Daedalus/actions/runs/38907251520)가 모두 성공했다. 보호 설정의 필수 context3개·strict true·squash-only도 다시 조회했다.
+
+두 package의 `Verify packaged CLI asset, audio, and preparation smoke` step을 각각 확인했다. macOS staged CLI는50개/1.800079초·binary SHA-256 `bdb7b230a5053aa5396da2bcfec652d90b9c837d52ff23ef153af86f2f5329a8`, Linux는50개/0.673491초·`cc60904bb6732de261225dd383e985b41ad8f871f9803fe4fe3e3843185a4f2d`로 통과했다. 양쪽 같은 actor의 실제 nonzero PCM samples428도 report에 남았다. Linux `libasound.so.2` 실제 linkage도 성공했고 Publish job은 skipped였다.
+
+CI checkout은 head와 다른 synthetic merge `ebc93efd8afefa40fec387f79f1602fc8c2f33c7`이다. head/이 synthetic merge의 tree `8bac52ca92d2df237246a59d554a50a3e318717e`가 같음을 fetch로 확인한 뒤 `--squash --match-head-commit d766d0dc8abc1bd97b7f7d32ffdc38f86ebd9bff`로 병합했다. 실제 main commit은 `275ea360fb53dde3713aca84910781a4c895a8e4`이며 같은 tree를 다시 확인했다. 따라서 이 시점에 P03.3a만 인수한다. P03.3b/c의 activation·회수와 전체 P03/D1/D2/D3는 열려 있다.
+
+raw는 ignored `p03-preparation-ci-release-jobs-01.json`, `...ci-macos-package-01.log`, `...ci-linux-package-02.log`다. Linux01은 전체 run이 아직 진행 중이라 gh의 run-log 조회가 거부된 진단 파일이며 테스트 실패가 아니다. 완료한 job의 REST logs를 사용해 다른 matrix를 기다리지 않고 결과를 확인했다. 이 인수 기록은 검증한 source를 바꾸지 않는 다음 단계 문서 commit에 둔다.

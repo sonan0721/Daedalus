@@ -86,3 +86,11 @@ ignored artifact directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e4
 [PR #6](https://github.com/sonan0721/Daedalus/pull/6)은 head `9035efab9ed397e459ee23612f8fd83ebdd91636`의 필수 docs/rust/managed native integration 및 두 native package job이 모두 통과한 뒤 `cd2c2ec9ce20b0e3ee7a624f2f74dc529e8263d6`로 squash 병합됐다. docs 7초·managed 54초·Rust 1분34초, package macOS 2분36초·Linux 2분39초다. 서로 다른 역할/환경의 job 시간을 성능 향상률로 비교하지 않는다. 두 package job은 실제 추출 binary의 공통 project smoke까지 실행했고, publish는 PR이므로 skipped다.
 
 이 병합은 P01.1과 DEV06 하위 결과이며 P01/P02/P03 및 D1 전체를 통과시킨 것이 아니다. 다음 작업은 fixture window와 동기 project control 사이의 간극이다. 새 [session service 문서](../03-architecture/session-control-service.md)는 하나의 project actor·client별 결과·manual/realtime·visible/CLI/MCP·resource reuse·live capture·종료 계약을 먼저 정리하기 위해 만들었다. typed API와 legacy migration 방법을 Luna xhigh가 read-only로 구체화한 뒤 관련 구현을 시작한다.
+
+## P02 설계와 코드 분담
+
+`feat/shared-session-service`에서 service/owned ticket API와 limits를 먼저 커밋했다. [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 결과 소유권·Manual Step reserve·유한 replay/retention의 선택 이유를 보존하기 위해 만들었다. read-only red-team에서 frame Arc retention과 bounded replay 의미를 보완했다. initial backend는 native이며 새 MCP/웹 지원을 구현했다고 표시하지 않는다.
+
+Luna xhigh 한 명이 runtime의 typed service·공통 primitive·기존 LiveSession 재사용 및 필요한 world의 bounded page helper를 단독 소유한다. root는 코드·테스트를 작성하지 않고 계약·리뷰·독립 검증·Git을 맡는다. 다른 Luna의 renderer 감사는 read-only로 유지하고 core API와 file ownership을 먼저 고정해 충돌/재작업을 줄인다. source가 안정화되기 전 중복 전체 Cargo 검사를 병렬로 실행하지 않는다.
+
+새 [renderer resource 재사용 문서](../03-architecture/renderer-resource-reuse.md)는 현재 frame마다 world-space geometry 변환·buffer 생성이 반복되는 실제 source 감사에 근거한다. 불변 CPU handle, transform/material instance 갱신, 공통 packet backend, 장치별 cache와 in-flight byte budget·변경 종류별 측정을 명세한다. 이 문서는 다음 구현안이며 실제 성능 결과는 아직 없다.

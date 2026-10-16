@@ -60,3 +60,9 @@ AI 루프는 GUI automation만 반복하는 방식에 의존하지 않는다. CL
 로컬 검증과 native package 검증은 같은 smoke 함수를 재사용한다. 기존 archive 무결성·version/inspect 검사는 유지하고, 추출한 binary로 project smoke를 추가한다. release workflow는 이미 package backend를 호출하므로 별도 workflow/중복 smoke를 만들지 않는다. stub 기반 package unit test는 실제 process를 성공으로 위조하지 않도록 기존 mock 경계를 명시적으로 조정하고, 실제 binary smoke는 별도로 실행한다. CLI/source 변경이 없는 경우 이 자동화 추가 때문에 Rust workspace 전체를 다시 빌드하지 않는다.
 
 실제 첫 결과: `python3 scripts/smoke_project.py --cli target/debug/daedalus` 한 번으로 18개 계약 검사를 통과했다. 조정자의 같은 Mac warm 관찰은 0.093575초이며 executable SHA-256은 worklog와 ignored JSON에 기록했다. 반복 수동 fixture/JSONL 조립을 한 invocation으로 묶은 근거다. 과거 수동 wall time과 통제된 비교 측정은 없으므로 속도 향상 배율을 주장하지 않는다. Python regression 41건은 별도 통과했다. GPU/GUI/.NET 검사를 이 CPU helper로 대체하지 않는다.
+
+## DEV01/DEV08 후속 설계
+
+P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0006](../05-decisions/0006-owned-session-control-results.md)은 typed 요청·owned 결과·clock·포화/종료를 먼저 고정한다. 계약 감사에서 Manual Step admission deadlock, client-held frame retention, 유한 replay의 의미를 보완한 뒤 Luna xhigh가 runtime/world를 구현 중이다. 실제 검사 전에는 공통 host 기능이 통과했다고 표시하지 않는다.
+
+별도 [renderer resource 재사용](../03-architecture/renderer-resource-reuse.md) 문서는 로컬 source 감사에서 확인한 per-frame flatten/buffer 생성과 project entity별 mesh 복제를 없애기 위한 다음 계약이다. CPU mesh handle/instance 갱신·GPU cache·in-flight retirement를 함께 다루고 upload count/bytes로 검증한다. 현재는 미구현이며 cache 속도 향상이나 전체 DEV08 완료를 뜻하지 않는다.

@@ -1,6 +1,6 @@
 # P03.3a 실행 중 에셋 후보의 비동기 준비
 
-상태: memory summary 하위 API 동결·native/control API 검토 중. P03.2c PR13/CI/main 인수 확인 · 2026-10-16
+상태: memory/native/control API source 리뷰 후 동결·하위 구현 진행 중. P03.2c PR13/CI/main 인수 확인 · 2026-10-16
 
 ## 목적과 제품 경계
 
@@ -117,9 +117,59 @@ admission을 닫고 desired epoch를 취소한 뒤 worker가 실제 반환하는
 
 원본 오류·cache Busy·allocation/budget·worker panic·handoff saturation은 typed 실패다. cache corruption은 기존 검증→폐기/재쿠킹 정책과 counter를 유지하며 복구 불가일 때 실패한다. 이미 존재하는 active world와 마지막 화면/voice를 없애지 않는다. 이번 단계에서 device를 바꾸지 않으므로 renderer/audio rollback을 구현했다고 하지 않는다. worker panic 후 재시작·cache lock 재획득은 실제 종료와 owner 회수를 확인한 별도 명령이어야 한다.
 
-## 구현 전 동결할 API·파일 책임
+## Native owner·port API 동결
 
-조정자는 수치 ledger와 public operation/result/accessor를 source 감사 후 확정한다. Luna xhigh 담당끼리 runtime worker·actor/replay·CLI/smoke 파일 소유권을 나누고 manifest/lock owner를 먼저 지정한다. shared target/Cargo owner 하나를 유지한다. watcher dependency·범용 plugin registry·추가 ECS는 이번 코드에 넣지 않는다.
+실제 worker는 runtime library의 `project_preparation` module에 둔다. CLI-private 구현이나 public generic port trait만 제공해 SDK 사용자가 engine 기능을 다시 작성하게 하지 않는다. 다음 additive API를 채택한다. 새 type의 field는 private다.
+
+| API | 동결한 의미 |
+| --- | --- |
+| `NativeProjectPreparationOptions::new(root)` | process-local PathBuf. default cache는 project의 `.daedalus/cache`, import/cache 기존 defaults와 catalog 합산256MiB |
+| `with_cache_root`, `with_import_limits`, `with_cache_limits`, `with_max_catalog_accounted_bytes` | builder는 Self 반환. 경로는 trusted owner 설정, 수치 validation은 start에서 기존 validator/하드 상한 재사용 |
+| `NativeProjectPreparationService::start(options)` | `Result<Self, NativeProjectPreparationStartError>`. worker 안에서 cache open/initial import, pins detach 후 source를 공유. 초기 실패는 실제 worker 종료를 정리하고 반환. startup wait는 UI callback에서 호출하지 않음 |
+| `initial_project(&self)` | `&Arc<PreparedProject>`, 최초 불변 source. candidate payload getter 아님 |
+| `take_control_port(&mut self)` | `Result<ProjectPreparationPort, ...>`, non-Clone opaque port를 한 번만 인수 |
+| `request_stop(&self)` | 비대기 취소 요청. cache 해제/join 성공 아님 |
+| `try_shutdown(&mut self)` | `Result<PreparationWorkerShutdown, ...>`; Stopping/Stopped. 종료 확인 후 join·실패 관찰. 실행 중이면 owner가 handle/cache 수명을 유지 |
+| `SessionControlService::start_shared_with_preparation(project, config, port)` | 원래 actor를 한 번만 생성. source와 port initial Arc의 ptr identity를 spawn 전에 검증 |
+| `start_shared_with_preparation_and_audio(project, config, port, audio_options)` | audio feature의 additive 조합. 기존 private startup 하나로 합류하며 별도 actor 없음 |
+| `SessionControlClient::asset_preparation_enabled()` | bool. 기존 public SessionCapabilities/config/limits field를 늘리지 않음 |
+
+Native service/port Drop은 stop을 요청한다. actor가 port를 drop하면 worker에도 stop이 전달되고, 외부 Native owner가 실제 worker join을 관찰한다. Native owner를 버려도 실행 중 thread closure가 cache owner를 유지한다. 다른 service에 port를 복제·재부착할 수 없고, source mismatch/두 번째 take는 명시적 오류다. native factory가 없는 target에서는 기능 unavailable이며 filesystem worker를 시작하지 않는다. 이번 변화로 runtime/browser 전체 target 지원을 인증하지 않는다.
+
+port의 효과 함수는 crate-private다. `initial_project()`와 `try_prepare(epoch: u64)`, `try_cancel(epoch: u64)`, `try_status(session: SessionId)` 및 stop 신호를 actor에서만 사용한다. epoch issuer는 actor 한 곳이고 worker는 전달된 epoch를 검증한다. 일반 SDK 사용자가 port를 통해 replay/capability를 우회할 mutation API를 얻지 않는다.
+
+## 공통 operation·결과·wire 동결
+
+| runtime type/API | 형태·의미 |
+| --- | --- |
+| `PreparationId` | opaque session+epoch, Copy/Eq/Debug, `from_parts/session/epoch`.0·foreign·future는 요청에서 검사 |
+| `SessionOperation::AssetPreparation(AssetPreparationOperation)` | `Prepare {command_id}`, `Cancel {command_id,candidate}`, `Status` |
+| `SessionRequestResult::AssetPreparation(AssetPreparationResult)` | `Command(AssetPreparationCommandResult)` 또는 `Status(AssetPreparationStatus)` |
+| `AssetPreparationCommandResult` | private fields/public `command_id/observed_tick/outcome` getters |
+| `AssetPreparationCommandOutcome` | `PrepareAccepted {candidate}` / `CancelAccepted {candidate}`. worker 완료와 별개 |
+| `AssetPreparationStatus` | public read-only getters `session/active_generation/active_source_digest/active_cooked_accounted_bytes/desired/running/pending/state/ready_candidate/latest_failure` |
+| `PreparationCandidateSummary` | read-only `id/is_current/source_digest/catalog_digest/source_scene_revision/asset_count/entity_count/memory/metrics`. 목록·PCM·project Arc 없음 |
+| `PreparationFailure` | read-only `id/code/message/source_id/path/diagnostic_truncated`. 마지막1개, code64/message2048/source_id4096/path4096 UTF-8 bytes 상한 |
+
+새 타입/enum은 실험적0.1 additive API다. 기존 enum을 audio feature로 확장한 것과 마찬가지로 exhaustive match의 source 변경 가능성을 문서화한다. 기존 public literal config/metrics/capabilities를 바꾸지 않는다. 상태 getters의 optional ID/summary/failure는 값이 없을 때 None이고 임의 generation0/bytes0으로 바꾸지 않는다.
+
+상태의 `desired`와 실제 `running/ready` epoch는 다를 수 있다. newer Prepare가 수락된 직후 이전 ready의 큰 payload는 worker가 실제 해제하기 전까지 존재할 수 있다. ready summary의 `is_current`는 desired epoch·취소 상태와 함께 계산하며 stale 것을 activation-ready처럼 표시하지 않는다. worker가 그 payload를 해제하기 전에 retained byte/slot을0으로 보고하지 않는다. 새 import는 이전 ready를 worker에서 해제한 뒤 시작한다.
+
+Cancel은 새 preparation epoch를 발급하지 않는다. 현재 desired의 pending/running/ready를 취소 표시하고 worker가 실제 반환/해제를 관찰한다. 이전 issued epoch는 expired, 이미 실패/취소된 current는 not-active, foreign/0/future는 invalid다. retained command replay는 이 새 효과 검사보다 먼저 원래 결과를 찾는다. actor의 queue/permission/port Busy·invalid 같은 pre-effect 거부는 caller ID를 소비하지 않고, 수락 후 import 실패는 accepted receipt를 바꾸지 않은 채 Status에 나타난다. 효과 후 actor panic은 기존 OutcomeUnknown이며 작업 미실행으로 단정하지 않는다.
+
+protocol2의 submit operation은 `asset_preparation_status`, `asset_preparation_prepare {command_id?}`, `asset_preparation_cancel {command_id?,candidate:{session,epoch}}`다. 결과는 `{kind:"asset_preparation",data:{kind:"status"|"command",data:...}}`로 기존 ticket/poll/ack에 담는다. ID·command ID·tick·scene revision은 decimal string이다. bounded memory/metrics counters는 content summary의 numeric camelCase schema를 재사용하고 새 별도 estimator/JSON report를 복제하지 않는다. result serialization은 exhaustive match를 사용한다.
+
+capability 목록은 실제 연결 상태를 반영한다. worker를 켜지 않은 service는 명시적 unavailable이고 경로/asset payload를 요청 인자로 받지 않는다. 정상 inspect/mutate와 normal/Step ticket 예산, terminal을 AuthorityAccepted wait 충족으로 보는 기존 동작을 그대로 적용한다. 상태 복사 전에 count/byte를 검사하며 진단이 잘리면 truncated flag를 보존한다.
+
+## CLI·종료·파일 책임
+
+CLI opt-in은 `project serve DIR --protocol 2 --asset-preparation`과 `project view DIR --stdio-control --asset-preparation`이다. protocol1 또는 control 없는 view의 flag는 load/worker/device 시작 전에 거부한다. `--audio offline/native`는 같은 factory/actor 조합을 사용한다. CLI는 Native owner·initial source·기존 service를 연결할 뿐 worker/import/cache 구현을 소유하지 않는다. old start/default 명령은 worker0개로 유지한다.
+
+새 경로는 initial load를 기존 ephemeral loader로 먼저 수행하지 않는다. cache owner 하나를 계속 유지하므로 다른 process의 같은 cache-root cook/capture는 Busy일 수 있다. 기존 opt-in을 끈 native+batch 동시 smoke의 pin-detach 의미는 유지한다. 이 모드의 candidate QA는 같은 live session의 metadata/presentation report를 사용하며 batch capture를 live capture로 표시하지 않는다.
+
+종료는 actor shutdown→worker stop 요청→owner가 실제 종료 관찰 순서다. UI loop가 끝난 뒤 CLI owner에서 최대2초 동안 짧게 `try_shutdown`을 관찰할 수 있다. 이 시간은 parser 강제 종료 deadline이 아니다. 남아 있으면 Stopping/미회수를 보고하고 background owner가 cache를 계속 소유함을 표시한다. 정상 cooperative 작업이 아직 스케줄되지 않았다는 이유로 한 번의 poll만 보고 shutdown 실패로 만들지 않는다. library Drop·process 종료·실제 worker join을 혼동하지 않는다.
+
+Luna xhigh 파일 책임은 content memory summary, runtime worker/types+exports, actor/replay+CLI/DTO/smoke로 분리한다. runtime `lib.rs`는 worker 담당 한 명이 소유하고 control 담당은 필요한 export를 메시지로 요청한다. manifest/lock 변경은 현재 불필요하며 새 dependency를 임의 추가하지 않는다. shared target/Cargo owner 하나, source-only 병렬→focused→통합→hardware→clean archive 순서를 유지한다. watcher·범용 plugin registry·추가 ECS는 이번 코드에 넣지 않는다.
 
 ## 하위 gate 검증
 

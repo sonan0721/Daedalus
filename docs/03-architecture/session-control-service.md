@@ -44,9 +44,52 @@ transport의 문자열/숫자 request ID는 adapter-local이다. core correlatio
 
 여러 client가 하나의 global result receiver를 경쟁 소비하는 구조는 금지한다. attachment별 bounded result queue 또는 요청별 owned ticket을 사용하고, 소유 client만 자신의 completion을 소비한다. read query 응답과 command acceptance/outcome의 필요한 credit을 admission 전에 예약한다. mutation의 terminal outcome은 latest frame처럼 덮어쓰지 않는다. unread result를 무한 HashMap으로 보관하지 않는다.
 
-API를 확정할 때 결과 전달의 실제 선택을 하나로 고정한다. 그 선택은 manual set→step의 wire 호환, realtime의 비동기 terminal outcome, 복수 attachment, attachment 종료/timeout 뒤 pending command 결과 회수, 종료 시 unread 결과 보고를 모두 만족해야 한다. 구현 편의 때문에 한 client의 polling이 다른 client 결과를 훔치거나 대기 중 write가 완료된 척 응답하면 실패다.
+P02.1의 결과 선택은 아래 owned ticket 계약으로 고정한다. manual set→step의 wire 호환, realtime의 비동기 terminal outcome, 복수 attachment, attachment 종료/timeout 뒤 pending command 결과 회수, 종료 시 unread 결과 보고를 모두 만족해야 한다. 구현 편의 때문에 한 client의 polling이 다른 client 결과를 훔치거나 대기 중 write가 완료된 척 응답하면 실패다.
 
 queue·client 수·요청 bytes·page·tick count·pending mutation·reliable result bytes를 제한한다. Busy/QueueFull/ResultCapacity/Stopped/CapabilityDenied/ClockModeMismatch는 별개 오류다. stop 신호는 포화된 일반 command queue와 독립적으로 전달할 수 있어야 한다. 취소 불가/이미 적용된 요청은 실제 상태를 반환한다.
+
+## P02.1 고정 API와 owned ticket
+
+Luna xhigh의 read-only 제안을 검토한 초기 계약이다. 소유 구현은 `daedalus-runtime` 안에 두고 renderer/JSON parser/transport를 runtime dependency로 추가하지 않는다.
+
+| public API | 의미 |
+| --- | --- |
+| `SessionControlService::start(prepared, SessionControlConfig) -> Result<Self, SessionControlStartError>` | actor thread 안의 한 ProjectSession. config는 EngineConfig·Manual/Realtime·validated limits |
+| `attach()` / `attach_with_capabilities(capabilities)` | 각각 기본 trusted local client / host가 제한한 inspect·mutate·manual-step client 발급. 네트워크 인증 구현을 뜻하지 않음 |
+| `SessionControlClient::try_submit(SessionOperation) -> Result<RequestTicket, SessionSubmitError>` | nonwaiting admission. ticket은 session·attachment·sequence identity를 갖고 Clone 불가 |
+| `RequestTicket::try_state() -> Result<Arc<RequestProgress>, RequestReadError>` | 같은 요청의 읽기 전용 진행/결과. 결과 Vec 전체를 poll마다 복사하지 않음 |
+| `RequestTicket::wait_for(WaitStage, Duration)` | control/coordinator에서만 유한 대기. AuthorityAccepted/Terminal 구분, timeout 뒤 ticket과 실제 작업은 유지 |
+| `RequestTicket::acknowledge(&mut self)` | terminal일 때만 engine 보존 책임 해제. progress Arc를 보유한 consumer의 memory lease는 마지막 참조까지 계수 |
+| `SessionControlClient::try_latest_frame()` | ticket과 독립적인 최신 불변 SessionFrame 조회. Client drop으로 host join하지 않음 |
+| service `request_stop()` / `shutdown(self)` | 독립 stop / coordinator의 명시 join·bounded final report |
+
+`RequestProgress`는 authority admission과 terminal `Result<SessionRequestResult, SessionRequestError>`를 구분한다. public field를 가변으로 열어 결과 identity를 바꾸지 않는다. admission에는 world CommandId, Enqueued/DuplicatePending/DuplicateCompleted 의미와 실제로 아는 apply tick만 둔다. terminal command에는 실제 CommandResult와 resolve tick을 기록하고, cached replay에 원래 tick 정보가 없으면 `None/unknown`을 사용한다.
+
+`SessionOperation`은 ProjectInfo(page), SpawnTransform, GetTransform, ListTransforms(page), SetTransform(revision/command ID/optional apply tick), Step(count), Status다. get/set target은 authored StableId 또는 EntityHandle을 명시적으로 고를 수 있다. handle은 session/generation을 검사하며, source map에 없는 runtime-spawn entity를 임의 authored ID로 만들지 않는다. 기존 JSONL의 get `entity`/set `target`과 spawn을 adapter에서 손실 없이 매핑할 수 있어야 한다.
+
+query는 Queued→Terminal, set은 Queued→AuthorityAccepted→Terminal이다. authority 거부도 해당 ticket의 명시적 terminal 오류다. duplicate pending은 모든 소유 ticket이 같은 실제 outcome을 받되 world 명령을 한 번만 적용한다. duplicate completed는 실제 cached CommandResult를 반환한다. 서로 다른 adapter의 auto ID allocator를 따로 두지 않는다.
+
+ticket drop은 결과를 포기하는 의미이며 이미 authority가 수락한 명령을 취소하지 않는다. pending credit은 actor의 terminal 처리까지 유지한다. ack/drop된 ticket의 결과 Arc를 consumer가 보유하면 실제 engine-owned payload lease가 살아 있는 동안 byte credit을 성급히 반환하지 않는다. client detach 후에도 살아 있는 ticket의 읽기 권한은 유지할 수 있으나 새 제출은 거부한다. 초기 reconnect/resume API는 만들지 않는다.
+
+| 초기 제한 | 기본값 | hard ceiling |
+| --- | --- | --- |
+| actor queue | 128 | 4096 |
+| client attachment | 16 | 64 |
+| client별 pending ticket | 8 | 256 |
+| session 전체 pending ticket | 128 | 4096 |
+| ticket result bytes | 1 MiB | 1 MiB |
+| session result bytes | 32 MiB | 32 MiB |
+| page entities | 1024 | 1024 |
+| Manual step/request | 120 | 120 |
+| retained frames | 3 | 64 |
+
+수치가 상한 안이라도 0/상호 모순인 config는 시작 전에 거부한다. 요청별 보수적 payload/metadata 예산을 실제 생성 전에 예약하며, source 문자열·StepReport/command 수·page 결과도 계산에 넣는다. query 처리 실패나 queue full은 모든 예약을 되돌린다. runtime-spawn entity 수도 기존 16,384 상한을 유지한다. 별도 frame/source/CPU pool 예산을 이 result budget 하나로 모두 제한했다고 주장하지 않는다.
+
+world 목록에 offset page가 필요하면 `daedalus-world`의 기존 bounded extraction을 작은 공통 page helper로 확장한다. 전체 entity Vec를 만든 뒤 잘라내거나 runtime에서 ECS handle 해석을 재구현하지 않는다. mutable 목록 page에는 실제 읽은 authority tick을 기록하며 서로 다른 tick의 page를 일관된 한 snapshot이라고 표시하지 않는다. immutable source binding page와 runtime entity page를 구분한다.
+
+Manual set은 AuthorityAccepted까지만 기다린 기존 wire 응답을 유지한다. Step은 실제 StepReport를 반환하고 pending mutation ticket도 같은 결과로 완료한다. realtime은 receipt의 terminal 상태를 읽을 수 있어야 하며 후속 adapter는 bounded CommandId→ticket map과 명시 result 조회/ack를 제공한다. core 단계에서 그 JSONL 기능까지 구현한 것으로 표시하지 않는다.
+
+종료 때 queue-only는 StoppedBeforeAuthority, authority accepted지만 아직 tick에 적용 안 된 명령은 StoppedNotApplied로 마감한다. 이미 적용/거부한 명령을 stopped로 덮지 않는다. report는 마지막 authority tick·실제 termination·미확인/abandoned 결과 수를 유한하게 기록한다. 공통 primitives는 credit/terminal cell/latest frame/stop처럼 작게 추출해 기존 LiveSession에도 사용하고, fixture actor와 입력 의미는 유지한다. migration 중 남긴 중복과 후속 제거를 명시한다.
 
 ## snapshot·source·표시 identity
 

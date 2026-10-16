@@ -369,6 +369,16 @@ impl NativeProjectActivationService {
     }
 
     #[cfg(test)]
+    pub(crate) fn block_stage_result_after_send_for_test(
+        &self,
+        epoch: u64,
+    ) -> PreparationTestGateRelease {
+        let gate = Arc::new(PreparationTestGate::after_stage_send(epoch));
+        self.worker_shared.install_test_gate(Arc::clone(&gate));
+        PreparationTestGateRelease(gate)
+    }
+
+    #[cfg(test)]
     pub(crate) fn block_promotion_for_test(&self, epoch: u64) -> PreparationTestGateRelease {
         let gate = Arc::new(PreparationTestGate::before_promotion(epoch));
         self.worker_shared.install_test_gate(Arc::clone(&gate));
@@ -1424,6 +1434,7 @@ enum PreparationTestGatePhase {
     BeforeImport,
     AfterImport,
     BeforeStageSend,
+    AfterStageSend,
     BeforePromotion,
 }
 
@@ -1472,6 +1483,16 @@ impl PreparationTestGate {
         Self {
             epoch,
             phase: PreparationTestGatePhase::BeforeStageSend,
+            panic_after_release: false,
+            state: Mutex::new((false, false)),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn after_stage_send(epoch: u64) -> Self {
+        Self {
+            epoch,
+            phase: PreparationTestGatePhase::AfterStageSend,
             panic_after_release: false,
             state: Mutex::new((false, false)),
             changed: Condvar::new(),
@@ -2297,7 +2318,12 @@ fn worker_loop(
                         request.epoch,
                         PreparationTestGatePhase::BeforeStageSend,
                     );
-                    let _ = shared.stage_result_sender.send(result);
+                    if shared.stage_result_sender.send(result).is_ok() {
+                        shared.wait_at_test_gate(
+                            request.epoch,
+                            PreparationTestGatePhase::AfterStageSend,
+                        );
+                    }
                 }
             }
             WorkerAction::CancelStage(sequence, epoch) => {

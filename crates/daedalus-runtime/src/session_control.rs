@@ -1139,6 +1139,12 @@ struct ControlShared {
     request_cleanup_paused: AtomicBool,
     #[cfg(test)]
     release_paused_request_cleanup: AtomicBool,
+    #[cfg(test)]
+    pause_after_activation_stage_admission_epoch: AtomicU64,
+    #[cfg(test)]
+    activation_stage_admission_paused: AtomicBool,
+    #[cfg(test)]
+    release_activation_stage_admission_pause: AtomicBool,
 }
 
 impl ControlShared {
@@ -1146,6 +1152,29 @@ impl ControlShared {
         self.accepting.store(false, Ordering::Release);
         self.stop.request();
         self.queue.wake();
+    }
+
+    #[cfg(test)]
+    fn pause_after_activation_stage_admission_for_test(&self, epoch: u64) {
+        if self
+            .pause_after_activation_stage_admission_epoch
+            .load(Ordering::Acquire)
+            != epoch
+        {
+            return;
+        }
+        self.activation_stage_admission_paused
+            .store(true, Ordering::Release);
+        while !self
+            .release_activation_stage_admission_pause
+            .load(Ordering::Acquire)
+        {
+            thread::yield_now();
+        }
+        self.pause_after_activation_stage_admission_epoch
+            .store(0, Ordering::Release);
+        self.activation_stage_admission_paused
+            .store(false, Ordering::Release);
     }
 }
 
@@ -1321,6 +1350,12 @@ impl SessionControlService {
             request_cleanup_paused: AtomicBool::new(false),
             #[cfg(test)]
             release_paused_request_cleanup: AtomicBool::new(false),
+            #[cfg(test)]
+            pause_after_activation_stage_admission_epoch: AtomicU64::new(0),
+            #[cfg(test)]
+            activation_stage_admission_paused: AtomicBool::new(false),
+            #[cfg(test)]
+            release_activation_stage_admission_pause: AtomicBool::new(false),
         });
         let (startup_sender, startup_receiver) = std::sync::mpsc::sync_channel(1);
         let actor_shared = Arc::clone(&shared);
@@ -2432,6 +2467,9 @@ impl ControlActor {
                     self.finish_cell(cell, credit, Err(activation_port_error(error)));
                     return;
                 }
+                #[cfg(test)]
+                self.shared
+                    .pause_after_activation_stage_admission_for_test(candidate.epoch());
                 if let Some(active) = self.active_request.as_mut() {
                     active.possible_command_id = Some(command_id);
                 }
@@ -2446,7 +2484,9 @@ impl ControlActor {
                 self.latest_activation_failure = None;
                 self.staged_project = None;
                 self.deferred_stage_result = None;
-                self.drain_stage_results();
+                // Admission wakes the worker before this handler can publish the new activation.
+                // Keep the result channel intact; the next actor poll consumes both stale and
+                // current results through the sequence/epoch checks in `consume_activation_stage_result`.
                 AssetActivationCommandOutcome::StageAccepted {
                     activation,
                     candidate,
@@ -3875,6 +3915,56 @@ mod tests {
         }
     }
 
+    struct ActorStageAdmissionPauseRelease(Arc<super::ControlShared>);
+
+    impl ActorStageAdmissionPauseRelease {
+        fn new(shared: Arc<super::ControlShared>, epoch: u64) -> Self {
+            shared
+                .release_activation_stage_admission_pause
+                .store(false, Ordering::Release);
+            shared
+                .activation_stage_admission_paused
+                .store(false, Ordering::Release);
+            shared
+                .pause_after_activation_stage_admission_epoch
+                .store(epoch, Ordering::Release);
+            Self(shared)
+        }
+
+        fn wait_until_paused(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !self
+                .0
+                .activation_stage_admission_paused
+                .load(Ordering::Acquire)
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "actor did not pause after stage admission"
+                );
+                thread::yield_now();
+            }
+        }
+
+        fn release(&self) {
+            self.0
+                .release_activation_stage_admission_pause
+                .store(true, Ordering::Release);
+        }
+
+        fn is_paused(&self) -> bool {
+            self.0
+                .activation_stage_admission_paused
+                .load(Ordering::Acquire)
+        }
+    }
+
+    impl Drop for ActorStageAdmissionPauseRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
     const ONE_ENTITY_SCENE: &str = r#"{
         "schema_version": 1,
         "revision": 37,
@@ -3975,6 +4065,51 @@ mod tests {
                     thread::yield_now();
                 }
                 Err(error) => panic!("request admission failed: {error:?}"),
+            }
+        }
+    }
+
+    fn submit_stage_until_actor_pause(
+        client: &super::SessionControlClient,
+        operation: SessionOperation,
+        actor_gate: &ActorStageAdmissionPauseRelease,
+    ) -> super::RequestTicket {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "stage admission did not reach the actor handoff gate"
+            );
+            let mut ticket = submit_after_busy(client, operation.clone());
+            loop {
+                if actor_gate.is_paused() {
+                    return ticket;
+                }
+                match ticket.wait_for(WaitStage::Terminal, Duration::from_millis(1)) {
+                    Ok(progress) => {
+                        if matches!(
+                            progress.terminal(),
+                            Some(Err(SessionRequestError::ActivationBusy
+                                | SessionRequestError::PreparationBusy))
+                        ) {
+                            drop(progress);
+                            ticket.acknowledge().unwrap();
+                            assert!(
+                                Instant::now() < deadline,
+                                "stage admission remained busy past bounded retry deadline"
+                            );
+                            break;
+                        }
+                        panic!("stage completed without reaching the actor handoff gate");
+                    }
+                    Err(super::RequestWaitError::TimedOut) => {}
+                    Err(error) => panic!("stage request wait failed: {error:?}"),
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "stage admission did not reach the actor handoff gate"
+                );
+                thread::yield_now();
             }
         }
     }
@@ -6168,6 +6303,82 @@ mod tests {
         let ninth = prepare_activation_candidate(&client, 89_220);
         assert_eq!(ninth.epoch(), 9);
         wait_for_preparation_state(&client, PreparationState::CpuPrepared, ninth.epoch());
+
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn stage_admission_cleanup_preserves_queued_worker_result_and_commits() {
+        let session = SessionId::from_raw(89_260);
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut config = default_config();
+        config.engine.session = session;
+        let mut service = NativeProjectActivationService::start_headless(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start headless asset activation service");
+        let client = service.session().attach().unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_261);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+
+        let actor_gate = ActorStageAdmissionPauseRelease::new(
+            Arc::clone(&service.session().shared),
+            candidate.epoch(),
+        );
+        let worker_gate = service.block_stage_result_after_send_for_test(candidate.epoch());
+        let mut stage = submit_stage_until_actor_pause(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                command_id: Some(CommandId::from_raw(89_262)),
+                candidate,
+                expected_active_generation: 1,
+            }),
+            &actor_gate,
+        );
+
+        actor_gate.wait_until_paused();
+        worker_gate.wait_until_entered();
+        actor_gate.release();
+
+        let accepted = wait_terminal(&stage).terminal().unwrap().clone();
+        let Ok(SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(
+            command,
+        ))) = accepted
+        else {
+            panic!("stage command did not return its accepted result: {accepted:?}");
+        };
+        let AssetActivationCommandOutcome::StageAccepted { activation, .. } = command.outcome()
+        else {
+            panic!("stage command did not return a stage acceptance: {command:?}");
+        };
+        let activation = *activation;
+        stage.acknowledge().unwrap();
+
+        let staged = wait_for_activation_state(&client, AssetActivationState::Staged);
+        assert_eq!(staged.session(), session);
+        assert_eq!(staged.active_generation(), 1);
+        worker_gate.release();
+
+        let committed = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(CommandId::from_raw(89_263)),
+                activation,
+                expected_active_generation: 1,
+            }),
+        )
+        .expect("the actor should commit the staged candidate in the existing session");
+        assert!(matches!(
+            committed,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(command))
+                if matches!(command.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 2, .. })
+        ));
+        let active = wait_for_activation_state(&client, AssetActivationState::Committed);
+        assert_eq!(active.session(), session);
+        assert_eq!(active.active_generation(), 2);
 
         drop(client);
         stop_activation_service(&mut service);

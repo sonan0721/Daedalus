@@ -1,6 +1,6 @@
 # P03.3b.2 동일 authority의 CPU 세대 commit
 
-상태: native headless 선행 계약 동결·로컬 경계 검증 통과·최종 통합/배포 인수 전 · 2026-10-16
+상태: native headless 계약 동결·Stage 결과 유실 경합 재현/수정·최종 통합/CI 인수 전 · 2026-10-16
 
 ## 목적과 제한
 
@@ -79,6 +79,7 @@ status logical cap은 기존 preparation과 같은32KiB, wire encoded-result는 
 2. Stage actor는 ID/session/current desired와 expected generation·bounded slot/replay/result 여유를 먼저 확인한다. 효과 전 Busy/invalid/capacity는 caller ID를 소비하지 않는다. 수락 때 activation sequence와 StagePending metadata만 게시하며 결과 receipt를 고정한다.
    pending/running Prepare는 Busy, 실제 ready가 없는 취소/실패 후보는 candidate_not_active다. 같은 candidate가 이미 StagePending/Staging/Staged이면 다른 CommandId의 Stage도 effect-free Busy다. 동일 CommandId는 공통 replay가 원래 receipt를 반환하며 두 번째 activation/lease를 만들지 않는다. 취소로 backing이 사라진 후보를 다시 Stage하려면 새 Prepare가 필요하다.
 3. 같은 preparation worker가 ready payload를 빌려 현재 active source와 공통 비교기를 실행한다. 별도 importer/cache/스레드를 만들지 않는다. 비교/오류 반환 뒤 current desired·cancel·stop·expected active를 재확인하고 capacity-one private handoff에 non-Clone candidate lease를 넘긴다. 오래된 성공/오류는 최신 status를 덮지 않는다.
+   actor가 새 Stage를 worker에 알린 뒤 이전 결과를 무조건 drain하면 빠르게 완료한 새 결과까지 버릴 수 있다. stale 정리는 새 수락 결과를 잃지 않는 순서 또는 sequence/epoch 필터로 수행한다. 효과 전 Busy/거부 때 기존 staged 상태를 먼저 지우지 않으며 actor는 worker 완료를 기다리지 않는다. private gate로 실제 새 결과가 먼저 queued되는 순서를 강제해 Staged/Commit 진행을 검증한다.
 4. actor가 유효한 handoff를 받으면 Staged다. payload는 actor-private이고 공통 control client/status에 노출하지 않는다. active Engine/source는 아직 그대로다. invalid topology는 마지막 정상 source를 보존하고 bounded Failed를 기록한다.
 5. Commit은 Staged·동일 candidate/activation·expected generation·current desired·retirement 여유·u64 증가 가능 여부를 다시 검사한다. 작은 shared-state transaction/try-lock으로 source swap과 generation/ledger identity를 연계한다. lock 확보 실패 뒤 swap부터 하는 순서를 금지한다.
 6. crate-private `ProjectSession::replace_project_source(&mut self, Arc<PreparedProject>) -> Arc<PreparedProject>`는 project field만 교체한다. constructor/spawn/Step/게임플레이 schedule을 실행하지 않고 Engine·StableId↔handle map·실제 transform/revision·camera pose를 보존한다. displaced source는 미리 확보한 retirement slot에 전달한다.

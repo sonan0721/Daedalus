@@ -55,10 +55,13 @@
 | [CLI·MCP·관측](03-architecture/cli-mcp-observability.md) | AI가 관찰·제어·검증하는 구조화된 엔진 인터페이스 |
 | [실행·제어·표시 통합](03-architecture/runtime-control-and-presentation.md) | 지속 세션·CPU 예산·CLI 캡처·독립 창 실행의 다음 통합 계약 |
 | [Native live session](03-architecture/native-live-session.md) | 실제 창·권한 ECS·background terrain 연결과 입력/반응성 증거 계약 |
+| [외부 project lifecycle](03-architecture/project-lifecycle.md) | 사용자 project/scene/mesh 자료를 같은 Engine·snapshot·renderer에 연결하는 선행 계약 |
 | [릴리스·공개 API](03-architecture/releases-and-public-api.md) | 엔진·API·저장·네트워크 버전과 HTML/Wasm export의 경계 |
 | [CLI 빌드·태그 릴리스](03-architecture/cli-build-and-release.md) | 로컬 실행 파일 관리와 후속 tag push 기반 GitHub Release 자동화 계약 |
 | [목표 지도](04-plan/goal-map.md) | 조사와 구현을 각각 끝낼 수 있는 goal로 분해 |
 | [워터폴 마스터플랜](04-plan/waterfall-masterplan.md) | 단계별 산출물·게이트·되돌림 규칙 정의 |
+| [제품 납품·최종 인수](04-plan/product-delivery-and-acceptance.md) | 엔진→실제 3D 게임→실제 2D 게임의 상위 목표와 P01~P16 완료 조건 |
+| [개발 반복 파이프라인](04-plan/development-iteration-pipeline.md) | 반복되는 제작·binding·asset·AI 검증·배포 작업의 공통화·자동화와 효과 검증 |
 | [엔진 구현 체크리스트](04-plan/implementation-checklist.md) | 착수 승인 이후 모듈별 구현·실제 검증·남은 품질 게이트 추적 |
 | [검증·성능 기준](04-plan/validation-and-performance.md) | 정확성·지연·화질·플랫폼·서버 테스트 설계 |
 | [위험 등록부](04-plan/risk-register.md) | 의존성·웹·스코프·수명·품질 위험과 대응 조건 기록 |
@@ -68,6 +71,7 @@
 | [ADR-0002](05-decisions/0002-runtime-boundaries.md) | Rust/wgpu 기준선·실행 격리·명령·자원 예산의 방향 채택 |
 | [ADR-0003](05-decisions/0003-csharp-and-native-gameplay.md) | C# 14/.NET 10/CoreCLR·빌드형 Rust 게임플레이·C++ 통합·오토파일럿 결정 |
 | [ADR-0004](05-decisions/0004-start-engine-implementation.md) | 사용자 구현 착수 승인과 모듈별 설계·검증 진행 방식 |
+| [ADR-0005](05-decisions/0005-engine-product-and-game-validation.md) | 엔진 제품 인수·별도 3D/2D 게임 검증·완료 보고 기준 정정 |
 | [R01 작업 기록](06-worklog/2026-10-15-r01.md) | 작성 문서별 목적·확인 범위·검증·후속 과제 기록 |
 | [R02 스크립팅 작업 기록](06-worklog/2026-10-15-r02-scripting.md) | 언어·모드 범위 변경, 새 문서별 목적과 남은 통합 조사 기록 |
 | [E01~E03 첫 구현 검증](06-worklog/2026-10-15-e01-foundation.md) | 실제 Rust·CLI·Metal 검증과 아직 완료하지 않은 기능의 경계 |
@@ -76,6 +80,7 @@
 | [첫 실행 통합 checkpoint](06-worklog/2026-10-15-runtime-integration.md) | 10개 crate·CPU80건·C# 실제 연결·CLI 제어·추가 리뷰 수정 근거 |
 | [E08 CLI 패키징 검증](06-worklog/2026-10-16-cli-packaging.md) | 로컬 native 실행 파일·의존성 notice·archive 검증과 후속 tag 배포의 구분 |
 | [Native live session 검증](06-worklog/2026-10-16-native-live-session.md) | 실제 창·ECS·background terrain 통합과 입력·종료·파이프라인 검증 근거 |
+| [엔진 제품 준비도 감사](06-worklog/2026-10-16-product-readiness-audit.md) | 기반 부품과 실제 제작 기능의 차이·미완료·첫 의존성 기록 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

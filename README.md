@@ -6,6 +6,8 @@ Daedalus aims to combine a Rust core, responsive loading and streaming, modern G
 
 **Status: engine foundation under construction.** The Rust workspace contains a parallel ECS runtime, bounded CPU tasks and snapshots, persistent JSON CLI control, a native window connected to live ECS and background terrain work, content algorithms, an independent wgpu renderer, Jolt/Rapier physics adapters, Kira audio, and a .NET gameplay host with tested module replacement. The managed SDK currently covers transforms. Advanced rendering, full gameplay integration, web support, and performance targets remain incomplete. Sample game development is outside the current scope.
 
+**Delivery stage: D1 engine implementation; product acceptance is pending.** The full objective is a usable AI-driven engine, followed by separate Minecraft-quality 3D and Terraria-quality 2D games consuming it. Project lifecycle, asset production, UI/animation, multiplayer/persistence, and game export still need integration. Component tests, the native validation window, and packaged CLI do not close that objective. See the [product acceptance contract](docs/04-plan/product-delivery-and-acceptance.md) and [readiness audit](docs/06-worklog/2026-10-16-product-readiness-audit.md). Game projects follow the engine gate and stay outside this repository.
+
 Run the current engine CLI with `cargo run -p daedalus-cli -- inspect --entities 2`. Build and validation commands, GPU requirements, and known limits are in [TESTING.md](TESTING.md). Module progress is tracked in the [implementation checklist](docs/04-plan/implementation-checklist.md).
 
 To open the native engine validation window:

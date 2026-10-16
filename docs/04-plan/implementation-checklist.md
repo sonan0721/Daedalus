@@ -1,6 +1,8 @@
 # 엔진 구현 체크리스트
 
-상태: 사용자 구현 착수 승인 · 2026-10-15 · 모든 코딩 Luna xhigh
+상태: D1 엔진 구현 중·제품 인수 미통과 · 2026-10-16 · 모든 코딩 Luna xhigh
+
+**전체 목표는 진행 중이다.** [제품 인수 계약](product-delivery-and-acceptance.md)의 D1/P01~P16을 통과한 뒤 별도 D2 3D 게임·D3 2D 게임으로 검증한다. 아래 E작업과 live checkpoint 통과는 엔진 제품 인수가 아니다. 현재 gap은 [실제 코드 감사](../06-worklog/2026-10-16-product-readiness-audit.md)에 기록한다.
 
 ## 착수와 검증 원칙
 

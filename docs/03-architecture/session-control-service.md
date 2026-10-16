@@ -62,9 +62,19 @@ queue·client 수·요청 bytes·page·tick count·pending mutation·reliable re
 
 stdin JSONL을 붙이는 경우 OS event loop와 별도 I/O thread를 사용하고 stdout에는 해당 protocol 응답만 출력한다. window/report 진단은 stderr 또는 명시 파일이다. window가 먼저 닫히는 경우에도 blocking stdin thread를 join하느라 프로세스가 종료되지 않는 문제를 해결해야 한다. fd-ready/비동기 transport 또는 명시적으로 종료 가능한 I/O 수명을 선택한다. timeout/EOF/창 종료의 host stop 정책도 표시한다.
 
-MCP는 실제 protocol adapter이며 기존 JSONL과 같은 stdout에 혼합하지 않는다. initialize·capability/tool schema·호출·실패·deadline/cancel·shutdown을 공식 spec/고정 SDK와 검증한다. backend는 같은 Client를 사용하고 tool마다 새 Engine을 만들지 않는다. MCP 구현 전 placeholder tools를 지원 기능으로 나열하지 않는다. 별도 SDK 조사/lock/stdio conformance 계약을 먼저 추가한다.
+MCP는 실제 protocol adapter이며 기존 JSONL과 같은 stdout에 혼합하지 않는다. version별 discovery/초기화·capability/tool schema·호출·실패·deadline/cancel·transport 종료를 공식 spec/고정 SDK와 검증한다. backend는 같은 Client를 사용하고 tool마다 새 Engine을 만들지 않는다. MCP 구현 전 placeholder tools를 지원 기능으로 나열하지 않는다.
 
 bridge migration은 기존 C ABI·buffer token·capacity·atomic_commands의 preflight/commit/StepReport 의미를 유지한다. CLI service만 먼저 연결했으면 managed/bridge까지 같은 session에 attach했다고 보고하지 않는다. 기존 atomic batch를 비원자적인 request 반복으로 바꾸는 migration은 허용하지 않는다.
+
+## MCP 공식 기준선 조사와 채택 조건
+
+2026-10-16 공식 조사에서 [2026-07-28 versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)은 per-request metadata·`server/discover` 기반이며 `initialize` handshake가 없다. [2025-11-25 lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)은 `initialize`→`notifications/initialized`를 사용한다. 두 시대를 지원하면 각각 시험하고, legacy 초기화 시험만으로 최신 규격 준수를 주장하지 않는다. protocol의 stateless 요청은 엔진 world를 요청마다 재생성하라는 뜻이 아니다. 계속 살아 있는 SessionHost에 명시적 session/attachment를 연결한다.
+
+Luna xhigh의 [rmcp 3.5.1 manifest](https://docs.rs/crate/rmcp/3.5.1/source/Cargo.toml)·[features](https://docs.rs/crate/rmcp/3.5.1/features) 확인은 edition 2024·MSRV 1.88·Apache-2.0을 기록했다. 첫 후보는 exact `=3.5.1`, defaults off, `server`/`transport-io`이며 typed macro handler를 쓰면 `macros`를 추가한다. HTTP/OAuth/client child-process 기능은 stdio server의 필수 의존성이 아니다. Tokio/SDK 전이 의존성·실제 lock·Rust 1.94 빌드·notice는 채택 시 검증한다. 현재 Cargo에 추가하거나 두 protocol과 호환 시험한 결과가 아니다.
+
+[stdio 규칙](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)에 따라 stdout은 UTF-8 newline-delimited JSON-RPC만 사용한다. structurally invalid/unknown tool의 protocol error와 정상 호출의 engine 실행 실패(`isError`)를 구분한다. 취소는 service wait/관찰에 전파하되 이미 수락한 world command를 되돌렸다고 응답하지 않는다. EOF/detach의 session stop 여부는 host 소유권으로 정하고 별도 MCP shutdown method를 발명하지 않는다.
+
+첫 검증은 실제 CLI child의 discovery 또는 legacy initialize, tools/list/schema, valid/invalid call, engine error, cancel/deadline, EOF/exit와 모든 stdout line의 protocol 유효성을 확인한다. [공식 conformance 도구](https://github.com/modelcontextprotocol/conformance)의 server 실행은 HTTP URL을 받으므로 그것만으로 stdio 준수를 증명하지 않는다. [Inspector](https://modelcontextprotocol.io/docs/2026-07-28/tools/inspector) interoperability와 process-level suite를 구분한다. 선택한 외부 harness도 version을 고정하며 그 Node 실행 도구를 엔진의 V8/Chromium 의존성으로 포함하지 않는다.
 
 ## 입력·조건 대기·live capture
 

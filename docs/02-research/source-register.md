@@ -78,8 +78,12 @@
 | S68 | [gltf 1.4.1 manifest](https://docs.rs/crate/gltf/1.4.1/source/Cargo.toml), [reader](https://docs.rs/gltf/1.4.1/gltf/mesh/struct.Reader.html) | 2026-10-16: utils reader·default import의 image/base64/urlencoding 의존·라이선스/MSRV 선언 | defaults-off parser 후보. 실제 lock/타깃 검증 전 미채택 |
 | S69 | [png 0.18.1 Decoder](https://docs.rs/png/0.18.1/png/struct.Decoder.html) | 2026-10-16: decoder limits·caller buffer API와 제한 경계 | 기존 encoder 의존성의 bounded decoder 재사용안. image pipeline은 미구현 |
 | S70 | [hound 3.5.1 manifest](https://docs.rs/crate/hound/3.5.1/source/Cargo.toml), [API](https://docs.rs/hound/3.5.1/hound/) | 2026-10-16: PCM/float WAV·runtime dependency 없음·Apache-2.0 | bounded WAV importer 후보. 미채택·재생/streaming 완료 아님 |
+| S71 | [MCP 2026-07-28 versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning), [legacy lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle) | 2026-10-16: 현대 per-request/discover와 legacy initialize·transport 종료 차이 | 같은 engine session에 대한 MCP adapter의 버전별 검증. 현재 MCP 미구현 |
+| S72 | [rmcp 3.5.1 manifest](https://docs.rs/crate/rmcp/3.5.1/source/Cargo.toml), [features](https://docs.rs/crate/rmcp/3.5.1/features) | 2026-10-16 Luna 조사: Rust/MSRV/license·server/stdio/macros 기능과 전이 의존성 | exact-version SDK 후보. actual lock/build·두 protocol 시험 전 미채택 |
 
 S67~S70의 확인 결과와 CPU cook/GPU resource identity 적용안은 [에셋 상세 계약](../03-architecture/asset-import-cook-and-residency.md)에 둔다. 해당 추가는 포맷 조사이며 새 dependency를 Cargo에 설치한 결과가 아니다.
+
+S71~S72는 [session service의 MCP 기준선](../03-architecture/session-control-service.md)에 연결한다. 조사 확인과 실제 SDK 조합/stdio conformance 통과를 구분한다.
 
 ## 조사 실패·부족 기록
 

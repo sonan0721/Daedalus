@@ -55,6 +55,8 @@ bank는 actor 실행 동안 Frame backing을 소유한다. callback에서 decode
 
 low-level AudioConfig validator·기존 limit·`PCM_FRAME_BYTES`를 공개해 runtime이 검증과 Frame layout을 다시 정의하지 않게 한다.
 
+전체 native feature의 strict Clippy에서 offline/native service를 inline으로 둔 enum의 크기 차이를 확인했다. private backend owner는 startup에서 한 번 Box로 보관하며 Play/query마다 Box를 만들지 않는다. metadata 사전 회계는 Box pointer만 세지 않고 선택 가능한 service owner의 보수적 pointee 크기도 포함한다. 이는 mixer 내부 heap/driver 전체 footprint를 계측하는 것은 아니다. backend-before-bank drop 순서와 공개 API는 보존한다.
+
 추가 source 리뷰에서 기존 reap이 호출마다 stopped-index Vec를 새로 할당하고 offline process 뒤에도 allocation 오류를 낼 수 있음을 확인했다. 공통 voice arena는 free-slot 저장 공간을 사전 확보한 뒤 stopped slot을 직접 정리해 반복 scratch를 없앤다. offline 출력 Vec와 reap의 필요한 용량은 mixer clock을 진행하기 전에 확보한다. PCM을 이미 진행한 뒤 발생한 allocation 실패를 clock 미진행으로 보고하지 않는다. bank 준비·native 출력에 같은 arena를 사용하고 별도 reaper를 만들지 않는다.
 
 ## 공통 operation·voice ID와 결과

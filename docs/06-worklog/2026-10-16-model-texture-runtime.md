@@ -41,3 +41,11 @@ cargo check -p daedalus-content --lib --target wasm32-unknown-unknown --locked
 결과: CPU69/69, fmt·strict Clippy·Wasm library compile 통과. Wasm 실행 검증을 뜻하지 않는다. 네 새 regression은 native/byte binding과 revalidation, legacy source digest 동등성, component 오류/충돌, 명시적 detach/pinned clone 뒤 reopen 및 geometry/PNG backing 생존을 다룬다. 전체 renderer/CLI source는 작업 중이라 workspace/실제 GPU gate는 미실행이다.
 
 공개 원본 Cube의 세 source는 hash를 바꾸지 않고 ignored `dist/qa-assets/model-runtime-project/`에 준비했다. 두 asset StableId를 두 entity에 연결해 후속 실제 view/capture에서 geometry/texture 공유를 확인할 입력이다. 이 입력 준비를 runtime 통과로 계산하지 않는다.
+
+## 통합 전 리뷰·자동화 checkpoint
+
+CLI의 공통 loader와 packet capture adapter, 공통 geometry/asset stats JSON 변환 및 기존 smoke의 opt-in `--models`를 Luna xhigh가 작성했다. script는 기존 offline glTF/PNG 생성과 authority/native window 제어를 재사용한다. model scene은 실제 참조하는 model descriptor만 남겨 불필요한 atlas/audio import를 하지 않는다. 별도 process의 SessionId 숫자가 같아도 정상인 현재 process-local 규칙을 확인해 잘못된 cross-process 부등식 검사를 제거했다.
+
+조정자 독립 실행: `python3 -m unittest discover -s scripts -p 'test_*.py'`는54건/6.832초로 통과했고 docs/diff 검사도 통과했다. 이는 Python 회귀이며 실제 `--models` 바이너리 검사는 renderer/CLI 통합 뒤다. field 매핑 자체를 그대로 반복하는 단순 테스트는 추가하지 않고 실제 capture/view의 출력 검증을 사용한다.
+
+renderer source 리뷰에서는 queued write 이전 transaction, 모델이 없는 legacy path, 불필요한 packed vertex→byte Vec 복사, cache hit/miss 계측 시점, last_submission 갱신 및 write0 frame의 callback/ledger 개수 제한을 확인·수정 요청했다. 특히 staging byte 한도만으로 callback 수가 제한되지 않으므로3개 in-flight submission 계약을 보완했다. 아직 해당 renderer focused/GPU 검사는 미통과 상태다.

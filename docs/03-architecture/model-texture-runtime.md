@@ -82,6 +82,7 @@ sampler는 `ModelTextureRef::sampler()`의 min/mag·mip none/nearest/linear·wra
 | sampler entries | active256/total512 |
 | texture/sampler bind groups | active1024/total2048 |
 | GPU upload staging | 별도 hard128 MiB; 모든 queued buffer/texture write를 제출 완료까지 유지 |
+| packet in-flight submissions | 기본/상한3개; write가0인 draw도 포함해 ledger/completion callback 수를 제한 |
 | CPU upload scratch | 별도 hard128 MiB; geometry pack/필요한 upload 복사·padding의 동시 peak |
 | 자체 resource bookkeeping | 별도8 MiB의 보수적 고정-record/entry accounting; driver 내부 overhead 추정으로 사용하지 않음 |
 
@@ -94,6 +95,8 @@ packet validation, slot 계획, 신규 byte/entry/staging/scratch 합산, evicti
 모든 fallible 준비 뒤 slot write와 해당 draw를 같은 queue 순서/submission으로 commit한다. write를 queue에 넣고 후보를 포기한 뒤 old packet을 변경된 slot으로 그리지 않는다. 이후에도 실패 가능한 단계가 남으면 alternate slot 또는 이전 값 복구라는 실제 transaction을 구현해야 한다. staging은 completion callback/watermark가 지난 뒤 회수하고 submit 성공을 완료로 보지 않는다. redraw에서 GPU 완료를 기다리는 Poll::Wait를 새로 넣지 않는다. 기존 batch capture의 명시적 완료 대기는 live path와 구분한다.
 
 staging 계측에는 loading overlay uniform도 포함한다. 후보가 Busy여도 old packet의 필요한 frame write를 감당할 수 있으면 실제 old draw를 submit하고 그 identity를 반환한다. old frame조차 submit할 수 없으면 typed ResidencyBusy를 반환한다. window loop는 그 acquired surface frame을 drop하고 다음 redraw를 기다리며 present·frame count·presented metadata를 갱신하지 않는다. 실제 draw 없이 Ok(old packet)을 반환해 미초기화 frame을 present하는 경로를 금지한다.
+
+byte 한도만으로 submission ledger와 callback 수를 제한할 수 없다. 변경 write가 없는 draw도3개 in-flight 제한에 포함하고 queue mutation 전에 admission한다. 완료 watermark가 지난 submission만 ledger에서 제거한다. 모든 submit 뒤 그 frame이 사용한 geometry·texture·sampler·bind group·untextured model용 default texture의 last_submission을 현재 serial로 갱신한다. unchanged/old-ready frame도 갱신하며 최초0 값을 유지한 채 in-flight resource를 completed eviction 대상으로 삼지 않는다.
 
 ## 실제 실행·보고와 반복 검사
 

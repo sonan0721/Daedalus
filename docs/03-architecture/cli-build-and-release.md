@@ -16,6 +16,12 @@ Rust 의존성의 package ID·버전·license 선언·source checksum과 배포 
 
 기본 CPU 제어 경로와 capture/window feature를 manifest에 기록한다. native live checkpoint의 `window` feature에 imported audio consumer checkpoint부터 `native-audio`를 추가한다. 실제 package feature는 `native-audio,window`이며 capture·renderer·offline mixer·실제 CPAL backend를 포함한다. Linux host에는 `libasound.so.2`가 필요하고 archive는 ALSA를 bundle하지 않는다. 두 native CI package는 `--assets --audio`의 공통 smoke를 실행하고 Linux linkage를 별도로 확인한다. `daedalus view` 실행·GPU 부재의 오류 계약을 유지하되 CI의 archive smoke는 display가 필요 없는 CPU 경로로 수행한다. 실행 파일 하나를 배포했다고 C# SDK·CoreCLR runtime·외부 에셋·게임 export가 모두 포함됐다고 하지 않는다. 초기 archive의 실제 포함 범위를 사용 안내에 명시한다.
 
+### Imported audio 의존성의 curated 원문 보완
+
+P03.2c의 strict package는 새 의존성10개의 license 원문 누락으로 중단했다. 고정된 objc2 upstream `LICENSE.md`는 MIT-only crate와 `Zlib OR Apache-2.0 OR MIT` crate를 구분하지만 표준 약관 전문을 담지는 않는다. 이 실제 upstream scope 파일을 exact package/VCS/checksum으로 보존하고, 그 선언에 해당하는 canonical 약관은 기존 고정 SPDX commit의 reference text로 명확히 구분해 함께 싣는다. package-specific copyright holder를 추정해 채우지 않는다. upstream scope에 적힌 SDK 관련 설명도 원문과 함께 보존하며 이 파일 수집을 모든 배포 조건의 검토 완료로 표시하지 않는다.
+
+현재 collector는 supplemental reference에도 전체 expression의 identifier 검증을 수행하므로 MIT reference만 붙여 Zlib 제한을 우회할 수 없다. 이번 구현은 승인된 identifier set에 **Zlib 한 개만 명시적으로 추가**하고 기존 pinned `spdx/license-list-data` commit `31ba1a50e5397e00a304dbadc76531740e89ee48`의 `text/Zlib.txt` bytes/hash를 확인한다. 알 수 없는 identifier·변경된 version/checksum/path·hash 불일치는 계속 오류다. `declared_spdx_reference`로 upstream scope를 지우거나 arbitrary expression 자동 허용으로 바꾸지 않는다. 원문과 reference의 provenance·선언식 일치·triple expression/unknown 거부 회귀와 두 target strict collection을 검증한 뒤 package를 다시 만든다.
+
 ## 버전과 로컬 관리
 
 `daedalus --version`은 실제 crate SemVer를 표시한다. build manifest에는 schema version, CLI version, exact Git commit, dirty 여부, target triple, Cargo profile, feature 목록, Rust toolchain, binary SHA-256, build 식별자를 남긴다. 조회하지 못한 값은 임의로 채우지 않는다. build 전후 HEAD를 비교해 변경 시 중단하며 dirty 여부는 양쪽 결과를 합친다. dirty 빌드는 로컬에서 허용하되 공개 릴리스 후보와 구분하고 tag 후보는 build 후에도 clean이어야 한다. 이는 source snapshot이나 byte-for-byte 재현 빌드 증명과 다르다.

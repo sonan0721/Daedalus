@@ -382,6 +382,7 @@ impl AudioService<OfflineBackend> {
                 "offline render frames must be in 1..=1,048,576",
             ));
         }
+        self.voices.prepare_reap_capacity(self.voices.slots.len())?;
         let samples_len = frames.checked_mul(2).ok_or(AudioError::AllocationFailed)?;
         let mut samples = Vec::new();
         samples
@@ -396,7 +397,7 @@ impl AudioService<OfflineBackend> {
             .ok_or_else(|| AudioError::Backend("offline renderer was not started".to_owned()))?;
         renderer.on_start_processing();
         renderer.process(&mut samples, 2);
-        self.reap_stopped()?;
+        self.voices.reap_stopped_prepared();
         Ok(samples)
     }
 }
@@ -533,7 +534,8 @@ impl VoiceArena {
     }
 
     fn prepare_insert(&mut self) -> Result<(), AudioError> {
-        if self.free.is_empty() {
+        let needs_new_slot = self.free.is_empty();
+        if needs_new_slot {
             if self.slots.len() >= u32::MAX as usize {
                 return Err(AudioError::VoiceCapacityReached);
             }
@@ -541,6 +543,12 @@ impl VoiceArena {
                 .try_reserve(1)
                 .map_err(|_| AudioError::AllocationFailed)?;
         }
+        let slot_count_after_insert = self
+            .slots
+            .len()
+            .checked_add(usize::from(needs_new_slot))
+            .ok_or(AudioError::AllocationFailed)?;
+        self.prepare_reap_capacity(slot_count_after_insert)?;
         Ok(())
     }
 
@@ -575,31 +583,40 @@ impl VoiceArena {
     }
 
     fn reap_stopped(&mut self) -> Result<usize, AudioError> {
-        let mut stopped = Vec::new();
-        stopped
-            .try_reserve_exact(self.slots.len())
-            .map_err(|_| AudioError::AllocationFailed)?;
-        stopped.extend(self.slots.iter().enumerate().filter_map(|(index, slot)| {
-            slot.voice
+        self.prepare_reap_capacity(self.slots.len())?;
+        Ok(self.reap_stopped_prepared())
+    }
+
+    fn prepare_reap_capacity(&mut self, maximum_slot_count: usize) -> Result<(), AudioError> {
+        let additional_free_slots = maximum_slot_count.saturating_sub(self.free.len());
+        self.free
+            .try_reserve(additional_free_slots)
+            .map_err(|_| AudioError::AllocationFailed)
+    }
+
+    fn reap_stopped_prepared(&mut self) -> usize {
+        debug_assert!(self.free.capacity() >= self.slots.len());
+        let mut reaped = 0;
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if !slot
+                .voice
                 .as_ref()
                 .is_some_and(|voice| voice.state() == PlaybackState::Stopped)
-                .then_some(index)
-        }));
-        self.free
-            .try_reserve(stopped.len())
-            .map_err(|_| AudioError::AllocationFailed)?;
-        for index in &stopped {
-            let slot = &mut self.slots[*index];
+            {
+                continue;
+            }
+
             slot.voice.take();
             self.live_count -= 1;
             if let Some(generation) = slot.generation.checked_add(1) {
                 slot.generation = generation;
-                self.free.push(*index as u32);
+                self.free.push(index as u32);
             } else {
                 slot.retired = true;
             }
+            reaped += 1;
         }
-        Ok(stopped.len())
+        reaped
     }
 
     fn checked_slot_mut(&mut self, handle: VoiceHandle) -> Result<&mut VoiceSlot, AudioError> {
@@ -720,7 +737,10 @@ mod tests {
         );
         // Kira removes a stopped sound from its mixer storage at the next processing boundary.
         first.render_offline(64).unwrap();
-        assert!(first.play(&clip, 1.0, 0.0).is_ok());
+        let recycled_voice = first.play(&clip, 1.0, 0.0).unwrap();
+        assert_ne!(recycled_voice, voice);
+        assert!(!first.contains_voice(voice));
+        assert!(first.contains_voice(recycled_voice));
         assert!(matches!(
             PcmClip::from_interleaved(48_000, 2, vec![0.0, f32::NAN]),
             Err(AudioError::InvalidInput(_))
@@ -796,6 +816,36 @@ mod tests {
         service.stop(looping).unwrap();
         service.render_offline(512).unwrap();
         assert!(!service.contains_voice(looping));
+    }
+
+    #[test]
+    fn repeated_reaping_reuses_prepared_free_slot_storage() {
+        let mut service = AudioService::offline(
+            AudioConfig {
+                max_voices: 4,
+                internal_buffer_frames: 64,
+            },
+            48_000,
+        )
+        .unwrap();
+        let clip = PcmClip::from_interleaved_slice(8_000, 1, &[0.5; 8]).unwrap();
+        let voice = service.play(&clip, 1.0, 0.0).unwrap();
+        let reserved_capacity = service.voices.free.capacity();
+        assert!(reserved_capacity >= service.voices.slots.len());
+
+        service.render_offline(2_048).unwrap();
+        assert_eq!(service.reap_stopped().unwrap(), 0);
+        assert!(!service.contains_voice(voice));
+        let free_count = service.voices.free.len();
+        let capacity_after_first_reap = service.voices.free.capacity();
+        assert_eq!(free_count, 1);
+        assert!(capacity_after_first_reap >= service.voices.slots.len());
+
+        for _ in 0..128 {
+            assert_eq!(service.reap_stopped().unwrap(), 0);
+            assert_eq!(service.voices.free.capacity(), capacity_after_first_reap);
+            assert_eq!(service.voices.free.len(), free_count);
+        }
     }
 
     #[test]

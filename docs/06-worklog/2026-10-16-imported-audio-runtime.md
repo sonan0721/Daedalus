@@ -36,6 +36,8 @@ Luna의 audio 변경을 source 리뷰하고 조정자가 같은 shared target에
 
 Luna의 strict all-target Clippy는 feature-off/native 각각 통과했다. 첫 feature-off Clippy의 needless return 지적을 수정·재실행했다. 조정자의 broad workspace/CLI·public WAV·실제 장치·clean package 검증은 아직 대기다. 이 저수준 시험은 준비된 clip API만 확인하며 imported project consumer나 P07 전체를 통과시키지 않는다.
 
+후속 source 리뷰는 reap마다 stopped-index Vec를 만들고 offline process 뒤에 fallible allocation이 남는 문제를 확인했다. 계약 `a77d9ee` 후 Luna가 공통 arena의 사전 capacity 확보·in-place reap으로 수정했다. 출력과 cleanup 저장 공간을 mixer 진행 전에 확보하고 이후 정리는 infallible 경로로 실행한다. 128회 repeated reap의 free-slot capacity 유지·stale/recycled generation 회귀를 추가했다. Luna feature-off6pass/native6pass+1ignored 및 두 strict Clippy가 통과했고, 조정자도 `cargo test -p daedalus-audio --all-features --locked` 6pass/0fail/1ignored를 확인했다. ignored 로그는 `dist/project-evidence/p03-audio-lowlevel-reaper.log`다. allocator 전체 profile이나 개발 시간 개선 배율을 측정한 것은 아니다.
+
 ## 조사 한계
 
 버전 고정 docs.rs API 세 페이지 조회는 실패했다. local registry의 Kira0.12.5 source를 읽어 Frame Arc sharing/loop/state/final clamp를 확인했다. 이후 local VCS metadata의 commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`로 upstream StaticSoundData raw 원문을 확보·대조했으며 다른 raw 페이지 일부는 실패했다. browser audio·loopback/audibility·다른 장치/플랫폼은 현재 미검증이다.

@@ -650,9 +650,9 @@ mod tests {
         PCM_FRAME_BYTES, PcmClip, probe_default_output_device,
     };
     use kira::Frame;
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use kira::sound::PlaybackState;
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     use std::time::{Duration, Instant};
 
     fn constant_clip(value: f32, frames: usize) -> PcmClip {
@@ -925,7 +925,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     #[test]
     #[ignore = "requires an actual CPAL output device and is a diagnostic, not a CI test"]
     fn native_cpal_voice_progress_and_completion_diagnostic() {
@@ -1084,6 +1084,305 @@ mod tests {
         assert_eq!(service.active_voice_count(), 0);
         assert!(!service.contains_voice(voice));
         println!("native_reap=ok reaped={reaped} active_voice_count=0 contains_voice=false");
+    }
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    #[test]
+    #[ignore = "requires an actual CPAL default output device; direct-stream diagnostic only"]
+    fn direct_cpal_default_stream_callback_progress_diagnostic() {
+        use kira::backend::cpal::cpal;
+        use kira::backend::cpal::cpal::traits::{DeviceTrait, HostTrait};
+        let startup_started = Instant::now();
+        let host = cpal::default_host();
+        let host_id = host.id();
+        let device = host
+            .default_output_device()
+            .expect("CPAL default output device is required for this diagnostic");
+        let device_id = device
+            .id()
+            .expect("CPAL default output device ID must be available");
+        assert_eq!(device_id.host(), host_id);
+        let supported_config = device
+            .default_output_config()
+            .expect("default output configuration must be available");
+        let sample_format = supported_config.sample_format();
+        let config = supported_config.config();
+        assert!(config.channels > 0, "default output must have channels");
+        observe_direct_cpal_stream(
+            "default_output",
+            host_id,
+            device_id,
+            device,
+            config,
+            sample_format,
+            startup_started.elapsed(),
+        );
+    }
+
+    #[cfg(all(feature = "native", target_os = "macos", not(target_arch = "wasm32")))]
+    #[test]
+    #[ignore = "requires CoreAudio default output; same-device HAL route comparison"]
+    fn direct_cpal_same_device_hal_callback_progress_diagnostic() {
+        use kira::backend::cpal::cpal;
+        use kira::backend::cpal::cpal::traits::{DeviceTrait, HostTrait};
+
+        let startup_started = Instant::now();
+        let host = cpal::default_host();
+        let host_id = host.id();
+        let default_device = host
+            .default_output_device()
+            .expect("CPAL default output device is required for the HAL comparison");
+        let default_device_id = default_device
+            .id()
+            .expect("default output device ID must be available");
+        assert_eq!(default_device_id.host(), host_id);
+        let default_supported_config = default_device
+            .default_output_config()
+            .expect("default output config must be available");
+        let default_sample_format = default_supported_config.sample_format();
+        let baseline_config = default_supported_config.config();
+        assert_eq!(
+            baseline_config.buffer_size,
+            cpal::BufferSize::Default,
+            "the baseline request must retain CPAL's default buffer"
+        );
+
+        let devices = host
+            .devices()
+            .expect("CPAL output device enumeration must be available");
+        let mut matching_device_count = 0usize;
+        let mut enumerated_match = None;
+        for device in devices {
+            let device_id = device
+                .id()
+                .expect("every enumerated device must provide an ID for exact matching");
+            if device_id == default_device_id {
+                matching_device_count += 1;
+                if enumerated_match.is_none() {
+                    enumerated_match = Some(device);
+                }
+            }
+        }
+        assert_eq!(
+            matching_device_count, 1,
+            "same-device HAL comparison requires exactly one enumerated handle matching the default ID"
+        );
+        let enumerated_device =
+            enumerated_match.expect("exactly one same-ID enumerated handle must be retained");
+        let enumerated_device_id = enumerated_device
+            .id()
+            .expect("matching enumerated device ID must remain available");
+        assert_eq!(enumerated_device_id, default_device_id);
+        assert_eq!(enumerated_device_id.host(), host_id);
+
+        let enumerated_supported_config = enumerated_device
+            .default_output_config()
+            .expect("same-ID enumerated device output config must be available");
+        let enumerated_sample_format = enumerated_supported_config.sample_format();
+        let enumerated_config = enumerated_supported_config.config();
+        assert_eq!(
+            enumerated_config.channels, baseline_config.channels,
+            "same physical device reported a different output channel count"
+        );
+        assert_eq!(
+            enumerated_config.sample_rate, baseline_config.sample_rate,
+            "same physical device reported a different default output rate"
+        );
+        assert_eq!(
+            enumerated_sample_format, default_sample_format,
+            "same physical device reported a different sample format"
+        );
+        assert_eq!(
+            enumerated_config.buffer_size, baseline_config.buffer_size,
+            "same physical device reported a different default buffer request"
+        );
+
+        let current_default_id = host
+            .default_output_device()
+            .expect("default output device must remain available before HAL stream creation")
+            .id()
+            .expect("default output ID must remain available before HAL stream creation");
+        assert_eq!(
+            current_default_id, default_device_id,
+            "system default output changed during same-device HAL comparison setup"
+        );
+        println!(
+            "same_device_hal_comparison default_device_id={default_device_id} enumerated_device_id={enumerated_device_id} matching_handles={matching_device_count} default_config={baseline_config:?} default_reported_format={default_sample_format:?} enumerated_config={enumerated_config:?} enumerated_reported_format={enumerated_sample_format:?} default_unchanged=true"
+        );
+
+        observe_direct_cpal_stream(
+            "same_id_enumerated_hal",
+            host_id,
+            enumerated_device_id,
+            enumerated_device,
+            baseline_config,
+            default_sample_format,
+            startup_started.elapsed(),
+        );
+    }
+
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    fn observe_direct_cpal_stream(
+        selection: &'static str,
+        host_id: kira::backend::cpal::cpal::HostId,
+        device_id: kira::backend::cpal::cpal::DeviceId,
+        device: kira::backend::cpal::cpal::Device,
+        config: kira::backend::cpal::cpal::StreamConfig,
+        reported_sample_format: kira::backend::cpal::cpal::SampleFormat,
+        selection_elapsed: Duration,
+    ) {
+        use kira::backend::cpal::cpal;
+        use kira::backend::cpal::cpal::traits::{DeviceTrait, StreamTrait};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        const POST_PLAY_TIMEOUT: Duration = Duration::from_secs(10);
+        const SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
+        const MINIMUM_CALLBACKS: u64 = 3;
+        const MAX_OBSERVATIONS: usize = 205;
+
+        struct CallbackCounts {
+            callbacks: AtomicU64,
+            frames: AtomicU64,
+            errors_xrun: AtomicU64,
+            errors_device_unavailable: AtomicU64,
+            errors_device_changed: AtomicU64,
+            errors_stream_invalidated: AtomicU64,
+            errors_other: AtomicU64,
+        }
+
+        let counters = Arc::new(CallbackCounts {
+            callbacks: AtomicU64::new(0),
+            frames: AtomicU64::new(0),
+            errors_xrun: AtomicU64::new(0),
+            errors_device_unavailable: AtomicU64::new(0),
+            errors_device_changed: AtomicU64::new(0),
+            errors_stream_invalidated: AtomicU64::new(0),
+            errors_other: AtomicU64::new(0),
+        });
+        assert!(config.channels > 0, "output stream config needs channels");
+        assert_eq!(config.buffer_size, cpal::BufferSize::Default);
+        let channels = u64::from(config.channels);
+        println!(
+            "direct_cpal_{selection}_config host={host_id:?} device_id={device_id} sample_rate={} channels={} reported_sample_format={reported_sample_format:?} requested_output_format=f32 buffer_size={:?} selection_elapsed_ms={}",
+            config.sample_rate,
+            config.channels,
+            config.buffer_size,
+            selection_elapsed.as_millis(),
+        );
+
+        let callbacks_for_data = Arc::clone(&counters);
+        let callbacks_for_error = Arc::clone(&counters);
+        let startup_started = Instant::now();
+        let stream = device
+            .build_output_stream::<f32, _, _>(
+                config,
+                move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                    data.fill(0.0);
+                    callbacks_for_data.callbacks.fetch_add(1, Ordering::Relaxed);
+                    callbacks_for_data
+                        .frames
+                        .fetch_add((data.len() as u64) / channels, Ordering::Relaxed);
+                },
+                move |error: cpal::Error| {
+                    let counter = match error.kind() {
+                        cpal::ErrorKind::Xrun => &callbacks_for_error.errors_xrun,
+                        cpal::ErrorKind::DeviceNotAvailable => {
+                            &callbacks_for_error.errors_device_unavailable
+                        }
+                        cpal::ErrorKind::DeviceChanged => {
+                            &callbacks_for_error.errors_device_changed
+                        }
+                        cpal::ErrorKind::StreamInvalidated => {
+                            &callbacks_for_error.errors_stream_invalidated
+                        }
+                        _ => &callbacks_for_error.errors_other,
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
+                },
+                None,
+            )
+            .expect("selected CPAL f32 output stream must build");
+        let build_elapsed = startup_started.elapsed();
+        let baseline_callbacks = counters.callbacks.load(Ordering::Relaxed);
+        let baseline_frames = counters.frames.load(Ordering::Relaxed);
+        let play_started = Instant::now();
+        stream
+            .play()
+            .expect("selected CPAL output stream must start");
+        let play_call_elapsed = play_started.elapsed();
+        let observation_started = Instant::now();
+        let deadline = observation_started + POST_PLAY_TIMEOUT;
+        println!(
+            "direct_cpal_{selection}_started build_elapsed_ms={} stream_play_call_ms={} callbacks_before_play={} frames_before_play={}",
+            build_elapsed.as_millis(),
+            play_call_elapsed.as_millis(),
+            baseline_callbacks,
+            baseline_frames,
+        );
+
+        let mut observations = 0usize;
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+            assert!(
+                observations < MAX_OBSERVATIONS,
+                "direct CPAL {selection} diagnostic exceeded its bounded {MAX_OBSERVATIONS} observations"
+            );
+            let elapsed = observation_started.elapsed();
+            let callbacks = counters.callbacks.load(Ordering::Relaxed);
+            let frames = counters.frames.load(Ordering::Relaxed);
+            let xrun = counters.errors_xrun.load(Ordering::Relaxed);
+            let device_unavailable = counters.errors_device_unavailable.load(Ordering::Relaxed);
+            let device_changed = counters.errors_device_changed.load(Ordering::Relaxed);
+            let stream_invalidated = counters.errors_stream_invalidated.load(Ordering::Relaxed);
+            let other_errors = counters.errors_other.load(Ordering::Relaxed);
+            observations += 1;
+            println!(
+                "direct_cpal_{selection}_observation={observations} elapsed_ms={} callbacks={} frames={} errors={{xrun:{xrun},device_unavailable:{device_unavailable},device_changed:{device_changed},stream_invalidated:{stream_invalidated},other:{other_errors}}}",
+                elapsed.as_millis(),
+                callbacks.saturating_sub(baseline_callbacks),
+                frames.saturating_sub(baseline_frames),
+            );
+
+            let now = Instant::now();
+            std::thread::sleep(SAMPLE_INTERVAL.min(deadline.saturating_duration_since(now)));
+        }
+
+        let final_callbacks = counters.callbacks.load(Ordering::Relaxed);
+        let final_frames = counters.frames.load(Ordering::Relaxed);
+        let error_counts = (
+            counters.errors_xrun.load(Ordering::Relaxed),
+            counters.errors_device_unavailable.load(Ordering::Relaxed),
+            counters.errors_device_changed.load(Ordering::Relaxed),
+            counters.errors_stream_invalidated.load(Ordering::Relaxed),
+            counters.errors_other.load(Ordering::Relaxed),
+        );
+        let post_play_elapsed = observation_started.elapsed();
+        let callback_delta = final_callbacks.saturating_sub(baseline_callbacks);
+        let frame_delta = final_frames.saturating_sub(baseline_frames);
+        println!(
+            "direct_cpal_{selection}_summary selection_elapsed_ms={} build_elapsed_ms={} stream_play_call_ms={} post_play_elapsed_ms={} observations={} callbacks={} frames={} errors={{xrun:{},device_unavailable:{},device_changed:{},stream_invalidated:{},other:{}}}",
+            selection_elapsed.as_millis(),
+            build_elapsed.as_millis(),
+            play_call_elapsed.as_millis(),
+            post_play_elapsed.as_millis(),
+            observations,
+            callback_delta,
+            frame_delta,
+            error_counts.0,
+            error_counts.1,
+            error_counts.2,
+            error_counts.3,
+            error_counts.4,
+        );
+
+        assert!(
+            callback_delta >= MINIMUM_CALLBACKS && frame_delta > 0,
+            "direct CPAL {selection} stream made no sustained callback/frame progress during the bounded {POST_PLAY_TIMEOUT:?} observation: callbacks={callback_delta}, frames={frame_delta}, elapsed={post_play_elapsed:?}, errors={error_counts:?}"
+        );
+        drop(stream);
     }
 
     #[cfg(not(feature = "native"))]

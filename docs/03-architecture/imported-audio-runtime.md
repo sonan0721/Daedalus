@@ -2,6 +2,8 @@
 
 상태: 구현·로컬/package·PR13/CI/main 인수 확인 · 2026-10-16 · P03.2c만 통과, P03/P07/D1 진행 중
 
+후속 회귀(2026-10-17): 위 인수는 PR13 당시 checkpoint 기록이다. P03.3b.2의 현재/보존 이전 CLI 모두 현 환경의 native finite voice 종료 검사에 실패했고, 직접 Kira/CPAL 진단에서도 진행을 관측하지 못했다. [native 진단 계약](native-audio-progress-diagnostics.md)과 [최신 실패 기록](../06-worklog/2026-10-16-project-asset-activation.md)을 따른다. CPU/offline 결과는 유지하지만 현재 native 출력 정상·새 PR 인수로 과거 통과를 재사용하지 않는다. backend 생성 성공과 실제 처리 진행/Stopped를 구분하며, 장애를 시간 경과만으로 Ended로 바꾸지 않는다. 향후 device-health/복구 API는 아직 구현하지 않았다.
+
 ## 목적과 선행 조건
 
 P03.2a/b는 각각 PR11/PR12의 로컬·실제 GPU/native·clean package·CI/main 동일 tree까지 인수했다. 이번 계약은 같은 PreparedProject의 imported WAV를 실제 Kira mixer와 native 출력에서 소비하게 한다. 별도 WAV player나 다른 권한 actor를 만들지 않는다. 전체 P03.2·D1/D2/D3는 계속 미완료다.

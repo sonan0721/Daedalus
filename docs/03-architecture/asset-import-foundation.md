@@ -23,6 +23,8 @@ model은 default scene을 사용하고, default가 없으면 scene 1개인 경�
 
 base-color는 sRGB 의미, alpha는 linear 값이며 normal/data map을 color로 잘못 해석하지 않는다. UV 없는 geometry는 untextured material에만 허용한다. glTF의 material factor·UV·sampler 의미를 잃지 않는다. 첫 3D opaque color mip은 versioned linear-light box filter 뒤 sRGB encoding으로 생성한다. odd dimension·1×N·known-color를 검사한다. atlas는 nearest/no-mip으로 유지한다. 미지원 alpha-aware mip/재질을 조용히 근사하지 않는다.
 
+image leaf key는 width/height·layout·color/settings도 포함한다. 같은 RGBA byte sequence를 1×4와 2×2로 해석한 이미지는 다른 resource다. mip extent는 [wgpu-types 27.0.1 Extent3d](https://docs.rs/wgpu-types/27.0.1/wgpu_types/struct.Extent3d.html#method.mip_level_size)의 `max(1, base >> level)`과 일치해야 한다. 홀수 축을 ceil 절반으로 만들거나 edge texel을 버리지 않고 source footprint의 면적을 반영해 filtering한다. base 전체와 각 mip을 계산용으로 다시 clone하지 않으며 row/chunk 취소 지점을 유지한다.
+
 sampler는 각 축 ClampToEdge/MirroredRepeat/Repeat, magnification nearest/linear, minification nearest/linear와 mip 없음/nearest/linear를 구분한다. 반복 여부 bool이나 두 filter 값만으로 합치지 않는다. 생략된 filtering의 엔진 기본값은 문서화하고, 명시된 값을 IR/key와 후속 GPU sampler에 보존한다. 이는 [glTF filtering/wrapping 규격](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#samplers)의 구분이며 2026-10-16 API 리뷰에서 첫 표현의 손실을 찾아 보완했다.
 
 ### v1 저작 settings와 atlas JSON
@@ -90,9 +92,12 @@ payload는 생성 시 검증하고 immutable getter/Arc로 공유한다. hash를
 | atlas regions | 전체 16,384 |
 | audio | mono/stereo, 8~384 kHz, 10,000,000 frames 이하, aggregate decoded/cooked bytes에도 계수 |
 | CPU cooked catalog | unique payload+bounded metadata의 보수적 합계 128 MiB (mips 포함) |
+| engine-owned transient buffers | 동시에 살아 있는 parser copy·decoder/output 변환·cache codec buffer 합계 128 MiB + 64 KiB |
 | disk cache | 512 MiB / 1,024 entries, active/in-flight pin 회수 전 삭제 금지 |
 
 source·decoded·cooked·expanded instance·GPU residency는 서로 다른 예산이다. batch catalog ceiling은 동시에 존재하는 임의 개수의 catalog나 process RSS 한도가 아니다. P03.3 runtime admission이 active/candidate/in-flight 세대 전체를 별도 제한한다. 큰 allocation 전에 count/length/stride/row/sample 계산을 checked arithmetic으로 확인한다. decoder 내부 limit만 믿지 않는다. cancellation은 파일/primitive/row/sample chunk 경계에서 확인하고, 단일 foreign parser 호출의 강제 선점 보장은 하지 않는다.
+
+transient 한도는 `ImportLimits.max_parser_scratch_bytes`로 표현한다. 초기 API의 GLB-copy 중심 32 MiB 안은 PNG/캐시 buffer까지 적용하면 허용한 64 MiB RGBA를 직렬화할 수 없어 payload buffer 128 MiB와 framing 여유 64 KiB로 보완했다. Vec→Arc 변환에서 두 buffer가 동시에 존재하는 peak도 계수하며, header 88 bytes만으로 단일 4096² PNG가 실패하도록 두지 않는다. 실제 GLB BIN copy는 여전히 source32 MiB 이하이며 실제 크기만 계수한다. decoder 변환과 cache envelope를 동시에 불필요하게 보관하지 않는다. foreign parser 내부 allocator나 process RSS 전체가 이 값 이하라는 보장은 아니다. 각 축/개별 resource ceiling을 만족해도 동시 aggregate/transient 한도를 넘으면 위치 있는 LimitExceeded로 실패한다.
 
 ## Resolver·cache·무효화
 
@@ -119,8 +124,9 @@ JSON summary는 source/catalog identity, asset kind/leaf identity·geometry/imag
 | Luna xhigh 담당 | 소유 파일 | 공유·검사 |
 | --- | --- | --- |
 | content core | assets/mod·types·source·cache와 해당 tests, content project.rs/lib.rs/Cargo.toml·Cargo.lock | 먼저 immutable IR/driver context/entrypoint 공유. 단독 Cargo target/lock owner |
-| format drivers | assets/importers/**와 해당 tests | core API 합의 후 PNG/glTF/atlas/WAV 구현. core files/Cargo 편집·실행 금지, 담당자에게 focused 요청 |
-| CLI/automation | CLI main/project/assets 모듈과 해당 tests, smoke_project.py/test_smoke_project.py | 실제 entrypoint를 사용. Cargo는 core handback 뒤 실행 |
+| image/atlas/audio driver·공통 codec | assets/importers/mod·image·atlas·audio·binary와 해당 tests | 세 포맷/shared image cook·checked binary codec 소유. glTF 파일/core/Cargo 편집·실행 금지 |
+| glTF driver | assets/importers/gltf_static.rs·gltf_static_tests.rs | 다른 담당자의 미착수/소유권 이전 확인 후 병렬 착수. 같은 context·extensionless image cook·codec 재사용, Cargo 금지 |
+| CLI/automation | CLI main/project/assets 모듈과 해당 tests, smoke_project.py/test_smoke_project.py, release.yml의 명시 asset smoke step | 실제 entrypoint를 사용. Cargo는 core handback 뒤 실행 |
 
 root는 문서·공식 자료/에셋 provenance·source 리뷰·독립 통합 검증·commit/PR를 맡는다. manifest/lock과 공유 target은 한 번에 한 명만 소유한다. unresolved API 문제는 구현 전에 공유하고 placeholder 성공으로 넘기지 않는다.
 

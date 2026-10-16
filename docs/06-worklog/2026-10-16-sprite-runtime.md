@@ -98,3 +98,18 @@ target/debug/daedalus project view dist/qa-assets/sprite-runtime-project --secon
 원본 PNG hash는 위 착수 때와 동일하다. project digest는 `sha256:992a19db4c46f2f4875cb78fc7ad03a29bc307f061cec36ef7ac84160ce32906`, 출력 PNG SHA-256은 `b593ea465c69dc97a70aa70485fa459ffe97f9bd22458355326dd120ca028008`다. 실제 이미지를 열어 네 캐릭터의 upright orientation·nearest 픽셀·투명 영역을 확인했다. offscreen PNG이며 물리 window screenshot과 구분한다.
 
 네 sprite/two atlas ID는 unit quad1개/geometry upload88 bytes, texture upload1회/135,168 bytes, sampler1/pair1을 공유했다. 최초 instance write8회/576 bytes(각128+16), material4회/192 bytes, globals1회/128 bytes다. native는960×640/8초/939 present/TimeLimit, last-presented tick482/sequence483/ortho span4였다. geometry/texture/instance/material/globals 업로드가 최초 이후 증가하지 않았다. native counters/report와 offscreen 이미지가 별도 근거이며 이 run은144fps·고부하 품질·physical2D pan/zoom 입력 인수가 아니다.
+
+## clean local release package
+
+구현·검증 source를 `ee5570e98d727518d4b4ab9f9aeaf58833f587fa`로 커밋하고 clean tree에서 기존 `python3 scripts/package_cli.py`를 실행했다. native release compile12.23초, archive 무결성/manifest/notices/추출 CPU smoke 검증이 성공했다. package directory는 ignored `dist/local/daedalus-0.1.0-aarch64-apple-darwin-ee5570e98d72-clean-20261016T062217Z-3b00f22bbb2c4be98832e3a43524ebb3/`다.
+
+| identity | 값 |
+| --- | --- |
+| exact commit / dirty | `ee5570e98d727518d4b4ab9f9aeaf58833f587fa` / false |
+| target / features / toolchain | aarch64-apple-darwin / window / Rust1.94.0 |
+| binary SHA-256 | `36c91ac7ceec6393469a305162db5c45870730ee13b161d5091a26afbded4b16` |
+| archive SHA-256 | `d92d21b65beaede5f7bdc8ec4898c03e6e2c2b7c957a3670681cb3cac47a2d68` |
+| dependency inventory SHA-256 | `435b720646dbdb5c1e9b6885b6437b8bb53bb95d39593532eea2a560fb6a6d3f` |
+| third-party notices SHA-256 | `90f06b4836dab77d568a9d2cd903f19659f1de15135941f81511d3f2c009ca72` |
+
+archive를 `dist/qa-assets/p03-sprite-release-extracted/`에 풀고 추출 binary로 같은 `--assets --view --models --sprites` smoke를 실행해 **39/39 pass·14.522841초**를 확인했다. binary hash는 manifest와 일치했다. 로그는 `p03-sprite-package.log`, `p03-sprite-release-smoke.json`이다. 이것은 로컬 CLI archive이며 공개 tag/Release나 D1 제품 인수가 아니다. 최종 PR의 다섯 CI/두 packaged-assets step·main 동일 tree는 별도 확인한다.

@@ -112,3 +112,7 @@ P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복�
 구현 리뷰에서 정적인 binding map/StableId 복사와 painter sort를 tick마다 반복하는 경로를 찾아, 준비된 generation의 Arc backing을 extract/validation이 공유하도록 바꿨다. 공통 camera JSON 변환과 model/sprite batch-capture 검증 helper도 각각 한곳에서 사용한다. GPU pixel reference와 실제 native smoke는 목적이 달라 하나로 대체하지 않는다. 첫 workspace CPU259건은 통과했으며 최종 GPU/native/package 결과는 후속이다.
 
 PNG alpha 감사는 같은 readback/row-unpadding/encoder에 private 표현 policy와 in-place 변환을 추가하도록 계약했다. 별도 sprite PNG writer·추가 RGBA 배열·GPU intermediate를 만들지 않는다. 불변 데이터 공유의 retained CPU metadata도 별도8 MiB 사전 한도로 제한한다. 공통화 때문에 수명/메모리 비용을 숨기거나 잘못된 결과를 재사용하지 않도록 해당 오류·GPU regression을 추가한다. 새 native `--sprites` opt-in은 기존 임시 project/권한 제어/timeout/cleanup을 사용하며, 코드 공통화가 확인됐다는 이유만으로 개발 시간 개선율을 만들지 않는다.
+
+실제 후속 결과는 CPU264·Metal9·debug 통합 smoke39/14.288578초와 clean archive의 같은 smoke39/14.522841초다. 공개 원본의 네 sprite도 unit geometry1개/88 bytes·image1회/135,168 bytes를 공유했고8초 native939 present 동안 추가 geometry/texture/instance/material 업로드가 없었다. alpha255는 기존 byte를 보존하고 부분 alpha만 공통 backing 안에서 변환한다. 서로 다른 범위·profile의 단1회 관찰로 speedup을 주장하지 않는다. 실제 실패·수정·source/binary identity는 [작업 기록](../06-worklog/2026-10-16-sprite-runtime.md)을 따른다.
+
+이번 smoke의 float64 literal과 f32 wire 기대값 불일치도 DEV02의 후속 conformance 대상으로 기록한다. SDK/schema 생성 시 float의 실제 표현·정밀도와 JSON round-trip을 명시해 각 adapter가 잘못된 exact 비교를 반복하지 않도록 한다. 현재는 작은 fixture 기대값을 고쳤으며 범용 SDK 생성기를 구현한 것은 아니다.

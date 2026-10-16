@@ -64,11 +64,14 @@ CPU budget과 GPU expanded-instance/upload/residency budget은 다르다. 작은
 
 `project source digest`, `CPU cook key`, `GPU resource key`를 구분한다. 기존 input digest를 import cache key로 이름만 바꾸지 않는다.
 
-- CPU key: importer ID/version·IR/schema·settings·원본 byte hash·실제 소비한 전이 dependency hash·해당 target 변환 정책. payload와 manifest를 검증한 뒤 atomic publish한다.
+- import/parse key: container source bytes·parser/importer version·실제 읽은 dependency identity. `.gltf/.glb` 변경을 다시 해석해야 하는지 판정한다.
+- leaf CPU cook key: importer/cooker ID/version·IR/layout schema·settings·해당 출력이 실제 소비한 descriptor/payload 또는 canonical IR hash·target 변환 정책. payload와 manifest를 검증한 뒤 atomic publish한다.
 - GPU key: cooked payload hash·resource layout version·format/color-space/mip 정책. device resident handle은 장치 세대와 수명을 별도로 가진다. sampler는 독립 key로 공유할 수 있다.
 - Project generation: scene/source digest와 실제 채택된 asset cook identity 집합. 개별 asset reload와 scene authority command의 revision을 혼동하지 않는다.
 
 image/audio/geometry의 변환 경계를 분리한다. PNG-only 수정은 필요한 image와 material generation을 갱신하되 mesh position/index를 다시 cook하지 않는다. atlas rect 변경은 image decode를 반복하지 않는다. WAV 변경은 geometry key를 바꾸지 않는다. `.bin`/GLB geometry·importer version·설정·의존성 제거/경로 변경은 영향받는 결과를 반드시 무효화한다. mtime만으로 cache hit를 판정하지 않는다.
+
+whole GLB source hash를 모든 geometry leaf key에 넣으면 embedded PNG만 바꿔도 geometry를 다시 cook하는 모순이 생긴다. container 재해석과 leaf 재사용을 분리한다. geometry는 실제 소비한 accessor descriptor/attribute/index payload를 key로 삼고 무관한 image bytes·node instance transform·material binding을 제외한다. image는 외부/embedded 위치와 관계없이 실제 encoded payload와 image settings로 판정한다. atlas rect 검증은 해당 image의 dimensions를 확인하되 rect-only 변경으로 PNG를 다시 decode하지 않는다. source 재해석·range 해시·leaf cook·GPU upload count를 각각 기록하며 전체가 O(1)이라고 주장하지 않는다.
 
 cache corruption·누락 dependency·취소·실패 산출물은 성공 hit가 아니다. cache 파일과 resource는 포맷/version/hash/길이를 검증하며 budget에 따른 정리 정책을 둔다. warm no-change의 재사용 효과와 잘못된 재사용을 함께 측정한다.
 
@@ -101,3 +104,23 @@ CLI load/validate/inspect/capture와 후속 MCP는 같은 importer/IR/cache/serv
 - cold/warm no-change·PNG edit·buffer edit·atlas metadata edit·WAV edit·실패 reload에 대해 wall time, read/decode/cook/upload 수, 수동 단계, active identity와 capture를 남긴다. 실제 측정 전 속도 배율을 약속하지 않는다.
 
 첫 구현을 시작할 때 public IR/API·수치 예산·소유 파일·lock owner와 위 항목의 실행 명령을 더 고정한다. 이 설계 문서가 생성되었다는 이유로 현재 P01/P03/DEV03을 완료 처리하지 않는다.
+
+## P03.1 착수 전 source 감사와 예산 후보
+
+2026-10-16 read-only 감사는 `PreparedProject`의 mesh map·byte API가 direct JSON mesh source만 알고, renderer의 24-byte vertex와 shader에는 UV/texture/sampler가 없음을 확인했다. audio adapter는 decoded PCM을 받을 수 있지만 WAV parser는 없다. import와 실제 GPU/2D/audio 사용은 별도 연결 작업이며 이 차이를 이름만 있는 asset catalog로 가리지 않는다.
+
+첫 CPU 경계는 host-neutral `daedalus_content::assets`와 byte-map/native-contained resolver·versioned model/image/atlas/PCM catalog다. 기존 public `ProjectMesh`/`ProjectVertex`·`.meshes()`·renderer `Vertex`·schema 1 의미를 불필요하게 바꾸지 않는다. 신규 모델의 UV/material/primitive/node 정보는 별도 IR/cooked payload에 담고, 기존 내부 GPU layout에는 명시 layout version으로 연결한다. skin/animation 등 미지원 요구는 위치 있는 오류로 거부한다. 미래 기능을 위해 지금 모든 generic accessor/animation runtime을 구현하는 것으로 범위를 늘리지 않는다.
+
+아래는 아직 채택/빌드 결과가 아닌 **수치 후보**다. P02 foundation 통과 뒤 public API·native/byte 일치·aggregate 계산·취소/resident 수명을 리뷰해 확정한다.
+
+| 항목 | 후보와 구분 |
+| --- | --- |
+| 기존 project | source 합계 64 MiB·asset 256·entity 16,384·vertex 1,000,000·index 3,000,000 및 legacy JSON mesh 8 MiB 유지 |
+| dependency source | 새 imported file당 32 MiB 이하, 전체 source 64 MiB가 우선. 최대 1,026 unique file 후보는 기존 direct-file 258과 별도 import 설정에서 명시 |
+| decoded image | 각 축 4096·RGBA aggregate 64 MiB. source 크기와 decoded 크기를 각각 계수 |
+| audio | 기존 PCM 최대 10,000,000 frames·mono/stereo·8~384 kHz 유지. 최대 stereo float 약 80 MB를 decoded aggregate에도 계수 |
+| CPU cooked resident | 합계 128 MiB. geometry/image/audio 각각 최대치가 동시에 들어간다고 허용하지 않음 |
+| disk cache | project/engine-owned 512 MiB·1,024 entries 후보. active/in-flight entry를 무조건 지워 hit인 척하지 않음 |
+| GPU | 기존 preferred/hard 64/128 MiB와 texture budget을 합쳐 다시 계약. 무제한 별도 image cache 금지 |
+
+P03.1 CPU import/cook 뒤 P03.2가 실제 model primitive·texture·sprite/audio adapter를 연결한다. 전체 P03는 invalidation·연속 reload·last-good·실제 소비 증거를 모두 필요로 한다. 최종 2D/audio/animation 인수는 관련 P05/P07/P09 기능과 함께 검증하며 P번호를 엄격한 숫자 순서 phase로 오해하지 않는다. dependency 채택·새 notice/lock·Wasm compile·실제 외부 asset provenance는 아직 미검증이다.

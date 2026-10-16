@@ -152,6 +152,8 @@ Luna xhigh의 [rmcp 3.5.1 manifest](https://docs.rs/crate/rmcp/3.5.1/source/Carg
 
 ## 입력·조건 대기·live capture
 
+같은 native surface frame의 비동기 readback·동적 readiness·공통 ticket handoff·별도 image/spool budget·artifact lease는 [live capture 상세 계약](live-capture-and-artifacts.md)에서 구체화한다. 아직 해당 구현은 미착수이며 현재 live_capture capability는 false다.
+
 AI input은 정상 action/device/UI 경로로 주입하고 accepted/drop/focus release와 assigned tick을 기록한다. 현재 window observer가 입력을 drop할 수 있으므로 게임플레이 press/release 상태를 그 observer만으로 권한화하지 않는다. observer 포화/focus loss 때 held key가 영구 유지되지 않는 계약이 필요하다. editor camera와 game input capture 여부도 관찰 가능하게 한다.
 
 condition wait는 유한 deadline·session/tick·검사 대상·cancel token을 가진다. authority condition과 frame presented condition을 구분한다. timeout을 조건 성립으로 바꾸지 않는다. manual mode에서 시간을 기다리기만 할지 explicit step을 수행할지 호출자가 명시한다.
@@ -181,6 +183,6 @@ attachment는 inspect/input/mutate/manual-step/capture/shutdown capability를 �
 
 P02.1 종료 시 조정자의 로컬 all-feature workspace 검사는 CPU 158건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 첫 Linux PR 검사의 terminal/credit 회수 경쟁과 수정 후 CI는 별도로 추적한다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 별도 회귀로 확인한다. 세부 입력·binary identity·각 실행 시점과 한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
 
-legacy `LiveSession`은 같은 mailbox/stop primitive를 사용하지만 count-only AtomicUsize result credit와 기존 단일 result receiver는 유지한다. owned ticket 서비스와 accounting 의미가 달라 강제로 통합하지 않았다. 이 남은 migration은 P02.1c/DEV01 미완료이며 두 path의 테스트를 유지한다. CLI protocol 2와 실제 project window는 후속 P02.2 adapter로 연결·검증했다. MCP·SDK attach와 P02 전체 제품 gate는 계속 열려 있다. process I/O 극단 사례는 후속 native22 smoke에서 별도로 통과했으며 실제 F10/Step 경합도 release physical 입력으로 확인했다.
+legacy `LiveSession`은 공통 mailbox/stop에 더해 CreditPool/RAII result lease를 재사용한다. old count-only atomic reserve/release는 제거했고 private envelope→unresolved ID→leased outbox/channel→dequeue/report drain 수명으로 연결했다. public by-value/FIFO receiver는 의도한 fixture adapter 경계로 유지하며 owned-ticket API로 위장하지 않는다. 실패 중 적용 여부가 불명확한 ID는 OutcomeUnknown, queued-only는 Stopped이며 normal-stop final tick panic도 별도 unwind 경계로 마감한다.
 
-후속 [legacy 결과 수명 계약](legacy-session-result-lifetimes.md)은 fixture actor/FIFO API를 유지한 채 CreditPool/lease만 공통화한다. by-value 결과 소비 뒤 caller clone은 ticket reader retention과 다르다. panic 중 popped command의 unknown 결과도 명시하며 아직 해당 구현은 진행 전이다.
+P02.1c 로컬 workspace CPU 200건·focused runtime 65+2·기존 CPU18 project smoke·실제 loading window 종료를 통과했다. [legacy 상세 계약](legacy-session-result-lifetimes.md)과 worklog에 byte limit·UTF-8 cap·race coverage·패키지/CI 근거를 구분한다. CLI protocol 2와 실제 project window는 P02.2에서 검증했다. MCP/SDK attach·live capture/조건/입력과 P02 전체 제품 gate는 계속 미완료다.

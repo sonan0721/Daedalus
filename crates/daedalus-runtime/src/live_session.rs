@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
@@ -28,7 +28,10 @@ use thiserror::Error;
 use crate::{
     CpuBudgetDiagnostics, Engine, EngineBuildError, EngineBuilder, EngineConfig, EngineError,
     SnapshotPublication,
-    session_primitives::{LatestValueMailbox, MailboxError, StopSignal},
+    session_primitives::{
+        CreditError, CreditLease, CreditLimits, CreditPool, LatestValueMailbox, MailboxError,
+        StopSignal,
+    },
 };
 
 const MAX_COMMAND_CAPACITY: usize = 4_096;
@@ -40,6 +43,9 @@ const MAX_MESH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ENTITY_COORDINATE: f32 = 1_000_000.0;
 const MAX_MOVE_DELTA: f32 = 100.0;
 const STOP_SLEEP: Duration = Duration::from_millis(1);
+const RESULT_BYTES_PER_TICKET: usize = 8 * 1024;
+const MAX_REJECTION_BYTES: usize = 4 * 1024;
+const REJECTION_TRUNCATION_SUFFIX: &str = "…[truncated]";
 
 /// Configuration for one native live session. The ECS and background task budgets are the
 /// same explicit budgets used by [`EngineConfig`].
@@ -199,6 +205,8 @@ pub enum LiveCommandOutcome {
         by_generation: u64,
     },
     Stopped,
+    /// The actor failed before it could determine whether this command's effect was applied.
+    OutcomeUnknown,
     Rejected(String),
 }
 
@@ -309,6 +317,7 @@ pub struct LiveSessionStats {
     pub commands_rejected: u64,
     pub commands_superseded: u64,
     pub commands_stopped: u64,
+    pub commands_unknown: u64,
     pub terrain_jobs_started: u64,
     pub terrain_jobs_completed: u64,
     pub terrain_jobs_cancelled: u64,
@@ -341,6 +350,9 @@ pub struct LiveShutdownReport {
     pub active_job_capacity: usize,
     pub command_capacity: usize,
     pub result_capacity: usize,
+    pub result_byte_limit: usize,
+    pub result_credit_tickets_at_shutdown: usize,
+    pub result_credit_bytes_at_shutdown: usize,
     pub generation_iterations: u32,
     pub max_mesh_quads: usize,
     pub max_mesh_bytes: usize,
@@ -355,7 +367,7 @@ pub struct LiveShutdownReport {
 pub struct LiveSession {
     shared: Arc<SessionShared>,
     command_sender: SyncSender<CommandEnvelope>,
-    result_receiver: Mutex<Receiver<LiveCommandResult>>,
+    result_receiver: Mutex<Receiver<LeasedLiveCommandResult>>,
     frames: Arc<LatestValueMailbox<LiveFrame>>,
     join: Option<JoinHandle<LiveShutdownReport>>,
     config: LiveSessionConfig,
@@ -366,6 +378,11 @@ impl LiveSession {
     /// Validate all public limits before constructing worker pools or the simulation thread.
     pub fn start(config: LiveSessionConfig) -> Result<Self, LiveSessionStartError> {
         config.validate()?;
+        let result_byte_limit = result_byte_limit(config.result_capacity).ok_or_else(|| {
+            LiveSessionStartError::InvalidConfig(
+                "result_capacity byte budget overflowed".to_owned(),
+            )
+        })?;
 
         let (command_sender, command_receiver) = mpsc::sync_channel(config.command_capacity);
         let (result_sender, result_receiver) = mpsc::sync_channel(config.result_capacity);
@@ -373,11 +390,15 @@ impl LiveSession {
         let shared = Arc::new(SessionShared {
             stop_requested: StopSignal::default(),
             next_command_id: AtomicU64::new(1),
-            outstanding_results: AtomicUsize::new(0),
-            result_capacity: config.result_capacity,
-            stop_command_id: AtomicU64::new(0),
-            submit_gate: Mutex::new(()),
+            result_credits: CreditPool::new(CreditLimits {
+                tickets: config.result_capacity,
+                bytes: result_byte_limit,
+            }),
+            result_byte_limit,
+            submit_gate: Mutex::new(AdmissionGate::default()),
             termination: Mutex::new(None),
+            #[cfg(test)]
+            test_hooks: TestHooks::default(),
         });
         let frames = Arc::new(LatestValueMailbox::new(config.engine.snapshot_capacity));
         let actor_shared = Arc::clone(&shared);
@@ -437,7 +458,7 @@ impl LiveSession {
         {
             return Err(LiveCommandSubmitError::InvalidDelta);
         }
-        let _gate = match self.shared.submit_gate.try_lock() {
+        let mut gate = match self.shared.submit_gate.try_lock() {
             Ok(gate) => gate,
             Err(TryLockError::WouldBlock) => return Err(LiveCommandSubmitError::Busy),
             Err(TryLockError::Poisoned(_)) => return Err(LiveCommandSubmitError::Stopped),
@@ -445,40 +466,34 @@ impl LiveSession {
         if self.shared.stop_requested.is_requested() {
             return Err(LiveCommandSubmitError::Stopped);
         }
-        self.shared.reserve_result_credit()?;
-        let id = match self.shared.next_id() {
-            Ok(id) => id,
-            Err(error) => {
-                self.shared.release_result_credit();
-                return Err(error);
-            }
-        };
+        let credit = self.shared.reserve_result_credit()?;
+        let id = self.shared.next_id()?;
 
         if matches!(command, LiveCommand::Stop) {
-            if self
-                .shared
-                .stop_command_id
-                .compare_exchange(0, id, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                self.shared.release_result_credit();
+            if gate.stop.is_some() {
                 return Err(LiveCommandSubmitError::Stopped);
             }
+            gate.stop = Some(CommandEnvelope {
+                id,
+                command,
+                credit,
+            });
             self.shared.stop_requested.request();
             return Ok(CommandAccepted { id });
         }
 
-        match self
-            .command_sender
-            .try_send(CommandEnvelope { id, command })
-        {
+        match self.command_sender.try_send(CommandEnvelope {
+            id,
+            command,
+            credit,
+        }) {
             Ok(()) => Ok(CommandAccepted { id }),
-            Err(TrySendError::Full(_)) => {
-                self.shared.release_result_credit();
+            Err(TrySendError::Full(envelope)) => {
+                drop(envelope);
                 Err(LiveCommandSubmitError::QueueFull)
             }
-            Err(TrySendError::Disconnected(_)) => {
-                self.shared.release_result_credit();
+            Err(TrySendError::Disconnected(envelope)) => {
+                drop(envelope);
                 Err(LiveCommandSubmitError::Stopped)
             }
         }
@@ -499,8 +514,9 @@ impl LiveSession {
             Err(TryLockError::Poisoned(_)) => return Err(LiveResultReadError::Poisoned),
         };
         match receiver.try_recv() {
-            Ok(result) => {
-                self.shared.release_result_credit();
+            Ok(leased_result) => {
+                let LeasedLiveCommandResult { result, credit } = leased_result;
+                drop(credit);
                 Ok(Some(result))
             }
             Err(TryRecvError::Empty) => Ok(None),
@@ -538,13 +554,20 @@ impl LiveSession {
             join_duration_micros: started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
             ..report
         };
-        if let Ok(receiver) = self.result_receiver.get_mut() {
-            while let Ok(result) = receiver.try_recv() {
-                self.shared.release_result_credit();
-                report.remaining_command_results.push(result);
-            }
+        let receiver = self
+            .result_receiver
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while let Ok(leased_result) = receiver.try_recv() {
+            let LeasedLiveCommandResult { result, credit } = leased_result;
+            report.remaining_command_results.push(result);
+            drop(credit);
         }
         report.unread_command_results = report.remaining_command_results.len();
+        let credit_usage = self.shared.result_credits.usage();
+        report.result_byte_limit = self.shared.result_byte_limit;
+        report.result_credit_tickets_at_shutdown = credit_usage.tickets;
+        report.result_credit_bytes_at_shutdown = credit_usage.bytes;
         report
     }
 }
@@ -560,11 +583,12 @@ impl Drop for LiveSession {
 struct SessionShared {
     stop_requested: StopSignal,
     next_command_id: AtomicU64,
-    outstanding_results: AtomicUsize,
-    result_capacity: usize,
-    stop_command_id: AtomicU64,
-    submit_gate: Mutex<()>,
+    result_credits: CreditPool,
+    result_byte_limit: usize,
+    submit_gate: Mutex<AdmissionGate>,
     termination: Mutex<Option<LiveTermination>>,
+    #[cfg(test)]
+    test_hooks: TestHooks,
 }
 
 impl SessionShared {
@@ -575,33 +599,15 @@ impl SessionShared {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(termination);
     }
 
-    fn reserve_result_credit(&self) -> Result<(), LiveCommandSubmitError> {
-        loop {
-            let outstanding = self.outstanding_results.load(Ordering::Acquire);
-            if outstanding >= self.result_capacity {
-                return Err(LiveCommandSubmitError::ResultBacklogFull);
-            }
-            if self
-                .outstanding_results
-                .compare_exchange_weak(
-                    outstanding,
-                    outstanding + 1,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return Ok(());
-            }
-        }
-    }
-
-    fn release_result_credit(&self) {
-        let _ = self.outstanding_results.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |outstanding| Some(outstanding.saturating_sub(1)),
-        );
+    fn reserve_result_credit(&self) -> Result<CreditLease, LiveCommandSubmitError> {
+        self.result_credits
+            .try_reserve(RESULT_BYTES_PER_TICKET)
+            .map_err(|error| match error {
+                CreditError::TicketCapacity | CreditError::ByteCapacity => {
+                    LiveCommandSubmitError::ResultBacklogFull
+                }
+                CreditError::InvalidReservation => LiveCommandSubmitError::Stopped,
+            })
     }
 
     fn next_id(&self) -> Result<u64, LiveCommandSubmitError> {
@@ -614,6 +620,132 @@ impl SessionShared {
 struct CommandEnvelope {
     id: u64,
     command: LiveCommand,
+    credit: CreditLease,
+}
+
+#[derive(Default)]
+struct AdmissionGate {
+    stop: Option<CommandEnvelope>,
+}
+
+struct LeasedLiveCommandResult {
+    result: LiveCommandResult,
+    credit: CreditLease,
+}
+
+#[cfg(test)]
+struct TestHooks {
+    panic_after_registration: std::sync::atomic::AtomicBool,
+    panic_after_applied_step: std::sync::atomic::AtomicBool,
+    panic_after_final_tick_apply: std::sync::atomic::AtomicBool,
+    failure_tick: AtomicU64,
+    before_command_poll: ActorPauseGate,
+    before_regular_advance: ActorPauseGate,
+    before_result_flush: ActorPauseGate,
+}
+
+#[cfg(test)]
+impl Default for TestHooks {
+    fn default() -> Self {
+        Self {
+            panic_after_registration: std::sync::atomic::AtomicBool::new(false),
+            panic_after_applied_step: std::sync::atomic::AtomicBool::new(false),
+            panic_after_final_tick_apply: std::sync::atomic::AtomicBool::new(false),
+            failure_tick: AtomicU64::new(0),
+            before_command_poll: ActorPauseGate::default(),
+            before_regular_advance: ActorPauseGate::default(),
+            before_result_flush: ActorPauseGate::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ActorPauseState {
+    held: bool,
+    reached: bool,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ActorPauseGate {
+    state: Mutex<ActorPauseState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ActorPauseGate {
+    fn arm(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.held = true;
+        state.reached = false;
+    }
+
+    fn actor_checkpoint(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.held {
+            return false;
+        }
+        state.reached = true;
+        self.changed.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while state.held {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                state.held = false;
+                self.changed.notify_all();
+                break;
+            }
+            let (next_state, timeout) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next_state;
+            if timeout.timed_out() && state.held {
+                state.held = false;
+                self.changed.notify_all();
+            }
+        }
+        true
+    }
+
+    fn wait_until_reached(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.reached {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next_state, timeout) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next_state;
+            if timeout.timed_out() && !state.reached {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.held = false;
+        self.changed.notify_all();
+    }
 }
 
 #[derive(Clone)]
@@ -651,7 +783,8 @@ struct ActorState {
     queued_moves: VecDeque<(u64, [f32; 3])>,
     pending_moves: HashMap<CommandId, PendingMove>,
     next_world_command_id: u128,
-    result_outbox: VecDeque<LiveCommandResult>,
+    unresolved_results: BTreeMap<u64, CreditLease>,
+    result_outbox: VecDeque<LeasedLiveCommandResult>,
 }
 
 fn run_session_thread(
@@ -659,7 +792,7 @@ fn run_session_thread(
     shared: Arc<SessionShared>,
     frames: Arc<LatestValueMailbox<LiveFrame>>,
     command_receiver: Receiver<CommandEnvelope>,
-    result_sender: SyncSender<LiveCommandResult>,
+    result_sender: SyncSender<LeasedLiveCommandResult>,
     startup_sender: SyncSender<Result<EntityHandle, LiveSessionStartError>>,
 ) -> LiveShutdownReport {
     let engine = match EngineBuilder::new(config.engine.clone()).build() {
@@ -686,7 +819,7 @@ fn run_session_thread(
     actor.publish_frame(&frames);
     let _ = startup_sender.send(Ok(actor.entity));
 
-    let termination = match catch_unwind(AssertUnwindSafe(|| {
+    let mut termination = match catch_unwind(AssertUnwindSafe(|| {
         run_actor_loop(
             &mut actor,
             &shared,
@@ -701,29 +834,41 @@ fn run_session_thread(
     };
 
     shared.stop_requested.request();
-    let pending = drain_commands_at_stop(&shared, &command_receiver);
+    let (pending, stop_command) = drain_commands_at_stop(&shared, &command_receiver);
     for command in pending {
-        actor.stats.commands_accepted = actor.stats.commands_accepted.saturating_add(1);
-        actor.emit(command.id, LiveCommandOutcome::Stopped);
+        actor.complete_unprocessed_command(command, LiveCommandOutcome::Stopped);
     }
-    let stop_command_id = shared.stop_command_id.swap(0, Ordering::AcqRel);
-    if stop_command_id != 0 {
-        actor.stats.commands_accepted = actor.stats.commands_accepted.saturating_add(1);
-        actor.emit(stop_command_id, LiveCommandOutcome::Stopped);
+    if let Some(stop_command) = stop_command {
+        actor.complete_unprocessed_command(stop_command, LiveCommandOutcome::Stopped);
     }
-    actor.stop_pending_terrain();
-    actor.apply_final_tick();
+
+    let mut failed = !matches!(&termination, LiveTermination::StopRequested);
+    if !failed {
+        actor.stop_pending_terrain();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| actor.apply_final_tick(&shared))) {
+            termination = LiveTermination::Panicked(panic_text(payload));
+            failed = true;
+        }
+    }
+    if failed {
+        let _ = actor.cancel_pending_terrain();
+    }
     if let Err(error) = actor.engine.shutdown() {
-        actor.stats.last_error = Some(error.to_string());
+        actor.stats.last_error = Some(bound_rejection_message(error.to_string()));
         actor.stats.terrain_jobs_failed = actor.stats.terrain_jobs_failed.saturating_add(1);
     }
     actor.collect_completed_tasks(true);
-    actor.reject_pending_moves_as_stopped();
+    if failed {
+        actor.finish_unresolved_as_unknown();
+    } else {
+        actor.reject_pending_moves_as_stopped();
+        actor.finish_unresolved_as_stopped();
+    }
     actor.stats.active_jobs = 0;
     actor.publish_frame(&frames);
     actor.flush_results(&result_sender, true);
     shared.set_termination(termination.clone());
-    actor.report(termination)
+    actor.report(termination, &shared)
 }
 
 impl ActorState {
@@ -784,6 +929,7 @@ impl ActorState {
             queued_moves: VecDeque::new(),
             pending_moves: HashMap::new(),
             next_world_command_id: 1,
+            unresolved_results: BTreeMap::new(),
             result_outbox: VecDeque::new(),
         })
     }
@@ -792,26 +938,61 @@ impl ActorState {
         self.try_start_desired_job();
     }
 
-    fn run_command(&mut self, envelope: CommandEnvelope) {
+    fn run_command(&mut self, envelope: CommandEnvelope, _shared: &SessionShared) {
+        let CommandEnvelope {
+            id,
+            command,
+            credit,
+        } = envelope;
+        let previous = self.unresolved_results.insert(id, credit);
+        debug_assert!(previous.is_none(), "live command IDs are unique");
         self.stats.commands_accepted = self.stats.commands_accepted.saturating_add(1);
-        match envelope.command {
+        #[cfg(test)]
+        if _shared
+            .test_hooks
+            .panic_after_registration
+            .swap(false, Ordering::AcqRel)
+        {
+            _shared
+                .test_hooks
+                .failure_tick
+                .store(self.engine.clock().current_tick().0, Ordering::Release);
+            panic!("injected panic after command registration");
+        }
+        match command {
             LiveCommand::MoveEntity { delta } => {
-                self.queued_moves.push_back((envelope.id, delta));
+                self.queued_moves.push_back((id, delta));
                 self.stats.pending_move_commands = self
                     .pending_moves
                     .len()
                     .saturating_add(self.queued_moves.len());
                 self.frame_dirty = true;
             }
-            LiveCommand::RegenerateTerrain { seed } => self.regenerate(envelope.id, seed),
+            LiveCommand::RegenerateTerrain { seed } => self.regenerate(id, seed),
             LiveCommand::Stop => {
                 // Stop commands are handled out-of-band by LiveSession::try_command.
                 self.emit(
-                    envelope.id,
+                    id,
                     LiveCommandOutcome::Rejected("stop must use the independent stop path".into()),
                 );
             }
         }
+    }
+
+    fn complete_unprocessed_command(
+        &mut self,
+        envelope: CommandEnvelope,
+        outcome: LiveCommandOutcome,
+    ) {
+        let CommandEnvelope {
+            id,
+            command: _,
+            credit,
+        } = envelope;
+        let previous = self.unresolved_results.insert(id, credit);
+        debug_assert!(previous.is_none(), "live command IDs are unique");
+        self.stats.commands_accepted = self.stats.commands_accepted.saturating_add(1);
+        self.emit(id, outcome);
     }
 
     fn schedule_move(&mut self, command_id: u64, delta: [f32; 3]) {
@@ -892,14 +1073,13 @@ impl ActorState {
             return;
         };
         if let Some((old_generation, old_command_id)) = self.pending_generation_command.take() {
-            self.stats.commands_superseded = self.stats.commands_superseded.saturating_add(1);
-            self.result_outbox.push_back(LiveCommandResult {
-                id: old_command_id,
-                outcome: LiveCommandOutcome::Superseded {
+            self.emit(
+                old_command_id,
+                LiveCommandOutcome::Superseded {
                     generation: old_generation,
                     by_generation: generation,
                 },
-            });
+            );
         }
         for active in &self.jobs {
             if active.generation < generation {
@@ -955,10 +1135,11 @@ impl ActorState {
                 self.desired.submitted = true;
                 self.terrain.loading = false;
                 self.stats.terrain_jobs_failed = self.stats.terrain_jobs_failed.saturating_add(1);
-                self.stats.last_error = Some(error.to_string());
+                let message = error.to_string();
+                self.stats.last_error = Some(bound_rejection_message(message.clone()));
                 if let Some(command_id) = command_id {
                     self.pending_generation_command = None;
-                    self.reject(command_id, error.to_string());
+                    self.reject(command_id, message);
                 }
             }
         }
@@ -1048,7 +1229,7 @@ impl ActorState {
             Err(error) => {
                 self.terrain.loading = false;
                 self.stats.terrain_jobs_failed = self.stats.terrain_jobs_failed.saturating_add(1);
-                self.stats.last_error = Some(error.clone());
+                self.stats.last_error = Some(bound_rejection_message(error.clone()));
                 if let Some(command_id) = job.command_id {
                     self.pending_generation_command = None;
                     self.reject(command_id, error);
@@ -1102,13 +1283,27 @@ impl ActorState {
         self.frame_dirty |= had_steps;
     }
 
-    fn apply_final_tick(&mut self) {
+    fn apply_final_tick(&mut self, _shared: &SessionShared) {
         if self.pending_moves.is_empty() {
             return;
         }
         let result = self.engine.step_tick();
         match result {
-            Ok(report) => self.process_step_reports(vec![report]),
+            Ok(report) => {
+                #[cfg(test)]
+                if _shared
+                    .test_hooks
+                    .panic_after_final_tick_apply
+                    .swap(false, Ordering::AcqRel)
+                {
+                    _shared
+                        .test_hooks
+                        .failure_tick
+                        .store(report.tick.0, Ordering::Release);
+                    panic!("injected panic after final world step before result processing");
+                }
+                self.process_step_reports(vec![report]);
+            }
             Err(error) => {
                 self.stats.last_error = Some(error.to_string());
                 self.reject_pending_moves_as_stopped();
@@ -1116,15 +1311,23 @@ impl ActorState {
         }
     }
 
-    fn stop_pending_terrain(&mut self) {
+    fn cancel_pending_terrain(&mut self) -> Option<u64> {
         for job in &self.jobs {
             let _ = job.task.cancel();
         }
-        if let Some((_, command_id)) = self.pending_generation_command.take() {
-            self.emit(command_id, LiveCommandOutcome::Stopped);
-        }
+        let command_id = self
+            .pending_generation_command
+            .take()
+            .map(|(_, command_id)| command_id);
         self.terrain.loading = false;
         self.frame_dirty = true;
+        command_id
+    }
+
+    fn stop_pending_terrain(&mut self) {
+        if let Some(command_id) = self.cancel_pending_terrain() {
+            self.emit(command_id, LiveCommandOutcome::Stopped);
+        }
     }
 
     fn reject_pending_moves_as_stopped(&mut self) {
@@ -1138,45 +1341,66 @@ impl ActorState {
         self.stats.pending_move_commands = 0;
     }
 
+    fn finish_unresolved_as_stopped(&mut self) {
+        while let Some(command_id) = self.unresolved_results.first_key_value().map(|(id, _)| *id) {
+            self.emit(command_id, LiveCommandOutcome::Stopped);
+        }
+    }
+
+    fn finish_unresolved_as_unknown(&mut self) {
+        self.queued_moves.clear();
+        self.pending_moves.clear();
+        self.stats.pending_move_commands = 0;
+        self.pending_generation_command = None;
+        while let Some(command_id) = self.unresolved_results.first_key_value().map(|(id, _)| *id) {
+            self.emit(command_id, LiveCommandOutcome::OutcomeUnknown);
+        }
+    }
+
     fn reject(&mut self, command_id: u64, message: String) {
         self.emit(command_id, LiveCommandOutcome::Rejected(message));
     }
 
     fn emit(&mut self, command_id: u64, outcome: LiveCommandOutcome) {
+        let Some(credit) = self.unresolved_results.remove(&command_id) else {
+            // A terrain completion can arrive after cancellation or supersession. A command ID
+            // is terminalized once, and a stale duplicate has no result lease to move.
+            return;
+        };
         self.frame_dirty = true;
+        let outcome = match outcome {
+            LiveCommandOutcome::Rejected(message) => {
+                LiveCommandOutcome::Rejected(bound_rejection_message(message))
+            }
+            outcome => outcome,
+        };
         match outcome {
             LiveCommandOutcome::Applied { .. } | LiveCommandOutcome::TerrainReady { .. } => {
                 self.stats.commands_applied = self.stats.commands_applied.saturating_add(1);
-                self.result_outbox.push_back(LiveCommandResult {
-                    id: command_id,
-                    outcome,
-                });
             }
             LiveCommandOutcome::Superseded { .. } => {
                 self.stats.commands_superseded = self.stats.commands_superseded.saturating_add(1);
-                self.result_outbox.push_back(LiveCommandResult {
-                    id: command_id,
-                    outcome,
-                });
             }
             LiveCommandOutcome::Stopped => {
                 self.stats.commands_stopped = self.stats.commands_stopped.saturating_add(1);
-                self.result_outbox.push_back(LiveCommandResult {
-                    id: command_id,
-                    outcome,
-                });
+            }
+            LiveCommandOutcome::OutcomeUnknown => {
+                self.stats.commands_unknown = self.stats.commands_unknown.saturating_add(1);
             }
             LiveCommandOutcome::Rejected(_) => {
                 self.stats.commands_rejected = self.stats.commands_rejected.saturating_add(1);
-                self.result_outbox.push_back(LiveCommandResult {
-                    id: command_id,
-                    outcome,
-                });
             }
         }
+        self.result_outbox.push_back(LeasedLiveCommandResult {
+            result: LiveCommandResult {
+                id: command_id,
+                outcome,
+            },
+            credit,
+        });
     }
 
-    fn flush_results(&mut self, sender: &SyncSender<LiveCommandResult>, final_flush: bool) {
+    fn flush_results(&mut self, sender: &SyncSender<LeasedLiveCommandResult>, final_flush: bool) {
         while let Some(result) = self.result_outbox.pop_front() {
             match sender.try_send(result) {
                 Ok(()) => {}
@@ -1243,13 +1467,14 @@ impl ActorState {
         }
     }
 
-    fn report(&self, termination: LiveTermination) -> LiveShutdownReport {
+    fn report(&self, termination: LiveTermination, shared: &SessionShared) -> LiveShutdownReport {
         let final_entity_translation = self
             .engine
             .world()
             .transform(self.entity)
             .ok()
             .map(|(transform, _)| transform.translation);
+        let result_credit_usage = shared.result_credits.usage();
         LiveShutdownReport {
             termination,
             final_tick: self.engine.clock().current_tick().0,
@@ -1260,6 +1485,9 @@ impl ActorState {
             active_job_capacity: self.config.active_job_capacity,
             command_capacity: self.config.command_capacity,
             result_capacity: self.config.result_capacity,
+            result_byte_limit: shared.result_byte_limit,
+            result_credit_tickets_at_shutdown: result_credit_usage.tickets,
+            result_credit_bytes_at_shutdown: result_credit_usage.bytes,
             generation_iterations: self.config.generation_iterations,
             max_mesh_quads: self.config.max_mesh_quads,
             max_mesh_bytes: self.config.max_mesh_bytes,
@@ -1275,18 +1503,25 @@ fn run_actor_loop(
     shared: &SessionShared,
     frames: &LatestValueMailbox<LiveFrame>,
     command_receiver: &Receiver<CommandEnvelope>,
-    result_sender: &SyncSender<LiveCommandResult>,
+    result_sender: &SyncSender<LeasedLiveCommandResult>,
 ) -> Result<(), String> {
     let mut last_advance = Instant::now();
     loop {
+        #[cfg(test)]
+        let _ = shared.test_hooks.before_command_poll.actor_checkpoint();
         let mut received_command = false;
         while let Ok(command) = command_receiver.try_recv() {
-            actor.run_command(command);
+            actor.run_command(command, shared);
             received_command = true;
         }
         actor.collect_completed_tasks(false);
         actor.try_start_desired_job();
         actor.schedule_next_move();
+
+        #[cfg(test)]
+        if shared.test_hooks.before_regular_advance.actor_checkpoint() {
+            last_advance = Instant::now();
+        }
 
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(last_advance);
@@ -1294,6 +1529,28 @@ fn run_actor_loop(
         match actor.engine.advance_elapsed(elapsed) {
             Ok((clock, reports)) => {
                 actor.stats.deferred_ticks = clock.deferred_ticks;
+                #[cfg(test)]
+                let target_command_applied = reports.iter().any(|report| {
+                    report
+                        .commands
+                        .iter()
+                        .any(|result| actor.pending_moves.contains_key(&result.command_id))
+                });
+                #[cfg(test)]
+                if target_command_applied
+                    && shared
+                        .test_hooks
+                        .panic_after_applied_step
+                        .swap(false, Ordering::AcqRel)
+                {
+                    if let Some(report) = reports.last() {
+                        shared
+                            .test_hooks
+                            .failure_tick
+                            .store(report.tick.0, Ordering::Release);
+                    }
+                    panic!("injected panic after world step before result processing");
+                }
                 actor.process_step_reports(reports);
             }
             Err(error) => return Err(error.to_string()),
@@ -1301,6 +1558,10 @@ fn run_actor_loop(
         actor.collect_completed_tasks(false);
         actor.try_start_desired_job();
         actor.publish_frame(frames);
+        #[cfg(test)]
+        if !actor.result_outbox.is_empty() {
+            let _ = shared.test_hooks.before_result_flush.actor_checkpoint();
+        }
         actor.flush_results(result_sender, false);
 
         if shared.stop_requested.is_requested() {
@@ -1315,11 +1576,11 @@ fn run_actor_loop(
 fn drain_commands_at_stop(
     shared: &SessionShared,
     receiver: &Receiver<CommandEnvelope>,
-) -> Vec<CommandEnvelope> {
+) -> (Vec<CommandEnvelope>, Option<CommandEnvelope>) {
     // Submission uses try_lock and holds this guard only through one bounded try_send. Taking it
     // here closes the admission race: every accepted command is either in this drain or was
     // already consumed by the actor before it observed stop.
-    let _gate = shared
+    let mut gate = shared
         .submit_gate
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1327,7 +1588,9 @@ fn drain_commands_at_stop(
     loop {
         match receiver.try_recv() {
             Ok(command) => pending.push(command),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return pending,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                return (pending, gate.stop.take());
+            }
         }
     }
 }
@@ -1443,6 +1706,7 @@ fn empty_report(
     termination: LiveTermination,
     cpu_budget: Option<LiveCpuBudget>,
 ) -> LiveShutdownReport {
+    let result_byte_limit = result_byte_limit(config.result_capacity).unwrap_or(0);
     LiveShutdownReport {
         termination,
         final_tick: 0,
@@ -1453,6 +1717,9 @@ fn empty_report(
         active_job_capacity: config.active_job_capacity,
         command_capacity: config.command_capacity,
         result_capacity: config.result_capacity,
+        result_byte_limit,
+        result_credit_tickets_at_shutdown: 0,
+        result_credit_bytes_at_shutdown: 0,
         generation_iterations: config.generation_iterations,
         max_mesh_quads: config.max_mesh_quads,
         max_mesh_bytes: config.max_mesh_bytes,
@@ -1460,6 +1727,10 @@ fn empty_report(
         remaining_command_results: Vec::new(),
         join_duration_micros: 0,
     }
+}
+
+fn result_byte_limit(capacity: usize) -> Option<usize> {
+    capacity.checked_mul(RESULT_BYTES_PER_TICKET)
 }
 
 fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -1472,16 +1743,37 @@ fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+fn bound_rejection_message(message: String) -> String {
+    let mut bounded = String::with_capacity(message.len().min(MAX_REJECTION_BYTES));
+    if message.len() <= MAX_REJECTION_BYTES {
+        bounded.push_str(&message);
+        return bounded;
+    }
+
+    let payload_limit = MAX_REJECTION_BYTES - REJECTION_TRUNCATION_SUFFIX.len();
+    for character in message.chars() {
+        if bounded.len() + character.len_utf8() > payload_limit {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded.push_str(REJECTION_TRUNCATION_SUFFIX);
+    bounded
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
+    use std::{collections::BTreeSet, sync::Barrier};
 
+    use crate::session_primitives::CreditUsage;
     use daedalus_content::voxel::ChunkDimensions;
 
     use super::{
         LiveCommand, LiveCommandOutcome, LiveCommandSubmitError, LiveSession, LiveSessionConfig,
-        LiveSessionStartError,
+        LiveSessionStartError, LiveTermination, MAX_REJECTION_BYTES, REJECTION_TRUNCATION_SUFFIX,
+        RESULT_BYTES_PER_TICKET, bound_rejection_message, result_byte_limit,
     };
 
     fn fast_config() -> LiveSessionConfig {
@@ -1536,6 +1828,77 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    struct ActorPauseGuard<'a>(&'a super::ActorPauseGate);
+
+    impl Drop for ActorPauseGuard<'_> {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    fn pause_actor(session: &LiveSession) -> ActorPauseGuard<'_> {
+        let gate = &session.shared.test_hooks.before_command_poll;
+        gate.arm();
+        let guard = ActorPauseGuard(gate);
+        assert!(
+            gate.wait_until_reached(Duration::from_secs(5)),
+            "simulation actor did not reach the test pause"
+        );
+        guard
+    }
+
+    fn arm_pause_before_regular_advance(session: &LiveSession) -> ActorPauseGuard<'_> {
+        let gate = &session.shared.test_hooks.before_regular_advance;
+        gate.arm();
+        ActorPauseGuard(gate)
+    }
+
+    fn arm_pause_before_result_flush(session: &LiveSession) -> ActorPauseGuard<'_> {
+        let gate = &session.shared.test_hooks.before_result_flush;
+        gate.arm();
+        ActorPauseGuard(gate)
+    }
+
+    fn wait_for_termination(session: &LiveSession) -> LiveTermination {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match session.try_termination() {
+                Ok(Some(termination)) => return termination,
+                Ok(None) | Err(super::LiveStatusReadError::Busy) => {}
+                Err(super::LiveStatusReadError::Poisoned) => {
+                    panic!("session termination state was poisoned")
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for simulation termination"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn wait_for_shared_termination(shared: &super::SessionShared) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match shared.termination.try_lock() {
+                Ok(termination) if termination.is_some() => return,
+                Ok(_) | Err(std::sync::TryLockError::WouldBlock) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    panic!("session termination state was poisoned")
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for dropped session"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn credit_usage(session: &LiveSession) -> CreditUsage {
+        session.shared.result_credits.usage()
     }
 
     #[test]
@@ -1758,5 +2121,499 @@ mod tests {
             Err(LiveCommandSubmitError::InvalidDelta)
         );
         let _ = session.shutdown();
+    }
+
+    #[test]
+    fn result_budget_is_checked_and_reported_after_all_engine_leases_release() {
+        assert_eq!(result_byte_limit(4_096), Some(32 * 1024 * 1024));
+        assert_eq!(result_byte_limit(usize::MAX), None);
+
+        let session = LiveSession::start(LiveSessionConfig {
+            command_capacity: 1,
+            result_capacity: 2,
+            ..fast_config()
+        })
+        .unwrap();
+        let pause = pause_actor(&session);
+        let first = session
+            .try_command(LiveCommand::RegenerateTerrain { seed: 31 })
+            .unwrap();
+        assert_eq!(
+            credit_usage(&session),
+            CreditUsage {
+                tickets: 1,
+                bytes: RESULT_BYTES_PER_TICKET,
+            }
+        );
+        assert_eq!(
+            session.try_command(LiveCommand::MoveEntity {
+                delta: [1.0, 0.0, 0.0],
+            }),
+            Err(LiveCommandSubmitError::QueueFull)
+        );
+        assert_eq!(credit_usage(&session).tickets, 1);
+        let stop = session.try_command(LiveCommand::Stop).unwrap();
+        assert_eq!(credit_usage(&session).tickets, 2);
+        drop(pause);
+
+        let report = session.shutdown();
+        assert_eq!(report.result_byte_limit, 2 * RESULT_BYTES_PER_TICKET);
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+        assert_eq!(report.remaining_command_results.len(), 2);
+        assert!(
+            report
+                .remaining_command_results
+                .iter()
+                .any(|result| result.id == first.id)
+        );
+        assert!(
+            report
+                .remaining_command_results
+                .iter()
+                .any(|result| result.id == stop.id)
+        );
+    }
+
+    #[test]
+    fn id_exhaustion_returns_reserved_credit_without_admitting_a_command() {
+        let session = LiveSession::start(LiveSessionConfig {
+            result_capacity: 1,
+            ..fast_config()
+        })
+        .unwrap();
+        session
+            .shared
+            .next_command_id
+            .store(u64::MAX, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            session.try_command(LiveCommand::MoveEntity {
+                delta: [1.0, 0.0, 0.0],
+            }),
+            Err(LiveCommandSubmitError::IdExhausted)
+        );
+        assert_eq!(credit_usage(&session), CreditUsage::default());
+        let report = session.shutdown();
+        assert!(report.remaining_command_results.is_empty());
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+    }
+
+    #[test]
+    fn channel_result_holds_credit_until_dequeue_and_public_poll_releases_it() {
+        let session = LiveSession::start(LiveSessionConfig {
+            result_capacity: 1,
+            ..fast_config()
+        })
+        .unwrap();
+        let poll_pause = pause_actor(&session);
+        let flush_pause = arm_pause_before_result_flush(&session);
+        let command = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [1.0, 0.0, 0.0],
+            })
+            .unwrap();
+        drop(poll_pause);
+        assert!(flush_pause.0.wait_until_reached(Duration::from_secs(5)));
+        assert_eq!(credit_usage(&session).tickets, 1);
+        {
+            let receiver = session
+                .result_receiver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        }
+        drop(flush_pause);
+
+        let receiver_guard = session
+            .result_receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(session.try_result(), Err(super::LiveResultReadError::Busy));
+        drop(receiver_guard);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session
+            .try_latest_frame()
+            .is_none_or(|frame| frame.stats.commands_applied != 1)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "move did not reach a terminal result"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(credit_usage(&session).tickets, 1);
+        assert_eq!(
+            session.try_command(LiveCommand::MoveEntity {
+                delta: [1.0, 0.0, 0.0],
+            }),
+            Err(LiveCommandSubmitError::ResultBacklogFull)
+        );
+
+        let leased = {
+            let receiver = session
+                .result_receiver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loop {
+                match receiver.try_recv() {
+                    Ok(result) => break result,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        assert!(Instant::now() < deadline, "applied result was not flushed");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("result channel disconnected before shutdown")
+                    }
+                }
+            }
+        };
+        assert_eq!(leased.result.id, command.id);
+        assert_eq!(credit_usage(&session).tickets, 1);
+        drop(leased);
+        assert_eq!(credit_usage(&session), CreditUsage::default());
+        let second = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [1.0, 0.0, 0.0],
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_result(&session, second.id).outcome,
+            LiveCommandOutcome::Applied { .. }
+        ));
+        assert_eq!(credit_usage(&session), CreditUsage::default());
+        let report = session.shutdown();
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+    }
+
+    #[test]
+    fn bounded_rejection_copies_utf8_and_discards_large_capacity() {
+        let mut short_with_large_capacity = String::with_capacity(128 * 1024);
+        short_with_large_capacity.push_str("short diagnostic");
+        let short = bound_rejection_message(short_with_large_capacity);
+        assert_eq!(short, "short diagnostic");
+        assert!(short.capacity() < 128 * 1024);
+
+        let long = "界".repeat(MAX_REJECTION_BYTES);
+        let bounded = bound_rejection_message(long);
+        assert!(bounded.len() <= MAX_REJECTION_BYTES);
+        assert!(bounded.ends_with(REJECTION_TRUNCATION_SUFFIX));
+        assert!(bounded.is_char_boundary(bounded.len()));
+    }
+
+    #[test]
+    fn accepted_command_panicked_after_registration_finishes_unknown_once() {
+        let session = LiveSession::start(LiveSessionConfig {
+            command_capacity: 2,
+            result_capacity: 2,
+            ..fast_config()
+        })
+        .unwrap();
+        let pause = pause_actor(&session);
+        session
+            .shared
+            .test_hooks
+            .panic_after_registration
+            .store(true, std::sync::atomic::Ordering::Release);
+        let accepted = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [4.0, 0.0, 0.0],
+            })
+            .unwrap();
+        let queued = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [0.0, 1.0, 0.0],
+            })
+            .unwrap();
+        drop(pause);
+        let termination = wait_for_termination(&session);
+        assert!(matches!(termination, LiveTermination::Panicked(_)));
+        let expected_final_tick = session
+            .shared
+            .test_hooks
+            .failure_tick
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        let report = session.shutdown();
+        assert_eq!(report.stats.commands_unknown, 1);
+        assert_eq!(report.stats.commands_stopped, 1);
+        assert_eq!(report.final_tick, expected_final_tick);
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+        assert_eq!(report.remaining_command_results.len(), 2);
+        assert_eq!(
+            report
+                .remaining_command_results
+                .iter()
+                .find(|result| result.id == accepted.id)
+                .unwrap()
+                .outcome,
+            LiveCommandOutcome::OutcomeUnknown
+        );
+        assert_eq!(
+            report
+                .remaining_command_results
+                .iter()
+                .find(|result| result.id == queued.id)
+                .unwrap()
+                .outcome,
+            LiveCommandOutcome::Stopped
+        );
+    }
+
+    #[test]
+    fn applied_world_step_panicked_before_result_processing_is_unknown_without_extra_tick() {
+        let session = LiveSession::start(fast_config()).unwrap();
+        let initial = wait_for_frame(&session);
+        session
+            .shared
+            .test_hooks
+            .panic_after_applied_step
+            .store(true, std::sync::atomic::Ordering::Release);
+        let accepted = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [2.0, 0.0, 0.0],
+            })
+            .unwrap();
+        let termination = wait_for_termination(&session);
+        assert!(matches!(termination, LiveTermination::Panicked(_)));
+        let expected_final_tick = session
+            .shared
+            .test_hooks
+            .failure_tick
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        let report = session.shutdown();
+        assert_eq!(report.final_entity_translation, Some([2.0, 14.0, 0.0]));
+        assert!(report.final_tick > initial.tick);
+        assert_eq!(report.final_tick, expected_final_tick);
+        assert_eq!(report.stats.commands_unknown, 1);
+        assert_eq!(report.stats.commands_applied, 0);
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+        assert_eq!(report.remaining_command_results.len(), 1);
+        assert_eq!(report.remaining_command_results[0].id, accepted.id);
+        assert_eq!(
+            report.remaining_command_results[0].outcome,
+            LiveCommandOutcome::OutcomeUnknown
+        );
+    }
+
+    #[test]
+    fn final_stop_tick_panic_after_world_apply_is_caught_and_reported_unknown() {
+        let session = LiveSession::start(fast_config()).unwrap();
+        let poll_pause = pause_actor(&session);
+        let advance_pause = arm_pause_before_regular_advance(&session);
+        session
+            .shared
+            .test_hooks
+            .panic_after_final_tick_apply
+            .store(true, std::sync::atomic::Ordering::Release);
+        let accepted = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [3.0, 0.0, 0.0],
+            })
+            .unwrap();
+        drop(poll_pause);
+        assert!(advance_pause.0.wait_until_reached(Duration::from_secs(5)));
+        session.request_stop();
+        drop(advance_pause);
+
+        let termination = wait_for_termination(&session);
+        assert!(matches!(termination, LiveTermination::Panicked(_)));
+        let expected_final_tick = session
+            .shared
+            .test_hooks
+            .failure_tick
+            .load(std::sync::atomic::Ordering::Acquire);
+        let report = session.shutdown();
+        assert!(matches!(report.termination, LiveTermination::Panicked(_)));
+        assert_eq!(report.final_entity_translation, Some([3.0, 14.0, 0.0]));
+        assert_eq!(report.final_tick, expected_final_tick);
+        assert_eq!(report.stats.commands_unknown, 1);
+        assert_eq!(report.stats.commands_applied, 0);
+        assert_eq!(report.remaining_command_results.len(), 1);
+        assert_eq!(report.remaining_command_results[0].id, accepted.id);
+        assert_eq!(
+            report.remaining_command_results[0].outcome,
+            LiveCommandOutcome::OutcomeUnknown
+        );
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+    }
+
+    #[test]
+    fn request_stop_remains_out_of_band_when_result_credits_are_full() {
+        let session = LiveSession::start(LiveSessionConfig {
+            command_capacity: 1,
+            result_capacity: 1,
+            ..fast_config()
+        })
+        .unwrap();
+        let pause = pause_actor(&session);
+        let accepted = session
+            .try_command(LiveCommand::RegenerateTerrain { seed: 77 })
+            .unwrap();
+        assert_eq!(
+            session.try_command(LiveCommand::Stop),
+            Err(LiveCommandSubmitError::ResultBacklogFull)
+        );
+        session.request_stop();
+        drop(pause);
+        let report = session.shutdown();
+        assert_eq!(report.stats.commands_accepted, 1);
+        assert!(
+            report
+                .remaining_command_results
+                .iter()
+                .any(|result| result.id == accepted.id)
+        );
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+    }
+
+    #[test]
+    fn disconnected_result_receiver_drops_engine_leases() {
+        let mut session = LiveSession::start(fast_config()).unwrap();
+        let (sender, disconnected_receiver) = std::sync::mpsc::sync_channel(1);
+        drop(sender);
+        let previous = std::mem::replace(
+            &mut session.result_receiver,
+            std::sync::Mutex::new(disconnected_receiver),
+        );
+        drop(previous);
+
+        let accepted = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [1.0, 0.0, 0.0],
+            })
+            .unwrap();
+        session.request_stop();
+        let report = session.shutdown();
+        assert!(report.stats.commands_applied + report.stats.commands_stopped >= 1);
+        assert_ne!(accepted.id, 0);
+        assert!(report.remaining_command_results.is_empty());
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+    }
+
+    #[test]
+    fn poisoned_result_receiver_shutdown_recovers_and_releases_buffered_leases() {
+        let session = LiveSession::start(LiveSessionConfig {
+            result_capacity: 1,
+            ..fast_config()
+        })
+        .unwrap();
+        let accepted = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [1.0, 0.0, 0.0],
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session
+            .try_latest_frame()
+            .is_none_or(|frame| frame.stats.commands_applied != 1)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "move did not reach a terminal result"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _receiver = session
+                .result_receiver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("injected receiver mutex poison");
+        }));
+        assert!(poisoned.is_err());
+        assert_eq!(
+            session.try_result(),
+            Err(super::LiveResultReadError::Poisoned)
+        );
+
+        let report = session.shutdown();
+        assert_eq!(report.unread_command_results, 1);
+        assert_eq!(report.remaining_command_results[0].id, accepted.id);
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
+    }
+
+    #[test]
+    fn dropping_live_session_stops_actor_and_releases_result_leases() {
+        let session = LiveSession::start(fast_config()).unwrap();
+        let pause = pause_actor(&session);
+        let shared = std::sync::Arc::clone(&session.shared);
+        session
+            .try_command(LiveCommand::RegenerateTerrain { seed: 52 })
+            .unwrap();
+        drop(pause);
+        drop(session);
+        wait_for_shared_termination(&shared);
+        assert_eq!(shared.result_credits.usage(), CreditUsage::default());
+    }
+
+    #[test]
+    fn concurrent_submitters_racing_request_stop_get_exactly_one_terminal_each() {
+        let session = LiveSession::start(LiveSessionConfig {
+            command_capacity: 32,
+            result_capacity: 32,
+            ..fast_config()
+        })
+        .unwrap();
+        let first = session
+            .try_command(LiveCommand::MoveEntity {
+                delta: [0.25, 0.0, 0.0],
+            })
+            .unwrap();
+
+        let caller_count = 8;
+        let barrier = std::sync::Arc::new(Barrier::new(caller_count + 1));
+        let mut accepted = BTreeSet::from([first.id]);
+        thread::scope(|scope| {
+            let mut callers = Vec::with_capacity(caller_count);
+            for _ in 0..caller_count {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let session = &session;
+                callers.push(scope.spawn(move || {
+                    barrier.wait();
+                    session.try_command(LiveCommand::MoveEntity {
+                        delta: [0.5, 0.0, 0.0],
+                    })
+                }));
+            }
+            barrier.wait();
+            session.request_stop();
+            for caller in callers {
+                match caller.join().unwrap() {
+                    Ok(command) => {
+                        assert!(accepted.insert(command.id), "duplicate accepted command ID");
+                    }
+                    Err(
+                        LiveCommandSubmitError::Busy
+                        | LiveCommandSubmitError::Stopped
+                        | LiveCommandSubmitError::QueueFull
+                        | LiveCommandSubmitError::ResultBacklogFull,
+                    ) => {}
+                    Err(error) => panic!("unexpected submit error while stopping: {error}"),
+                }
+            }
+        });
+
+        let report = session.shutdown();
+        let terminal_ids = report
+            .remaining_command_results
+            .iter()
+            .map(|result| result.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(terminal_ids, accepted);
+        assert_eq!(terminal_ids.len(), report.remaining_command_results.len());
+        assert!(terminal_ids.len() <= 32);
+        assert_eq!(report.result_credit_tickets_at_shutdown, 0);
+        assert_eq!(report.result_credit_bytes_at_shutdown, 0);
     }
 }

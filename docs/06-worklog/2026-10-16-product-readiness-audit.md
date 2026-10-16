@@ -212,3 +212,15 @@ read-only 계획 감사는 체크리스트의 “full P02 전에 P03 전체 구�
 최종 P02는 MCP/SDK·UI·조건/입력/capture/trace/replay 등 원래 증거를 모두 필요로 한다. 어떤 요구도 제거하지 않았고 D1→D2→D3 순서를 바꾸지 않았다. 새 live-capture 문서는 뒤 단계 consumer 계약과 실제 비동기 PNG 인수 조건을 미리 리뷰하기 위한 것이며 아직 구현 기능이 아니다. 기초 gate와 최종 통합 gate를 같은 단어로 보고해 반복 재설계하는 문제를 줄인다.
 
 새 live capture 계약의 read-only 리뷰는 중요한 색공간 오류를 source로 확인했다. 현 renderer의 non-sRGB UNORM surface는 shader/overlay에서 이미 manual_srgb 인코딩하므로 worker가 다시 sRGB 변환하면 밝아진다. 계약을 byte 보존·BGRA swizzle·양 format의 known-color 시험으로 수정했다. wgpu present()의 unit 반환을 성공 presentation 판정으로 과장하지 않으며, 내부 submit을 가진 기존 renderer를 불필요하게 재작성하지 않고 같은 queue의 draw→copy→present 순서를 허용했다. dynamic readiness·one-shot responder·actor-only terminal publication·minimized pump·BufferView의 worker-local 수명도 구현 전 명시했다. 이 검토는 새 capture 실행/통과 근거가 아니다.
+
+## P02.1c 공통 결과 lease 구현과 검증
+
+Luna xhigh는 `live_session.rs`만 변경했다. 기존 CreditPool/CreditLease로 8 KiB/count 예약·RAII 반환을 재사용하고, Stop ID+lease를 submission gate의 한 slot에 함께 보관했다. command envelope→effect 전 unresolved ID table→leased outbox/channel→소비/report drain 순서로 소유권을 이동한다. 원래 by-value/FIFO public receiver는 유지하며 caller clone에 native ticket lifetime이 생겼다고 주장하지 않는다. Rejected 문자열은 최대 4096 UTF-8 bytes의 새 allocation으로 보존한다. 새 dependency·Cargo.lock 변경은 없다.
+
+실제 리뷰는 actor가 pop한 명령의 panic뿐 아니라 정상 stop의 final tick도 unwind 경계 밖에 있음을 찾았다. final tick에서 world 적용 뒤 panic을 주입해 실제 entity 변경과 exact ID의 OutcomeUnknown·추가 tick 없음·회수를 검증하도록 보완했다. normal 성공 결과는 유지하고 queue-only는 Stopped, 이미 확정한 결과는 덮어쓰지 않는다. 독립 read-only 감사는 이후 남은 confirmed source bug를 찾지 못했다. 이 감사는 formal concurrency proof가 아니다.
+
+담당자의 focused runtime은 65 unit+2 integration·strict Clippy·format을 통과했다. root source freeze 이후 `cargo check --workspace --all-features --locked`, fmt check, workspace all-feature CPU **200건**(hardware 3건 기본 ignored), all-target/all-feature strict Clippy, window CLI build가 통과했다. root log는 `dist/project-evidence/p02-legacy-leases-rust.log`다. 새 12개 회귀는 count/byte·queue/ID rollback, outbox/channel 보존, UTF-8/capacity, actor pop/post-apply/final-stop panic, receiver disconnect/poison/drop, Stop saturation과 public submit/stop barrier race를 포함한다. race 시험은 accepted ID와 terminal ID 집합의 exact 일치·무중복을 확인하며 race 0건의 일반 보장은 아니다.
+
+debug CLI SHA-256은 `211f853ec5ea37d0462d83fa1cdf9df1941ba219db2b764c7796e20e3156490e`다. 같은 binary의 기존 external-project CPU18 smoke가 통과했다(`p02-legacy-leases-project-smoke.json`, 관찰 1.197109초). 실제 Metal `view --seconds 2 --work-iterations 10000 --report ...`는 173 loading/surface frames·authority final tick 128, 실제 terrain job 1개 시작/취소·active 0·time_limit/stop_requested로 종료했다. `p02-legacy-leases-window.json`의 result_capacity 128은 byte limit 1 MiB·종료 credit count/bytes 0을 보고했다. 이 창 실행에는 command 입력을 하지 않았으며 명령 소비·failure 회귀는 별도 위 시험이 검증한다. frame 간격을 144fps 달성으로 환산하지 않는다.
+
+P02.2의 renderer/project-control source·Python·managed/bridge source는 바뀌지 않아 이전 native22·Python52·.NET 검증을 이 source의 새 실행처럼 복제해 기록하지 않았다. 필수 PR CI는 새 head에서 별도로 수행한다. P02 foundation의 로컬 기능 근거는 갖췄지만 PR 검사/병합 전에 P03 코드에 착수하지 않는다. 전체 P02·D1/D2/D3는 계속 미완료다.

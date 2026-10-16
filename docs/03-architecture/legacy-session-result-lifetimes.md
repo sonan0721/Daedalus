@@ -1,6 +1,6 @@
 # Legacy LiveSession의 결과 수명과 공통 credit
 
-상태: P02.1c 구현 전 계약 · 2026-10-16 · DEV01
+상태: P02.1c 구현·로컬 통합 검증, PR 검사 대기 · 2026-10-16 · DEV01
 
 ## 이 문서를 만든 이유
 
@@ -49,7 +49,11 @@ Luna xhigh가 `crates/daedalus-runtime/src/live_session.rs`와 필요할 때 `se
 - outbox/channel에 남은 결과는 charged, dequeue/report drain 뒤 반환, FIFO/Busy 호환.
 - command queue full에서 credit이 남은 Stop, result full에서 별도 request_stop, Stop ID/lease drain 경쟁.
 - receiver disconnect·폐기·정상 stop·terrain supersession/cancel의 무중복 terminal과 credit 0.
-- pop 직후 panic·실제 engine step 직후 panic의 exact accepted ID→Unknown, 실패 후 추가 tick 없음.
+- pop 직후 panic·실제 engine step 직후 panic·정상 stop의 final tick 적용 직후 panic의 exact accepted ID→Unknown, 실패 후 추가 tick 없음.
 - focused runtime tests/strict Clippy 후 workspace·기존 project CPU smoke·legacy 실제 loading/종료 회귀.
 
 P02.1c는 구현과 위 증거를 통과한 뒤에만 닫는다. P02.2는 이미 별도로 통과했고, live capture/조건·MCP/SDK·UI/action/reload/server와 P02 제품 gate·D1/D2/D3는 계속 미완료다.
+
+## 로컬 구현 근거
+
+Luna xhigh의 구현은 live_session.rs 한 파일이며 공통 primitive 자체를 중복 작성하지 않았다. focused runtime 65 unit+2 integration, root workspace all-feature CPU 200건·hardware 3건 기본 ignored·check/fmt/strict Clippy를 통과했다. public API barrier race는 accepted ID와 terminal ID 집합의 일치·무중복·회수를 확인하는 coverage이며 formal race proof가 아니다. root의 외부 project CPU18 smoke와 실제 Metal loading window 종료도 통과했고 default 128 ticket은 1 MiB byte limit·종료 credit 0을 보고했다. 정확한 binary/명령/현재 PR 상태는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.

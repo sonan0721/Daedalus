@@ -72,3 +72,11 @@ P01.1a~c의 좁은 기반만 체크했다. P01 전체·D1, 이후 별도 D2/D3�
 조정자는 `python3 scripts/smoke_project.py --cli target/debug/daedalus`로 18 checks를 독립 통과했다. empty init/no-overwrite, source identity, dynamic handle, 수락 전후 실제 state, exact command ID·Applied revision, stale RevisionConflict, snapshot/current tick, unsupported 오류와 정상 종료를 대조한다. 입력은 임시 external project이며 종료 후 정리한다. 같은 코드가 archive 추출 binary 검사에도 사용된다. CPU smoke는 GPU·visible window·managed 검사를 대체하지 않는다.
 
 `dist/project-evidence/cpu-smoke.json`의 executable SHA-256은 `532017431c2b982718c843cda6b489f7cbb9c93ff2c493e11aef53b8302b1d54`, warm 단일 관찰 wall time은 0.093575초다. 이전 수동 작업과 통제된 시간 비교는 없으므로 개선 배율을 쓰지 않는다. Python 전체 regression은 41건 통과했으며 응답 timeout/잘못된 JSON/과대 line 때 자식 process와 file handle 정리도 검사한다. package stub unit test의 project smoke는 mock 경계를 명시하고 실제 binary 시험과 구분한다.
+
+## 로컬 native 배포본
+
+`e4a172b015a502f3cd2c5d75fb5abb7e0de7e1bc`의 clean worktree에서 기존 `python3 scripts/package_cli.py`를 실행했다. macOS arm64 release/window build, dependency notice/inventory, archive/hash 검증, 추출 binary의 version/inspect와 공통 18-check project smoke가 통과했다. source build는 기존 target cache를 재사용했으며 이 관찰의 Cargo release build는 9.01초다. 과거 다른 feature/환경과의 성능 비교로 해석하지 않는다.
+
+ignored artifact directory는 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-e4a172b015a5-clean-20261016T002407Z-a337222d37f449238d24e36df9585d31/`다. manifest의 `dirty`는 false, features는 `window`, binary SHA-256은 `e203bbaebed0836047b0844cf90e0e8ec6ca9efd307e05b5bb726f8a7a12ed1b`다. 원본 소스·SDK를 다시 찾아야 init이 동작하는 경로는 제거했고, 추출 검사는 외부 임시 directory에서 수행한다.
+
+같은 package staging executable로 외부 project를 513×289 Metal PNG로 출력하는 것도 통과했다(`dist/project-evidence/packaged-project.png`). 새 interactive GUI 입력을 다시 시험한 결과는 아니며, 기존 fixture 창의 실제 입력 근거와 구분한다. tag/public Release는 만들지 않았다. PR의 native Linux/macOS 결과는 확인 후 별도 기록한다.

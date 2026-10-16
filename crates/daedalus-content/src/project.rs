@@ -359,6 +359,10 @@ pub struct PreparedProject {
     asset_import_report: Option<AssetImportReport>,
     /// Validated model renderer components keyed by their owning entity ID.
     model_renderers: BTreeMap<StableId, PreparedModelRendererBinding>,
+    /// Validated sprite renderer components keyed by their owning entity ID.
+    sprite_renderers: BTreeMap<StableId, PreparedSpriteRendererBinding>,
+    /// The single validated orthographic camera component, if authored.
+    camera_2d: Option<PreparedCamera2dBinding>,
 }
 
 impl PartialEq for PreparedProject {
@@ -371,6 +375,8 @@ impl PartialEq for PreparedProject {
             && self.digest == other.digest
             && self.asset_catalog == other.asset_catalog
             && self.model_renderers == other.model_renderers
+            && self.sprite_renderers == other.sprite_renderers
+            && self.camera_2d == other.camera_2d
     }
 }
 
@@ -412,6 +418,16 @@ impl PreparedProject {
         &self.model_renderers
     }
 
+    /// Returns validated sprite renderer bindings keyed by owning entity ID.
+    pub fn sprite_renderers(&self) -> &BTreeMap<StableId, PreparedSpriteRendererBinding> {
+        &self.sprite_renderers
+    }
+
+    /// Returns the project's single validated orthographic camera, if present.
+    pub fn camera_2d(&self) -> Option<&PreparedCamera2dBinding> {
+        self.camera_2d.as_ref()
+    }
+
     /// Releases only cache eviction pins while retaining all owned cooked asset data.
     ///
     /// Clones of this project retain their own shared pin references until they are released or
@@ -434,6 +450,75 @@ impl PreparedProject {
 pub struct PreparedModelRendererBinding {
     component_id: StableId,
     model_asset_id: StableId,
+}
+
+/// A validated reference from an authored entity to a region in an imported sprite atlas.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedSpriteRendererBinding {
+    component_id: StableId,
+    atlas_asset_id: StableId,
+    region_id: StableId,
+    tint: [f32; 4],
+    sorting_layer: i32,
+    order_in_layer: i32,
+}
+
+impl PreparedSpriteRendererBinding {
+    pub fn component_id(&self) -> &StableId {
+        &self.component_id
+    }
+
+    pub fn atlas_asset_id(&self) -> &StableId {
+        &self.atlas_asset_id
+    }
+
+    pub fn region_id(&self) -> &StableId {
+        &self.region_id
+    }
+
+    pub fn tint(&self) -> [f32; 4] {
+        self.tint
+    }
+
+    pub fn sorting_layer(&self) -> i32 {
+        self.sorting_layer
+    }
+
+    pub fn order_in_layer(&self) -> i32 {
+        self.order_in_layer
+    }
+}
+
+/// A validated project-local orthographic camera component.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedCamera2dBinding {
+    entity_id: StableId,
+    component_id: StableId,
+    vertical_size: f32,
+    near: f32,
+    far: f32,
+}
+
+impl PreparedCamera2dBinding {
+    pub fn entity_id(&self) -> &StableId {
+        &self.entity_id
+    }
+
+    pub fn component_id(&self) -> &StableId {
+        &self.component_id
+    }
+
+    pub fn vertical_size(&self) -> f32 {
+        self.vertical_size
+    }
+
+    pub fn near(&self) -> f32 {
+        self.near
+    }
+
+    pub fn far(&self) -> f32 {
+        self.far
+    }
 }
 
 impl PreparedModelRendererBinding {
@@ -632,7 +717,18 @@ pub fn prepare_project_from_bytes(
         ));
     }
 
-    let entities = decode_entities(&scene_source, &scene, &meshes)?;
+    let decoded = decode_entities(&scene_source, &scene, &meshes)?;
+    validate_camera_presentation_compatibility(
+        &scene_source,
+        &manifest,
+        decoded.camera_2d.as_ref(),
+    )?;
+    let DecodedEntityProjection {
+        entities,
+        model_renderers,
+        sprite_renderers,
+        camera_2d,
+    } = decoded;
     files.sort_by(|left, right| left.source_id.cmp(&right.source_id));
     let digest = project_digest(&files);
     let prepared = PreparedProject {
@@ -644,7 +740,9 @@ pub fn prepare_project_from_bytes(
         digest,
         asset_catalog: None,
         asset_import_report: None,
-        model_renderers: BTreeMap::new(),
+        model_renderers,
+        sprite_renderers,
+        camera_2d,
     };
     validate_prepared_project(&prepared, limits)?;
     Ok(prepared)
@@ -950,7 +1048,7 @@ fn prepare_project_with_asset_sources(
         .map(project_file_identity_from_blob)
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.source_id.cmp(&right.source_id));
-    let binding_metadata_bytes = estimate_model_binding_metadata_bytes(&scene, &scene_source)?;
+    let binding_metadata_bytes = estimate_project_binding_metadata_bytes(&scene, &scene_source)?;
     let catalog_metadata_bytes = estimate_catalog_metadata_bytes(
         &imported_assets,
         binding_metadata_bytes,
@@ -962,8 +1060,18 @@ fn prepare_project_with_asset_sources(
         catalog_metadata_bytes,
         crate::assets::ImportLocation::new(&scene_source, "catalog_metadata"),
     )?;
-    let (entities, model_renderers) =
-        decode_entities_with_assets(&scene_source, &scene, &meshes, &imported_assets)?;
+    let decoded = decode_entities_with_assets(&scene_source, &scene, &meshes, &imported_assets)?;
+    validate_camera_presentation_compatibility(
+        &scene_source,
+        &manifest,
+        decoded.camera_2d.as_ref(),
+    )?;
+    let DecodedEntityProjection {
+        entities,
+        model_renderers,
+        sprite_renderers,
+        camera_2d,
+    } = decoded;
     let mut dependencies = BTreeMap::<StableId, Vec<AssetDependencySummary>>::new();
     for id in imported_assets.keys() {
         let mut entries = Vec::new();
@@ -1001,6 +1109,8 @@ fn prepare_project_with_asset_sources(
         asset_catalog: Some(catalog),
         asset_import_report: Some(report),
         model_renderers,
+        sprite_renderers,
+        camera_2d,
     };
     validate_prepared_project(&prepared, ProjectLimits::default())?;
     Ok(prepared)
@@ -1189,6 +1299,39 @@ struct MeshRendererData {
 #[serde(deny_unknown_fields)]
 struct ModelRendererData {
     model: StableId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpriteRendererData {
+    atlas: StableId,
+    region: StableId,
+    #[serde(default = "default_sprite_tint")]
+    tint: [f32; 4],
+    #[serde(default)]
+    sorting_layer: i32,
+    #[serde(default)]
+    order_in_layer: i32,
+}
+
+fn default_sprite_tint() -> [f32; 4] {
+    [1.0; 4]
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Camera2dData {
+    vertical_size: f32,
+    near: f32,
+    far: f32,
+}
+
+#[derive(Debug)]
+struct DecodedEntityProjection {
+    entities: Vec<PreparedEntity>,
+    model_renderers: BTreeMap<StableId, PreparedModelRendererBinding>,
+    sprite_renderers: BTreeMap<StableId, PreparedSpriteRendererBinding>,
+    camera_2d: Option<PreparedCamera2dBinding>,
 }
 
 fn validate_manifest(manifest: &ProjectManifest) -> Result<(), ProjectError> {
@@ -1383,8 +1526,8 @@ fn decode_entities(
     source_id: &str,
     scene: &SceneDocument,
     meshes: &BTreeMap<StableId, ProjectMesh>,
-) -> Result<Vec<PreparedEntity>, ProjectError> {
-    decode_entities_inner(source_id, scene, meshes, None).map(|(entities, _)| entities)
+) -> Result<DecodedEntityProjection, ProjectError> {
+    decode_entities_inner(source_id, scene, meshes, None)
 }
 
 fn decode_entities_with_assets(
@@ -1392,13 +1535,7 @@ fn decode_entities_with_assets(
     scene: &SceneDocument,
     meshes: &BTreeMap<StableId, ProjectMesh>,
     assets: &BTreeMap<StableId, ImportedAsset>,
-) -> Result<
-    (
-        Vec<PreparedEntity>,
-        BTreeMap<StableId, PreparedModelRendererBinding>,
-    ),
-    ProjectError,
-> {
+) -> Result<DecodedEntityProjection, ProjectError> {
     decode_entities_inner(source_id, scene, meshes, Some(assets))
 }
 
@@ -1407,15 +1544,12 @@ fn decode_entities_inner(
     scene: &SceneDocument,
     meshes: &BTreeMap<StableId, ProjectMesh>,
     assets: Option<&BTreeMap<StableId, ImportedAsset>>,
-) -> Result<
-    (
-        Vec<PreparedEntity>,
-        BTreeMap<StableId, PreparedModelRendererBinding>,
-    ),
-    ProjectError,
-> {
+) -> Result<DecodedEntityProjection, ProjectError> {
     let mut prepared = Vec::with_capacity(scene.entities.len());
     let mut model_renderers = BTreeMap::new();
+    let mut sprite_renderers = BTreeMap::new();
+    let mut camera_2d = None;
+    let mut has_sprites = false;
     for (entity_index, entity) in scene.entities.iter().enumerate() {
         let entity_path = format!("entities[{entity_index}]");
         if entity.parent.is_some() {
@@ -1425,14 +1559,45 @@ fn decode_entities_inner(
                 "parented entities and hierarchy are not supported by this project loader",
             ));
         }
-        let (prepared_entity, model_renderer) =
-            decode_entity_inner(source_id, entity_index, entity, meshes, assets)?;
-        if let Some(binding) = model_renderer {
+        let decoded = decode_entity_inner(source_id, entity_index, entity, meshes, assets)?;
+        if let Some(binding) = decoded.model_renderer {
             model_renderers.insert(entity.id.clone(), binding);
         }
-        prepared.push(prepared_entity);
+        if let Some(binding) = decoded.sprite_renderer {
+            has_sprites = true;
+            sprite_renderers.insert(entity.id.clone(), binding);
+        }
+        if let Some(binding) = decoded.camera_2d
+            && camera_2d.replace(binding).is_some()
+        {
+            return Err(invalid(
+                source_id,
+                format!("{entity_path}.components"),
+                "a project may declare at most one daedalus.camera_2d component",
+            ));
+        }
+        prepared.push(decoded.entity);
     }
-    Ok((prepared, model_renderers))
+    if has_sprites && camera_2d.is_none() {
+        return Err(invalid(
+            source_id,
+            "entities",
+            "a project with daedalus.sprite_renderer components requires exactly one daedalus.camera_2d",
+        ));
+    }
+    Ok(DecodedEntityProjection {
+        entities: prepared,
+        model_renderers,
+        sprite_renderers,
+        camera_2d,
+    })
+}
+
+struct DecodedEntity {
+    entity: PreparedEntity,
+    model_renderer: Option<PreparedModelRendererBinding>,
+    sprite_renderer: Option<PreparedSpriteRendererBinding>,
+    camera_2d: Option<PreparedCamera2dBinding>,
 }
 
 fn decode_entity_inner(
@@ -1441,12 +1606,15 @@ fn decode_entity_inner(
     entity: &SceneEntity,
     meshes: &BTreeMap<StableId, ProjectMesh>,
     assets: Option<&BTreeMap<StableId, ImportedAsset>>,
-) -> Result<(PreparedEntity, Option<PreparedModelRendererBinding>), ProjectError> {
+) -> Result<DecodedEntity, ProjectError> {
     let entity_path = format!("entities[{entity_index}]");
     let mut transform = ProjectTransform::default();
     let mut mesh = None;
     let mut material = None;
     let mut model_renderer = None;
+    let mut sprite_renderer = None;
+    let mut camera_2d = None;
+    let mut camera_component_path = None;
     let mut seen = BTreeSet::new();
     for (component_index, component) in entity.components.iter().enumerate() {
         let path = format!("{entity_path}.components[{component_index}]");
@@ -1471,11 +1639,11 @@ fn decode_entity_inner(
                 validate_transform(source_id, &path, &transform)?;
             }
             "daedalus.mesh_renderer" => {
-                if model_renderer.is_some() {
+                if model_renderer.is_some() || sprite_renderer.is_some() {
                     return Err(invalid(
                         source_id,
                         format!("{path}.type_id"),
-                        "an entity cannot combine daedalus.mesh_renderer and daedalus.model_renderer",
+                        "an entity cannot combine mesh, model, or sprite renderer components",
                     ));
                 }
                 let renderer: MeshRendererData =
@@ -1511,11 +1679,11 @@ fn decode_entity_inner(
                         "component type 'daedalus.model_renderer' requires the asset-aware project loader",
                     ));
                 };
-                if mesh.is_some() {
+                if mesh.is_some() || sprite_renderer.is_some() {
                     return Err(invalid(
                         source_id,
                         format!("{path}.type_id"),
-                        "an entity cannot combine daedalus.mesh_renderer and daedalus.model_renderer",
+                        "an entity cannot combine mesh, model, or sprite renderer components",
                     ));
                 }
                 let renderer: ModelRendererData =
@@ -1556,6 +1724,109 @@ fn decode_entity_inner(
                     model_asset_id: renderer.model,
                 });
             }
+            "daedalus.sprite_renderer" => {
+                let Some(assets) = assets else {
+                    return Err(unsupported(
+                        source_id,
+                        format!("{path}.type_id"),
+                        "component type 'daedalus.sprite_renderer' requires the asset-aware project loader",
+                    ));
+                };
+                if mesh.is_some() || model_renderer.is_some() {
+                    return Err(invalid(
+                        source_id,
+                        format!("{path}.type_id"),
+                        "an entity cannot combine mesh, model, or sprite renderer components",
+                    ));
+                }
+                let renderer: SpriteRendererData =
+                    decode_component_data(source_id, &path, &component.data)?;
+                if component.asset_refs.as_slice() != [renderer.atlas.clone()] {
+                    return Err(invalid(
+                        source_id,
+                        format!("{path}.asset_refs"),
+                        "asset_refs must contain exactly the same atlas ID as data.atlas",
+                    ));
+                }
+                if !renderer
+                    .tint
+                    .iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                {
+                    return Err(invalid(
+                        source_id,
+                        format!("{path}.data.tint"),
+                        "sprite tint components must be finite values in [0, 1]",
+                    ));
+                }
+                match assets.get(&renderer.atlas) {
+                    Some(ImportedAsset::Atlas(atlas)) => {
+                        if !atlas
+                            .regions()
+                            .iter()
+                            .any(|region| region.id() == &renderer.region)
+                        {
+                            return Err(invalid(
+                                source_id,
+                                format!("{path}.data.region"),
+                                format!(
+                                    "'{}' does not identify a region in atlas '{}'",
+                                    renderer.region, renderer.atlas
+                                ),
+                            ));
+                        }
+                    }
+                    Some(asset) => {
+                        return Err(invalid(
+                            source_id,
+                            format!("{path}.data.atlas"),
+                            format!(
+                                "'{}' identifies a {:?} asset, not a sprite atlas",
+                                renderer.atlas,
+                                asset.kind()
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(invalid(
+                            source_id,
+                            format!("{path}.data.atlas"),
+                            format!(
+                                "'{}' does not identify a prepared sprite atlas",
+                                renderer.atlas
+                            ),
+                        ));
+                    }
+                }
+                sprite_renderer = Some(PreparedSpriteRendererBinding {
+                    component_id: component.id.clone(),
+                    atlas_asset_id: renderer.atlas,
+                    region_id: renderer.region,
+                    tint: renderer.tint,
+                    sorting_layer: renderer.sorting_layer,
+                    order_in_layer: renderer.order_in_layer,
+                });
+            }
+            "daedalus.camera_2d" => {
+                if !component.asset_refs.is_empty() {
+                    return Err(invalid(
+                        source_id,
+                        format!("{path}.asset_refs"),
+                        "camera2d components cannot reference assets",
+                    ));
+                }
+                let camera: Camera2dData =
+                    decode_component_data(source_id, &path, &component.data)?;
+                validate_camera_2d_data(source_id, &path, &camera)?;
+                camera_component_path = Some(path.clone());
+                camera_2d = Some(PreparedCamera2dBinding {
+                    entity_id: entity.id.clone(),
+                    component_id: component.id.clone(),
+                    vertical_size: camera.vertical_size,
+                    near: camera.near,
+                    far: camera.far,
+                });
+            }
             _ => {
                 return Err(unsupported(
                     source_id,
@@ -1565,8 +1836,18 @@ fn decode_entity_inner(
             }
         }
     }
-    Ok((
-        PreparedEntity {
+    if let Some(path) = camera_component_path.as_deref() {
+        if mesh.is_some() || model_renderer.is_some() || sprite_renderer.is_some() {
+            return Err(invalid(
+                source_id,
+                format!("{path}.type_id"),
+                "an entity cannot combine daedalus.camera_2d with a renderer component",
+            ));
+        }
+        validate_camera_2d_transform(source_id, path, &transform)?;
+    }
+    Ok(DecodedEntity {
+        entity: PreparedEntity {
             id: entity.id.clone(),
             name: entity.name.clone(),
             transform,
@@ -1574,7 +1855,70 @@ fn decode_entity_inner(
             material,
         },
         model_renderer,
-    ))
+        sprite_renderer,
+        camera_2d,
+    })
+}
+
+fn validate_camera_2d_data(
+    source_id: &str,
+    component_path: &str,
+    camera: &Camera2dData,
+) -> Result<(), ProjectError> {
+    if !camera.vertical_size.is_finite()
+        || !(0.001..=1_000_000.0).contains(&camera.vertical_size)
+        || !camera.near.is_finite()
+        || !camera.far.is_finite()
+        || camera.near <= 0.0
+        || camera.far <= camera.near
+    {
+        return Err(invalid(
+            source_id,
+            format!("{component_path}.data"),
+            "camera2d requires finite 0.001 <= vertical_size <= 1000000 and 0 < near < far",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_camera_2d_transform(
+    source_id: &str,
+    component_path: &str,
+    transform: &ProjectTransform,
+) -> Result<(), ProjectError> {
+    validate_transform(source_id, component_path, transform)?;
+    if transform
+        .scale
+        .iter()
+        .any(|scale| (*scale - 1.0).abs() > 1.0e-6)
+    {
+        return Err(invalid(
+            source_id,
+            format!("{component_path}.transform.scale"),
+            "camera2d transform scale must be unit within 1e-6 on every axis",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_camera_presentation_compatibility(
+    _scene_source: &str,
+    manifest: &ProjectManifest,
+    camera_2d: Option<&PreparedCamera2dBinding>,
+) -> Result<(), ProjectError> {
+    if camera_2d.is_some()
+        && manifest
+            .presentation
+            .as_ref()
+            .is_some_and(|presentation| presentation.camera.is_some())
+    {
+        return Err(invalid(
+            PROJECT_MANIFEST_FILE,
+            "presentation.camera",
+            "presentation.camera cannot be combined with a daedalus.camera_2d component",
+        ));
+    }
+    Ok(())
 }
 
 fn decode_component_data<T: for<'de> Deserialize<'de>>(
@@ -1753,12 +2097,21 @@ fn validate_prepared_project(
             "prepared mesh IDs do not match the scene's mesh asset IDs",
         ));
     }
-    let expected_entities = decode_entities(&scene_source, &project.scene, &project.meshes)?;
-    if expected_entities != project.entities || !project.model_renderers.is_empty() {
+    let expected = decode_entities(&scene_source, &project.scene, &project.meshes)?;
+    validate_camera_presentation_compatibility(
+        &scene_source,
+        &project.manifest,
+        expected.camera_2d.as_ref(),
+    )?;
+    if expected.entities != project.entities
+        || expected.model_renderers != project.model_renderers
+        || !expected.sprite_renderers.is_empty()
+        || expected.camera_2d != project.camera_2d
+    {
         return Err(invalid(
             &scene_source,
             "entities",
-            "prepared entity projection or model renderer bindings do not match the legacy scene components",
+            "prepared entity, renderer, or camera bindings do not match the legacy scene components",
         ));
     }
 
@@ -1930,17 +2283,26 @@ fn validate_prepared_asset_project(
             "prepared typed asset IDs do not match scene descriptors",
         ));
     }
-    let (entities, model_renderers) = decode_entities_with_assets(
+    let expected = decode_entities_with_assets(
         scene_source,
         &project.scene,
         &project.meshes,
         catalog.assets_map(),
     )?;
-    if entities != project.entities || model_renderers != project.model_renderers {
+    validate_camera_presentation_compatibility(
+        scene_source,
+        &project.manifest,
+        expected.camera_2d.as_ref(),
+    )?;
+    if expected.entities != project.entities
+        || expected.model_renderers != project.model_renderers
+        || expected.sprite_renderers != project.sprite_renderers
+        || expected.camera_2d != project.camera_2d
+    {
         return Err(invalid(
             scene_source,
             "entities",
-            "prepared entity or model renderer projection does not match the full authored scene",
+            "prepared entity, renderer, or camera projection does not match the full authored scene",
         ));
     }
     let mut total_bytes = 0u64;
@@ -2165,42 +2527,67 @@ fn project_file_identity_from_blob(source: &SourceBlob) -> ProjectFileIdentity {
     }
 }
 
-fn estimate_model_binding_metadata_bytes(
+fn estimate_project_binding_metadata_bytes(
     scene: &SceneDocument,
     source_id: &str,
 ) -> Result<u64, AssetImportError> {
     let mut bytes = 0u64;
     for entity in &scene.entities {
         for component in &entity.components {
-            if component.type_id.as_str() != "daedalus.model_renderer" {
-                continue;
-            }
-            let model_id_len = component
-                .data
-                .get("model")
-                .and_then(Value::as_str)
-                .map_or(0, |value| value.len().min(128));
-            let string_bytes = entity
-                .id
-                .as_str()
-                .len()
-                .checked_add(component.id.as_str().len())
-                .and_then(|value| value.checked_add(model_id_len))
-                .and_then(|value| value.checked_add(3 * 64))
+            let (id_lengths, id_count, record_bytes) = match component.type_id.as_str() {
+                "daedalus.model_renderer" => (
+                    [
+                        entity.id.as_str().len(),
+                        component.id.as_str().len(),
+                        component
+                            .data
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map_or(0, |value| value.len().min(128)),
+                        0,
+                    ],
+                    3usize,
+                    std::mem::size_of::<(StableId, PreparedModelRendererBinding)>() + 96,
+                ),
+                "daedalus.sprite_renderer" => (
+                    [
+                        entity.id.as_str().len(),
+                        component.id.as_str().len(),
+                        component
+                            .data
+                            .get("atlas")
+                            .and_then(Value::as_str)
+                            .map_or(0, |value| value.len().min(128)),
+                        component
+                            .data
+                            .get("region")
+                            .and_then(Value::as_str)
+                            .map_or(0, |value| value.len().min(128)),
+                    ],
+                    4usize,
+                    std::mem::size_of::<(StableId, PreparedSpriteRendererBinding)>() + 128,
+                ),
+                "daedalus.camera_2d" => (
+                    [entity.id.as_str().len(), component.id.as_str().len(), 0, 0],
+                    2usize,
+                    std::mem::size_of::<PreparedCamera2dBinding>()
+                        + std::mem::size_of::<Option<PreparedCamera2dBinding>>()
+                        + 96,
+                ),
+                _ => continue,
+            };
+            // StableId stores an owned String. Charge the observed bytes plus the full 128-byte
+            // ID ceiling for each retained binding string before any binding clone is made.
+            let string_bytes = id_lengths[..id_count]
+                .iter()
+                .try_fold(0usize, |total, length| {
+                    total.checked_add(*length)?.checked_add(128)
+                })
                 .ok_or_else(|| {
                     AssetImportError::new(
                         AssetImportErrorCode::LimitExceeded,
                         crate::assets::ImportLocation::new(source_id, "entities.components"),
-                        "model renderer binding string metadata size overflow",
-                    )
-                })?;
-            let record_bytes = std::mem::size_of::<(StableId, PreparedModelRendererBinding)>()
-                .checked_add(96)
-                .ok_or_else(|| {
-                    AssetImportError::new(
-                        AssetImportErrorCode::LimitExceeded,
-                        crate::assets::ImportLocation::new(source_id, "entities.components"),
-                        "model renderer binding record metadata size overflow",
+                        "project renderer binding string metadata size overflow",
                     )
                 })?;
             bytes = bytes
@@ -2208,7 +2595,7 @@ fn estimate_model_binding_metadata_bytes(
                     AssetImportError::new(
                         AssetImportErrorCode::LimitExceeded,
                         crate::assets::ImportLocation::new(source_id, "entities.components"),
-                        "model renderer binding string metadata is not representable",
+                        "project renderer binding string metadata is not representable",
                     )
                 })?)
                 .and_then(|value| value.checked_add(record_bytes as u64))
@@ -2216,7 +2603,7 @@ fn estimate_model_binding_metadata_bytes(
                     AssetImportError::new(
                         AssetImportErrorCode::LimitExceeded,
                         crate::assets::ImportLocation::new(source_id, "entities.components"),
-                        "model renderer binding metadata total overflow",
+                        "project renderer binding metadata total overflow",
                     )
                 })?;
         }
@@ -2226,7 +2613,7 @@ fn estimate_model_binding_metadata_bytes(
 
 fn estimate_catalog_metadata_bytes(
     assets: &BTreeMap<StableId, ImportedAsset>,
-    model_binding_metadata_bytes: u64,
+    project_binding_metadata_bytes: u64,
     files: &[ProjectFileIdentity],
     context: &AssetImportContext<'_>,
     cache_pin_count: usize,
@@ -2465,7 +2852,7 @@ fn estimate_catalog_metadata_bytes(
 
             // Binding IDs are estimated from borrowed scene strings before the prepared map is
             // allocated, then charged here with the rest of retained catalog metadata.
-            add(model_binding_metadata_bytes)?;
+            add(project_binding_metadata_bytes)?;
             let copied_dependencies = dependency_count.checked_mul(3).ok_or_else(|| {
                 AssetImportError::new(
                     AssetImportErrorCode::LimitExceeded,
@@ -2800,6 +3187,138 @@ mod tests {
         })
     }
 
+    fn sprite_renderer_component(id: &str, refs: Value, data: Value) -> Value {
+        json!({
+            "id": id,
+            "type_id": "daedalus.sprite_renderer",
+            "asset_refs": refs,
+            "data": data
+        })
+    }
+
+    fn camera_2d_component(id: &str, refs: Value, data: Value) -> Value {
+        json!({
+            "id": id,
+            "type_id": "daedalus.camera_2d",
+            "asset_refs": refs,
+            "data": data
+        })
+    }
+
+    fn transform_component(id: &str, scale: [f32; 3]) -> Value {
+        json!({
+            "id": id,
+            "type_id": "daedalus.transform",
+            "asset_refs": [],
+            "data": {
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": scale
+            }
+        })
+    }
+
+    fn sprite_project_scene_bytes() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "revision": 9,
+            "entities": [
+                {
+                    "id": "entity:camera",
+                    "components": [
+                        transform_component("component:camera-transform", [1.0, 1.0, 1.0]),
+                        camera_2d_component(
+                            "component:camera2d",
+                            json!([]),
+                            json!({"vertical_size": 10.0, "near": 0.1, "far": 100.0})
+                        )
+                    ]
+                },
+                {
+                    "id": "entity:hero",
+                    "components": [
+                        transform_component("component:sprite-transform", [1.0, 1.0, 1.0]),
+                        sprite_renderer_component(
+                            "component:sprite",
+                            json!(["asset:atlas"]),
+                            json!({
+                                "atlas": "asset:atlas",
+                                "region": "region:hero",
+                                "tint": [0.25, 0.5, 1.0, 0.75],
+                                "sorting_layer": -2,
+                                "order_in_layer": 8
+                            })
+                        )
+                    ]
+                }
+            ],
+            "assets": [
+                {
+                    "id": "asset:image",
+                    "kind": "daedalus.image",
+                    "uri": "sprites/sheet.png",
+                    "metadata": {
+                        "schema_version": 1,
+                        "role": "sprite_atlas_srgb",
+                        "mip_policy": "none",
+                        "sampler": {
+                            "min_filter": "nearest",
+                            "mag_filter": "nearest",
+                            "mipmap_filter": "none"
+                        }
+                    }
+                },
+                {
+                    "id": "asset:atlas",
+                    "kind": "daedalus.sprite_atlas",
+                    "uri": "sprites/sheet.atlas.json",
+                    "metadata": {"schema_version": 1}
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn sprite_project_sources() -> BTreeMap<String, Vec<u8>> {
+        BTreeMap::from([
+            ("sprites/sheet.png".into(), png_rgba([240, 80, 20, 255])),
+            (
+                "sprites/sheet.atlas.json".into(),
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "image_asset": "asset:image",
+                    "filter_policy": "nearest_no_mip_v1",
+                    "regions": [{
+                        "id": "region:hero",
+                        "rect": [0, 0, 1, 1],
+                        "pivot": [0.5, 0.0],
+                        "pixels_per_unit": 16.0
+                    }]
+                }))
+                .unwrap(),
+            ),
+        ])
+    }
+
+    fn dummy_atlas_asset() -> ImportedAsset {
+        let atlas = crate::assets::SpriteAtlas::new(
+            StableId::new("asset:image").unwrap(),
+            vec![crate::assets::AtlasRegion::new(
+                StableId::new("region:hero").unwrap(),
+                [0, 0, 1, 1],
+                [0.5, 0.0],
+                16.0,
+            )],
+            crate::assets::LeafCookKey::from_digest([8; 32]),
+            &ImportLimits::default(),
+            1,
+            1,
+            crate::assets::ImportLocation::default(),
+        )
+        .unwrap();
+        ImportedAsset::Atlas(Arc::new(atlas))
+    }
+
     fn scene_with_components(components: Vec<Value>) -> SceneDocument {
         serde_json::from_value(json!({
             "schema_version": 1,
@@ -2808,6 +3327,29 @@ mod tests {
                 "id": "entity:hero",
                 "components": components
             }],
+            "assets": []
+        }))
+        .unwrap()
+    }
+
+    fn scene_with_sprite_and_camera(sprite_components: Vec<Value>) -> SceneDocument {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "revision": 0,
+            "entities": [
+                {
+                    "id": "entity:camera",
+                    "components": [camera_2d_component(
+                        "component:camera2d",
+                        json!([]),
+                        json!({"vertical_size": 10.0, "near": 0.1, "far": 100.0})
+                    )]
+                },
+                {
+                    "id": "entity:hero",
+                    "components": sprite_components
+                }
+            ],
             "assets": []
         }))
         .unwrap()
@@ -3361,6 +3903,362 @@ mod tests {
         let mut corrupted_projection = from_bytes.clone();
         corrupted_projection.model_renderers.clear();
         assert!(corrupted_projection.validate().is_err());
+    }
+
+    #[test]
+    fn sprite_and_camera_bindings_are_prepared_validated_and_native_byte_equivalent() {
+        let manifest_bytes = manifest("scene.json");
+        let scene_bytes = sprite_project_scene_bytes();
+        let sources = sprite_project_sources();
+        let mut resolver =
+            crate::assets::ByteMapSourceResolver::from_bytes(sources.clone()).unwrap();
+        let mut byte_cache = crate::assets::MemoryCookCache::default();
+        let from_bytes = prepare_project_with_assets(
+            &manifest_bytes,
+            &scene_bytes,
+            &mut resolver,
+            &mut byte_cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+
+        let project = TempProject::new();
+        project.write(PROJECT_MANIFEST_FILE, &manifest_bytes);
+        project.write("scene.json", &scene_bytes);
+        for (source_id, bytes) in sources {
+            project.write(&source_id, &bytes);
+        }
+        let mut native_cache = crate::assets::MemoryCookCache::default();
+        let from_native = load_project_with_assets(
+            project.path(),
+            &mut native_cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap();
+
+        assert_eq!(from_bytes.digest(), from_native.digest());
+        assert_eq!(from_bytes.files(), from_native.files());
+        assert_eq!(from_bytes.asset_catalog(), from_native.asset_catalog());
+        assert_eq!(
+            from_bytes.sprite_renderers(),
+            from_native.sprite_renderers()
+        );
+        assert_eq!(from_bytes.camera_2d(), from_native.camera_2d());
+        assert_eq!(from_bytes.sprite_renderers().len(), 1);
+        let sprite = &from_bytes.sprite_renderers()[&StableId::new("entity:hero").unwrap()];
+        assert_eq!(sprite.component_id().as_str(), "component:sprite");
+        assert_eq!(sprite.atlas_asset_id().as_str(), "asset:atlas");
+        assert_eq!(sprite.region_id().as_str(), "region:hero");
+        assert_eq!(sprite.tint(), [0.25, 0.5, 1.0, 0.75]);
+        assert_eq!(sprite.sorting_layer(), -2);
+        assert_eq!(sprite.order_in_layer(), 8);
+        let camera = from_bytes.camera_2d().unwrap();
+        assert_eq!(camera.entity_id().as_str(), "entity:camera");
+        assert_eq!(camera.component_id().as_str(), "component:camera2d");
+        assert_eq!(camera.vertical_size(), 10.0);
+        assert_eq!(camera.near(), 0.1);
+        assert_eq!(camera.far(), 100.0);
+        assert_eq!(from_bytes.entities().len(), 2);
+        from_bytes.validate().unwrap();
+        from_native.validate().unwrap();
+
+        let mut conflict_manifest: ProjectManifest =
+            serde_json::from_slice(&manifest_bytes).unwrap();
+        conflict_manifest.presentation = Some(ProjectPresentation {
+            camera: Some(ProjectCamera::default()),
+            ..ProjectPresentation::default()
+        });
+        let conflict_manifest = serde_json::to_vec(&conflict_manifest).unwrap();
+        let mut conflict_resolver =
+            crate::assets::ByteMapSourceResolver::from_bytes(sprite_project_sources()).unwrap();
+        let mut conflict_cache = crate::assets::MemoryCookCache::default();
+        let presentation_conflict = prepare_project_with_assets(
+            &conflict_manifest,
+            &scene_bytes,
+            &mut conflict_resolver,
+            &mut conflict_cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(presentation_conflict.contains("presentation.camera"));
+        assert!(presentation_conflict.contains("cannot be combined"));
+
+        let mut corrupted_sprite_map = from_bytes.clone();
+        corrupted_sprite_map.sprite_renderers.clear();
+        assert!(corrupted_sprite_map.validate().is_err());
+        let mut corrupted_camera = from_bytes.clone();
+        corrupted_camera.camera_2d = None;
+        assert!(corrupted_camera.validate().is_err());
+        assert_eq!(from_bytes.digest(), from_native.digest());
+    }
+
+    #[test]
+    fn sprite_camera_components_reject_invalid_schema_references_and_combinations() {
+        let assets = BTreeMap::from([(StableId::new("asset:atlas").unwrap(), dummy_atlas_asset())]);
+        let valid_sprite = || {
+            sprite_renderer_component(
+                "component:sprite",
+                json!(["asset:atlas"]),
+                json!({"atlas": "asset:atlas", "region": "region:hero"}),
+            )
+        };
+        let decode_error =
+            |components: Vec<Value>, asset_map: &BTreeMap<StableId, ImportedAsset>| {
+                decode_entities_with_assets(
+                    "scene.json",
+                    &scene_with_sprite_and_camera(components),
+                    &BTreeMap::new(),
+                    asset_map,
+                )
+                .unwrap_err()
+                .to_string()
+            };
+
+        let valid_projection = decode_entities_with_assets(
+            "scene.json",
+            &scene_with_sprite_and_camera(vec![valid_sprite()]),
+            &BTreeMap::new(),
+            &assets,
+        )
+        .unwrap();
+        assert_eq!(valid_projection.sprite_renderers.len(), 1);
+        let defaulted = &valid_projection.sprite_renderers[&StableId::new("entity:hero").unwrap()];
+        assert_eq!(defaulted.tint(), [1.0; 4]);
+        assert_eq!(defaulted.sorting_layer(), 0);
+        assert_eq!(defaulted.order_in_layer(), 0);
+
+        let missing_camera = decode_entities_with_assets(
+            "scene.json",
+            &scene_with_components(vec![valid_sprite()]),
+            &BTreeMap::new(),
+            &assets,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing_camera.contains("requires exactly one daedalus.camera_2d"));
+
+        let invalid_cases = [
+            (
+                sprite_renderer_component(
+                    "component:sprite",
+                    json!([]),
+                    json!({"atlas": "asset:atlas", "region": "region:hero"}),
+                ),
+                "asset_refs",
+            ),
+            (
+                sprite_renderer_component(
+                    "component:sprite",
+                    json!(["asset:atlas"]),
+                    json!({"atlas": "asset:atlas", "region": "region:missing"}),
+                ),
+                "data.region",
+            ),
+            (
+                sprite_renderer_component(
+                    "component:sprite",
+                    json!(["asset:atlas"]),
+                    json!({"atlas": "asset:atlas", "region": "region:hero", "tint": [1.0, 0.0, 0.0, 1.5]}),
+                ),
+                "data.tint",
+            ),
+            (
+                sprite_renderer_component(
+                    "component:sprite",
+                    json!(["asset:atlas"]),
+                    json!({"atlas": "asset:atlas", "region": "region:hero", "unknown": true}),
+                ),
+                "data",
+            ),
+        ];
+        for (component, expected_path) in invalid_cases {
+            assert!(decode_error(vec![component], &assets).contains(expected_path));
+        }
+
+        let duplicate_error = decode_error(vec![valid_sprite(), valid_sprite()], &assets);
+        assert!(duplicate_error.contains("duplicate 'daedalus.sprite_renderer'"));
+        let conflict_error = decode_error(
+            vec![
+                valid_sprite(),
+                json!({
+                    "id": "component:mesh",
+                    "type_id": "daedalus.mesh_renderer",
+                    "asset_refs": ["asset:mesh"],
+                    "data": {"mesh": "asset:mesh"}
+                }),
+            ],
+            &assets,
+        );
+        assert!(conflict_error.contains("cannot combine mesh, model, or sprite"));
+
+        let mut model_and_atlas_assets = assets.clone();
+        model_and_atlas_assets.insert(StableId::new("asset:model").unwrap(), dummy_model_asset());
+        let model_conflict = decode_entities_with_assets(
+            "scene.json",
+            &scene_with_sprite_and_camera(vec![
+                valid_sprite(),
+                model_renderer_component(
+                    "component:model",
+                    json!(["asset:model"]),
+                    json!({"model": "asset:model"}),
+                ),
+            ]),
+            &BTreeMap::new(),
+            &model_and_atlas_assets,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(model_conflict.contains("cannot combine mesh, model, or sprite"));
+
+        let wrong_kind = crate::assets::AudioAsset::new(
+            48_000,
+            1,
+            vec![0.0],
+            &ImportLimits::default(),
+            crate::assets::ImportLocation::default(),
+        )
+        .unwrap();
+        let wrong_kind_assets = BTreeMap::from([(
+            StableId::new("asset:atlas").unwrap(),
+            ImportedAsset::Audio(Arc::new(wrong_kind)),
+        )]);
+        assert!(
+            decode_error(vec![valid_sprite()], &wrong_kind_assets).contains("not a sprite atlas")
+        );
+
+        let legacy_error = decode_entities(
+            "scene.json",
+            &scene_with_components(vec![valid_sprite()]),
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(legacy_error.contains("requires the asset-aware project loader"));
+    }
+
+    #[test]
+    fn camera2d_legacy_support_and_project_wide_constraints_are_revalidated() {
+        let camera_component = camera_2d_component(
+            "component:camera2d",
+            json!([]),
+            json!({"vertical_size": 10.0, "near": 0.1, "far": 100.0}),
+        );
+        let camera_only_scene = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "revision": 0,
+            "entities": [{
+                "id": "entity:camera",
+                "components": [camera_component.clone()]
+            }],
+            "assets": []
+        }))
+        .unwrap();
+        let legacy = prepare_project_from_bytes(
+            &manifest("scene.json"),
+            &camera_only_scene,
+            &BTreeMap::new(),
+            ProjectLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.camera_2d().unwrap().entity_id().as_str(),
+            "entity:camera"
+        );
+        legacy.validate().unwrap();
+
+        let invalid_scale = decode_entities(
+            "scene.json",
+            &scene_with_components(vec![
+                transform_component("component:transform", [1.0, 1.0, 1.01]),
+                camera_component.clone(),
+            ]),
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(invalid_scale.contains("scale must be unit"));
+
+        for invalid_data in [
+            json!({"vertical_size": 0.0, "near": 0.1, "far": 100.0}),
+            json!({"vertical_size": 10.0, "near": 0.1, "far": 0.1}),
+            json!({"vertical_size": 10.0, "near": 0.1}),
+            json!({"vertical_size": 10.0, "near": 0.1, "far": 100.0, "extra": 1}),
+        ] {
+            let error = decode_entities(
+                "scene.json",
+                &scene_with_components(vec![camera_2d_component(
+                    "component:camera2d",
+                    json!([]),
+                    invalid_data,
+                )]),
+                &BTreeMap::new(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("components[0].data"));
+        }
+
+        let duplicate_cameras: SceneDocument = serde_json::from_value(json!({
+            "schema_version": 1,
+            "revision": 0,
+            "entities": [
+                {"id": "entity:camera-a", "components": [camera_component.clone()]},
+                {"id": "entity:camera-b", "components": [camera_2d_component(
+                    "component:camera2d-b", json!([]),
+                    json!({"vertical_size": 10.0, "near": 0.1, "far": 100.0})
+                )]}
+            ],
+            "assets": []
+        }))
+        .unwrap();
+        let duplicate_error = decode_entities("scene.json", &duplicate_cameras, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate_error.contains("at most one daedalus.camera_2d"));
+
+        let mesh_component = json!({
+            "id": "component:mesh",
+            "type_id": "daedalus.mesh_renderer",
+            "asset_refs": ["asset:mesh"],
+            "data": {"mesh": "asset:mesh"}
+        });
+        let mesh_assets = BTreeMap::from([(
+            StableId::new("asset:mesh").unwrap(),
+            serde_json::from_slice::<ProjectMesh>(&triangle_mesh()).unwrap(),
+        )]);
+        let render_camera_error = decode_entities(
+            "scene.json",
+            &scene_with_components(vec![camera_component.clone(), mesh_component]),
+            &mesh_assets,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(render_camera_error.contains("camera_2d with a renderer component"));
+
+        let presentation: ProjectManifest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "name": "external-test",
+            "scene": "scene.json",
+            "presentation": {"camera": ProjectCamera::default()}
+        }))
+        .unwrap();
+        let single_camera_projection = decode_entities(
+            "scene.json",
+            &serde_json::from_slice(&camera_only_scene).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let conflict = validate_camera_presentation_compatibility(
+            "scene.json",
+            &presentation,
+            single_camera_projection.camera_2d.as_ref(),
+        )
+        .unwrap_err();
+        assert!(conflict.to_string().contains("cannot be combined"));
     }
 
     #[test]

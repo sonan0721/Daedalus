@@ -23,7 +23,7 @@
 
 | 소유자 | 범위 | 상태 |
 | --- | --- | --- |
-| Luna xhigh content | private sprite/camera2d binding·strict schema/revalidation·metadata precharge·CPU 검사 | 구현 진행 |
+| Luna xhigh content | private sprite/camera2d binding·strict schema/revalidation·metadata precharge·CPU 검사 | source 고정·focused72/strict Clippy/Wasm/fmt 통과; 별도 renderer 검사 source 작성 |
 | Luna xhigh renderer | unit quad/UV slots·공통 texture lifetime·alpha/projection·actual view/window·CPU/GPU 검사 | 구현 진행 |
 | Luna xhigh CLI | 기존 공통 report·opt-in sprite smoke·timeout/cleanup 회귀 | 구현 진행 |
 | 조정자 | MD·source/API 리뷰·통합/실제 Mac·원본 QA·Git/PR | 계약 확정; 구현 검사 미실행 |
@@ -37,3 +37,11 @@ content→renderer→CLI→조정자 순서로 Cargo/shared target 소유권을 
 공개 원본 QA 입력은 ignored `dist/qa-assets/sprite-runtime-project/`에 준비했다. Tiny Dungeon의 원본 PNG5294 bytes/SHA-256 `d24e60a41e4ac7a745c0304dfde121143688557f40215f23221c29cfe683825f`를 그대로 복사했고 atlas descriptor의16×16 region4개만 별도 작성했다. 두 atlas StableId·네 sprite와 camera-only entity로 unit quad/texture 공유 및 실제 픽셀 아트를 확인할 예정이다. 현재는 입력 준비만 했으며 새 sprite binary의 validation/render는 미실행이다.
 
 초기 CLI source 리뷰에서 실제 view JSON을 capture artifact payload 안의 `capture.render_view`로 명확히 했다. 기존 last_presented/window camera key와 새 view의 camera serialization이 따로 늘지 않도록 공통 camera 변환 재사용을 요청했다. 후속 live capture 계약에도 실제 used projection/local zoom/Busy ready metadata 재사용을 반영했지만 해당 capture 기능은 아직 구현하지 않았다.
+
+## content 첫 source 고정
+
+Luna xhigh content가 private sprite/camera binding과 typed 공통 projection helper를 구현했다. 조정자는 atlas/region kind·ref/tint 오류, project-wide camera uniqueness/renderer/presentation 충돌, unit scale/range, legacy camera-only 지원과 sprite Unsupported, validate의 borrowed catalog 재구성, map/ID allocation 이전 metadata charge를 source 리뷰했다. catalog 전체 clone이나 별도 decoder는 추가하지 않았다.
+
+담당자의 frozen source focused 결과: `cargo test -p daedalus-content --locked`72/72, all-target/all-feature strict Clippy, `cargo check -p daedalus-content --lib --target wasm32-unknown-unknown --locked`, scoped rustfmt/diff check 통과. Wasm은 library compile이며 실제 브라우저 실행 인수가 아니다. 조정자의 workspace/Metal/native sprite 통합은 아직 미실행이다.
+
+Cargo/shared target은 content에서 renderer로 인계했다. content 담당자는 새 `sprite_packet_tests.rs` 한 파일만 source 작성해 independent alpha/UV/order/reuse 검사를 병렬 준비하고, renderer 담당자는 핵심 GPU/window와 no-input/Busy/budget 검사를 맡는다. 이 source-only 분담으로 같은 테스트 파일/컴파일 락의 중복을 피한다. 실제 소요 시간 개선율은 측정하지 않았다.

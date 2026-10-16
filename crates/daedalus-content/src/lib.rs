@@ -24,11 +24,11 @@ pub use assets::{
 };
 
 pub use project::{
-    PreparedEntity, PreparedModelRendererBinding, PreparedProject, ProjectCamera,
-    ProjectDirectionalLight, ProjectError, ProjectFileIdentity, ProjectLimits, ProjectManifest,
-    ProjectMaterial, ProjectMesh, ProjectPresentation, ProjectTransform, ProjectVertex,
-    load_project, load_project_with_assets, load_project_with_limits, prepare_project_from_bytes,
-    prepare_project_with_assets,
+    PreparedCamera2dBinding, PreparedEntity, PreparedModelRendererBinding, PreparedProject,
+    PreparedSpriteRendererBinding, ProjectCamera, ProjectDirectionalLight, ProjectError,
+    ProjectFileIdentity, ProjectLimits, ProjectManifest, ProjectMaterial, ProjectMesh,
+    ProjectPresentation, ProjectTransform, ProjectVertex, load_project, load_project_with_assets,
+    load_project_with_limits, prepare_project_from_bytes, prepare_project_with_assets,
 };
 
 /// A non-negative monotonically increasing revision used by content snapshots.

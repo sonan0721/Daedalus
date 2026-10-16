@@ -1,6 +1,6 @@
 # P03.3b.3 같은 세션의 render 세대 준비·표시·회수
 
-상태: source 조사 기반 상세 초안 · API/수치 동결 전 · 2026-10-16
+상태: source 대조 후 구체 설계안 · API/수치 최종 동결 전 · 2026-10-17
 
 ## 문서 목적과 선행 게이트
 
@@ -14,9 +14,9 @@
 | --- | --- | --- |
 | runtime `project_preparation.rs::StageResult`·reclamation registry | candidate는 actor-private Arc, worker는 실제 final drop backstop 유지 | control payload 반환 없이 native host에 bounded consuming lease 전달 |
 | renderer `packet.rs::ProjectRenderResources::prepare/extract_with_view` | prepare는 borrowed project/handle map 사용, packet은 sidecar/handle Arc를 보유 | off-actor CPU 준비·source pin 전파·별도 prepared CPU 회수 장부 |
-| `packet_renderer.rs::submit_packet_frame/commit_resources` | 전체 upload·draw·ready 교체가 같은 transaction | stage-only pump와 committed draw를 분리하되 cache/planner/ledger 공유 |
+| `packet_renderer.rs::submit_packet_frame/commit_resources` | 전체 upload·draw·ready 교체가 같은 transaction | candidate 준비 상태는 분리하되 bounded stage chunk와 old-ready draw는 한 submit으로 조합 |
 | `plan_resources/plan_cache_admission/plan_entry_victims` | 현재 후보를 active로 보는 victim 정책, GPU completion만으로 eviction 가능 | old-ready와 staged의 pin union·실제 retirement를 반영 |
-| `note_submission/poll_retirement` | 공통 serial·completion watermark·bounded staging ledger | draw 없는 stage submission도 같은 한도·last-submission 장부 사용 |
+| `note_submission/poll_retirement` | 공통 serial·completion watermark·bounded staging ledger | stage write와 old-ready draw의 한 serial·공통 last-submission 장부 사용 |
 | `window.rs`·CLI `project_view.rs` | `frame.present()` 뒤 final report는 있으나 live stage/present ACK 없음. outcome이 packet Arc를 유지한 채 coordinator join | bounded live ACK·small final metadata·큰 owner 해제와 종료 관찰 순서 |
 
 이 표는 로컬 source 감사다. 장치 staging 시험이나 새 API 존재의 증거가 아니다. [S86](../02-research/source-register.md)은 고정 wgpu27.0.1의 callback/write/poll 의미를 별도로 확인한다.
@@ -42,7 +42,7 @@ flowchart LR
 
 우선 검토안은 장수하는 render CPU owner 하나를 host 예산/진단에 별도로 포함하고 취소 checkpoint·한 개 candidate lease·유한 handoff를 두는 것이다. 최신 desired metadata를 보관하더라도 두 번째 큰 candidate payload를 장부 밖에 대기시키지 않는다. 현재 preparation owner도 Engine task-worker 진단과 별도인 점을 유지해 process 전체를 이미 제한한다고 주장하지 않는다. public `EngineConfig` literal에 임의 field를 추가하지 않고 host 옵션/진단 경계를 동결한다.
 
-또한 runtime-neutral port와 renderer 자원 owner만으로는 현재 CLI에 있는 input/protocol/presentation 조합이 SDK 기능으로 재사용되지 않는다. runtime→renderer 의존 없이 두 계층을 조합하는 작은 project-host library와 CLI adapter로 나눌지 검토한다. 기존 host 코드와 책임을 먼저 대조하며 일반 scheduler/actor framework를 추가하지 않는다. 이 library 채택·crate 이름·public API·source 이동은 아직 결정/구현하지 않았다.
+또한 runtime-neutral port와 renderer 자원 owner만으로는 현재 CLI에 있는 input/protocol/presentation 조합이 SDK 기능으로 재사용되지 않는다. [native project host](native-project-host.md)는 runtime→renderer 의존 없이 두 계층을 조합하는 작은 library와 CLI adapter의 구체안이다. 기존 코드·책임을 재사용하며 일반 scheduler/actor framework를 추가하지 않는다. crate 이름·최종 facade·source 이동은 코드 전 리뷰 대상이고 아직 구현하지 않았다.
 
 Stage 수락·authored compatibility·CPU resource 준비·device staged·actor committed·submitted·present 관찰은 서로 다른 상태다. render consumer가 필요하면 device 준비가 확인되기 전 Commit을 허용하지 않는다. worker/device 결과와 ACK는 session/candidate/activation/generation/source identity를 검증하며 오래된 결과는 최신 작업에 적용하지 않는다. 같은 command replay/ACK/권한·효과 전 거부 규칙은 b.2를 유지한다.
 
@@ -50,19 +50,36 @@ Stage 수락·authored compatibility·CPU resource 준비·device staged·actor 
 
 native owner가 한 슬롯의 move-only `ProjectSourceLease`를 host로 전달하는 방향을 검토한다. 짧은 `with_source` borrowed callback은 기존 prepare에 필요한 `&PreparedProject`를 제공하고 control 결과/JSON에 payload를 넣지 않는다. runtime 내부는 같은 worker reclamation Arc를 유지한다. source와 renderer를 묶는 token은 downcast/Any/새 registry framework 없이 유지하는 방향이다. 정확한 factory·port·token API/반환 수명은 아직 동결하지 않았다.
 
-`PreparedProject`는 기존 Clone 가능한 native type이다. borrowed 접근도 신뢰된 Rust SDK 경계이며 임의 caller의 clone/allocation까지 제한하는 sandbox가 아니다. 엔진 내부 구현은 명시적 소유권 장부를 따른다. [S87](../02-research/source-register.md)에 따라 auto-trait-only `Arc<dyn Send + Sync>` 자체는 원천적으로 금지된 문법이 아니다. 공유 marker trait가 반드시 필요하다고 가정해 새 crate 경계를 만들지 않는다. 고정 Rust1.94 실제 compile·Debug wrapper 등 API 검증은 후속 Luna 작업으로 남긴다.
+`PreparedProject`는 기존 Clone 가능한 native type이다. borrowed 접근도 신뢰된 Rust SDK 경계이며 임의 caller의 clone/allocation까지 제한하는 sandbox가 아니다. 엔진 내부 구현은 명시적 소유권 장부를 따른다. [S87](../02-research/source-register.md)의 auto-trait-only `Arc<dyn Send + Sync>` coercion/clone·opaque Debug wrapper와 unsized Arc의 strong/Weak 해제 뒤 worker final-drop을 Rust1.94 설계 probe에서 확인했다. 기존 `PacketRenderer`·`PacketViewSubmission`·`ProjectRenderResources`의 Send, `RenderPacket`의 Send+Sync도 compile 확인했다. [작업 기록](../06-worklog/2026-10-17-native-host-design.md)의 3건은 새 host API·실제 GPU 이동/회수의 통과가 아니다. 새 공통 marker crate가 반드시 필요하다고 가정하지 않는다.
 
 source pin은 actual source-backed MeshHandle/ModelTextureUpload와 packet sidecar까지 이어져야 한다. wrapper만 pin하고 validation/resource plan이 독립 Arc를 들고 있게 두면 charge를 먼저 반환할 수 있다. 모든 엔진 내부 pending/ready packet·validation·staging plan·presentation outcome을 owner graph에 포함한다. token이 자신을 보유한 renderer backing을 다시 소유하는 순환 참조는 금지한다.
 
 GPU key 재사용과 CPU handle 공유는 구분한다. 여러 세대에서 같은 CPU handle을 재사용하면서 그 내부 token이 첫 source 전체를 계속 붙잡으면, 이전 세대 packet을 모두 해제해도 현재 handle이 old source를 유지해 retired 슬롯을 영구 점유할 수 있다. 이는 구현에서 확인한 결함이 아니라 owner graph의 검토 조건이다. 초기 경로는 세대별 CPU owner/pin을 명시하고 GPU 자원만 content key로 재사용하는 방향부터 검토한다. CPU backing까지 세대 간 공유하려면 actual Arc·별도 charge·마지막 큰 drop과 다음 연속 교체의 진행을 함께 증명한다. wrapper의 token만 바꾸고 내부 leaf Arc를 장부 밖에 남기는 방식도 허용하지 않는다.
 
-renderer가 따로 만든 legacy mesh Vec·prepared template/map·sidecar metadata는 source pin만으로 final drop thread나 별도 예산이 해결되지 않는다. source cooked 장부와 prepared CPU 장부를 구분하고, prepared generation의 cleanup backstop도 off-actor owner에 둔다. packet/plan이 계속 보유 중이면 wrapper 교체만으로 회수를 보고하지 않는다. 기존 estimator가 무엇을 논리적으로 세는지·실제 공유인지·별도 복사본인지 리뷰해 aggregate 수치를 확정한다. CPU 예산을 GPU byte 수나 전체 RSS로 바꾸어 부르지 않는다.
+renderer가 따로 만든 legacy mesh Vec·prepared template/map·sidecar metadata는 source pin만으로 final drop thread나 별도 예산이 해결되지 않는다. source cooked 장부와 prepared CPU 장부를 구분하고, prepared generation의 cleanup backstop도 off-actor owner에 둔다. 실제 공유될 각각의 backing Arc를 handoff 전에 등록한다. root wrapper만 보유해서는 안 된다. legacy MeshResource·model draw slice·model/sprite map·sprite order·per-packet instances·`validated_normals: Arc<OnceLock<...>>`를 포함한다. 현재 `RenderPacket: Clone`과 renderer의 `packet.clone()` 경로는 root와 독립적인 leaf alias를 만들 수 있다.
+
+parent map/template부터 해제한 뒤 leaf를 worker에서 회수한다. Sized Arc는 try_unwrap, unsized slice는 get_mut로 strong alias와 Weak 부재를 확인한 뒤 worker drop하는 방향이다. normal cache의 OnceLock은 lazy 값이 생기기 전부터 canonical backing을 등록한다. packet/plan이 계속 보유 중이면 wrapper 교체만으로 회수를 보고하지 않는다. instances/normal cache는 per-source 준비 비용과 별도의 bounded frame 비용이다. [host의 CPU lane 제안](native-project-host.md)에 legacy copy·metadata·frame·scratch를 분리하고 frame16MiB/aggregate48MiB·unique3개를 제안했다. CPU-validated input을 retain하면 별도 normal map도 포함해야 한다. capacity·HashMap 오버헤드·held alias·등록 슬롯의 estimator는 코드 전 수치 동결 대상이다. GPU bookkeeping8MiB나 전체 RSS를 이 CPU budget 대신 부르지 않는다.
 
 종료 때 window outcome의 last-presented packet Arc를 유지한 채 cleanup을 기다리는 coordinator에 blocking join하면 순환 대기가 가능하다. 최종 작은 identity/view/report를 먼저 복사하고 큰 packet/outcome/device owner를 해제한 뒤 finished를 관찰하거나, 참조가 남으면 정직하게 Stopping을 유지한다. 아직 끝나지 않은 thread를 UI에서 join하지 않는다. native caller가 의도적으로 유지한 resource lease도 종료 계약에 명시한다.
 
 ## 장치 준비와 기존 정상 화면 유지
 
-후보의 전체 resource/count·residency·upload/scratch 필요량을 먼저 검증·예약한다. 기존 `submit_packet_frame`을 stage API처럼 부르면 실제 draw/active 교체가 먼저 일어나므로 그대로 사용하지 않는다. pose와 무관한 immutable resource set 또는 검증된 candidate packet 중 어느 입력을 stage API로 받을지 먼저 정한다. stage를 위해 authority Step을 실행하지 않는다.
+후보의 전체 resource/count·residency·upload/scratch 필요량을 먼저 검증·예약한다. 기존 `submit_packet_frame`을 stage API처럼 부르면 실제 draw/active 교체가 먼저 일어나므로 그대로 사용하지 않는다. **pose와 무관한 resource-only 입력**을 사용하는 구체안으로 좁힌다. `ProjectRenderResources`는 이미 세대별 handle/template/binding을 갖는다. entity binding에서 실제 참조하는 geometry/model/sprite 요청만 수집하며, 사용하지 않는 catalog 전체나 `prepared_geometry_bytes`를 active set으로 쓰지 않는다. stage를 위해 authority Step이나 가짜 tick/publication/pose를 만들지 않는다.
+
+기존 `plan_resources`는 geometries·model_bindings·sprite_bindings를 읽으며 normal_matrices는 읽지 않는다. 작은 private borrowed `ResourceRequests` projection을 두어 기존 PacketValidation과 새 owned stage input이 같은 planner/cache admission을 쓰게 한다. 범용 trait framework나 별도 stage planner를 복제하지 않는다. geometry key·texture key·sampler key·texture/sampler pair·default texture·sprite quad·expanded draw 수·필요 model/sprite pipeline은 준비 대상이다. tint·material/UV row·painter order와 live transform은 그릴 frame의 데이터다.
+
+| 제안 operation | 입력/효과 |
+| --- | --- |
+| CPU stage-input 생성 | ProjectRenderResources에서 validated immutable descriptor와 source pin 구성. 실제 publication을 요구하지 않음 |
+| `begin_stage` | renderer-local opaque PacketStageId 발급, whole-candidate admission/union pin·예약. host가 runtime identity와 대응. GPU 생성은 이 호출에서 일괄 실행하지 않음 |
+| stage status/poll/cancel | nonwaiting 완료 조회·bounded metadata·취소. 동일 ID 재시도/이미 종료된 ID 의미는 최종 API에서 동결 |
+| old-ready draw + optional stage chunk | 한 surface/target draw에 허용된 작은 upload/생성 작업을 조합. normal PacketViewSubmission과 stage progress를 반환 |
+| initial bootstrap draw + optional stage chunk | old-ready가 없을 때 같은 device의 clear/loading pass와 조합. game packet/submission identity나 presented ACK를 꾸미지 않음 |
+| committed draw | actor의 실제 committed frame에서 새 packet 추출. session/generation/digest와 canonical resource keys가 staged 입력과 일치하는지 검증 후 표시 |
+
+ready 전에 required model/sprite pipeline과 target format/sRGB 처리를 검증한다. 실제 committed packet의 tick·publication·pose는 준비 때보다 진행해도 된다. staged identity가 같다고 예상하지 않은 새 resource key를 즉석 일괄 업로드하지 않는다. API 이름·반환 type은 구체 제안이며 아직 public symbol이 아니다.
+
+이 계약의 replacement는 old-ready packet을 쓰지만 generation1에는 그것이 없다. additive packet-window bootstrap은 clear-only 또는 기존 loading overlay를 그리고 같은 한 submit에 initial upload chunk를 싣는다. bootstrap present는 game present가 아니다. initial device-ready 뒤에만 actor의 실제 최신 initial-generation frame을 추출해 첫 정상 game draw/present·ACK를 수행한다. 이미 있는 source generation1을 candidate ID나 새 Commit으로 위장하지 않는다. 현재 packet-window 생성자는 initial packet을 요구하며 legacy Scene fallback은 이 새 기능이 아니다. 초기 CPU project load 이전의 전체 loading UI는 [host 문서](native-project-host.md)의 별도 미완료 경계로 유지한다.
 
 candidate의 개별 working set은 기존 상한을 따르고, old-ready·staged·아직 완료되지 않은 retired 자원은 같은 hard ceiling 안에 있어야 한다. 동일 geometry payload/layout·texture/sampler/bind-group key는 GPU cache의 실제 기존 자원을 재사용한다. key가 같다는 사실만으로 별도 CPU allocation도 공유한 것으로 계산하지 않는다. old-ready와 staged pin은 GPU 작업이 완료됐더라도 임의 LRU victim으로 선택하지 않는다.
 
@@ -71,11 +88,15 @@ candidate의 개별 working set은 기존 상한을 따르고, old-ready·staged
 | 작업 | 현재 source에서 확인한 단위 | 후속 조건 |
 | --- | --- | --- |
 | imported geometry | 32-byte GpuModelVertex·4-byte u32 index | 전체 배열을 한 번에 pack하지 않고 record 경계의 범위 cursor. buffer offset/크기 alignment 유지 |
-| legacy geometry | 실제 Vertex stride·u32 index | 실제 layout별 whole-record 범위, 같은 staging 경로 사용 |
+| legacy geometry | 현재24-byte GpuVertex·4-byte u32 index | 실제 layout별 whole-record 범위, 같은 staging 경로 사용 |
 | texture | mip index·RGBA row 범위, 현재 최대4096축의 row는16KiB | mip/첫 row/row count cursor. queue.write_texture와 buffer-copy의 row 정렬 차이·보수적 staging charge 구분 |
-| texture/sampler/bind group 생성 | device resource 개수 | byte 한도와 별개로 pump별 생성 개수 제한. 큰 생성 호출의 시간 상한은 보장하지 않음 |
+| texture/sampler/bind group/pipeline 생성 | 실제 create_* 호출 수 | byte 한도와 별개로 pump별 생성 개수 제한. texture view·shader module·pipeline/layout도 포함. 큰 생성 호출의 시간 상한은 보장하지 않음 |
 
-각 pump는 nonwaiting completion poll→허용된 작은 작업→필요한 stage submit/serial 등록으로 진행한다. write만 하고 stage 완료로 기록하지 않는다. draw 없는 submission과0-byte submission도 실제 수행하면 공통 in-flight 장부에 포함한다. GPU callback은 serial/watermark 같은 작은 metadata만 게시하며 큰 backing의 마지막 drop을 맡기지 않는다.
+각 pump는 nonwaiting completion poll→old-ready draw와 작은 stage chunk의 preflight→한 queue submit/serial 등록으로 진행한다. window에서는 surface acquire를 먼저 수행한다. 필요한 CPU 검증·예산·frame write와 chunk·GPU object 준비를 queue.write_* 전에 확정한다. acquire/효과 전 preflight가 실패하면 write를 enqueue하거나 cursor를 진행하지 않는다. write 뒤 예외/fatal이 생기는 경로는 실제 pending write/charge를 숨기지 않고 drain/실패로 수렴해야 한다.
+
+wgpu의 queue.write_*는 다음 submit에 연동되므로 stage write만 enqueue해 두고 다른 draw가 우연히 제출하기를 기다리지 않는다. 한 combined submit의 serial을 touched stage 자원과 old-ready draw 자원 모두에 기록한다. GPU callback은 serial/watermark 같은 작은 metadata만 게시하며 큰 backing의 마지막 drop을 맡기지 않는다.
+
+초기 scheduler 제안은 **pump당4MiB upload·candidate에 추가되는 실제 GPU 생성8회 이하, stage chunk는 최대1개 outstanding**이다. 성능 실측값이 아니다. 기존 draw/target 처리 비용까지8회로 제한한다는 뜻은 아니다. quota는 ensure_model_pipeline 호출을1회로 세지 않는다. 현재 최초 model/sprite ensure는 shared bind-group layout이 없으면1회와 pipeline layout·shader module·render pipeline 각1회가 필요하다. 공유 layout이 이미 있으면 각각3회다. 의존 atomic group이 남은 quota에 맞지 않으면 다음 pump로 미루며, config 자체가 최소 group보다 작으면 효과 전 오류로 거부한다. 모든 자원의 GPU allocation은 byte chunk와 달리 전체 크기로 생성되므로4MiB가 allocation/driver 시간 상한이라는 뜻은 아니다.
 
 ## 기존 ceiling과 동결할 scheduling 정책
 
@@ -85,10 +106,14 @@ candidate의 개별 working set은 기존 상한을 따르고, old-ready·staged
 | 전체 GPU residency | working128MiB/hard256MiB | active/candidate 개별 working, retained union/hard 적용을 수치 리뷰 후 동결 |
 | texture/sampler/bind group | active256/256/1024, total512/512/2048 | old+staged+incomplete retired 포함·완료된 unpinned cache만 eviction |
 | staging·CPU upload scratch | 각각128MiB, bookkeeping8MiB | stage 별도 무제한 queue/예산 금지. 구체 upload path의 논리적 byte 장부 사용 |
-| in-flight submission | 최대3 | stage batch 최대1개와 last-good presentation 여유·공정성. reduced limit1의 동시 진행은 보장할 수 없음 |
+| in-flight submission | 기본 최대3, 기존 유효한1/2 유지 | stage+old-ready draw는 한 slot 사용. stage chunk outstanding 최대1. max1이면 이전 submit 완료 뒤 다음 combined draw, max2도 별도 stage slot 불필요 |
 | prepared CPU | 기존 per-project geometry64MiB/metadata8MiB | aggregate128MiB/16MiB는 전체 activation 문서의 제안. 실제 별도 backing/공유·retired를 리뷰해 확정 |
 
-stage가 마지막 presentation 여유 슬롯/bytes를 모두 소비하지 않게 예약한다. byte 예약은 last-good의 다음 실제 write plan과 보수적인 frame-update 상한을 구분한다. 낮춘 시험 상한에서 staging/presentation 둘 다 진행할 수 없는 config를 거부할지, 제한된 모드로 명시할지 API 동결 때 결정한다. pump byte/생성 개수 기본값·fairness·max-in-flight 최소값은 아직 미결이다. 1ms/144fps·특정 완료 시간을 보장하지 않는다.
+별도 stage-only submission을 위해 최소3 slots를 강제하거나 presentation slot을 빼앗지 않는다. stage chunk의 이전 serial이 미완료면 그리는 일은 허용하되 새 stage chunk를 만들지 않는다. max1에서 기존 submit이 미완료인 동안 draw도 원래 in-flight Busy이며 completion 이후 combined 경로가 진행한다. initial의 clear/loading pass도 같은 장부/slot 규칙을 따른다. native surface가 hidden/minimized/acquire 불가면 첫 native 경로는 GPU stage도 보류하고 CPU/취소/stop은 진행한다. surface 없는 stage 진행이 필요하면 별도 offscreen scheduling 계약으로 추가하며 D1 headless 요구를 삭제하지 않는다.
+
+byte admission은 현재 실제 frame write+허용 chunk+미완료 장부를 함께 세며, 다음 old-ready frame의 보수적 write 여유를 남긴다. 현재 선언의 GpuInstance128·MaterialUniform48·SpriteUvUniform16·GlobalsUniform128·OverlayUniform16을 기준으로 `max_instances × (128+48+16) + 128+16`이다. 기본16384에서 **3,145,872bytes**이며 source layout 산술이고 실측 성능이 아니다. 코드는 checked size_of 기반으로 계산해 layout 변경을 따라야 한다. 작은 config도 같은 식을 따른다.
+
+일시적으로 in-flight bytes가 부족하면 old-ready만 그리고 chunk를 미룬다. 빈 장부에서도 한 whole-record/whole-row·필요 frame 예약이 영구히 맞지 않는 config는 typed budget/config 오류이며 Busy를 무한 반환하지 않는다. texture upload charge는 보수적으로256-row-pitch를 적용하되 Queue.write_texture 자체에 buffer-copy와 같은256 정렬 요구가 있다고 설명하지 않는다. 구체 API·frame CPU accounting·추가 할당 경계의 수치 최종 리뷰는 남아 있다. 1ms/144fps·특정 완료 시간을 보장하지 않는다.
 
 ## commit·표시와 실패
 
@@ -96,7 +121,9 @@ device staged 전에는 active source/slot bindings/last-good packet을 교체�
 
 제출 성공만으로 old-ready pin을 풀지 않는다. 새 committed generation의 `frame.present()` 이후 live ACK와 GPU completion/실제 남은 CPU owner를 각각 확인한다. present 관찰은 엔진의 surface present 호출 경계이며 OS compositor의 물리적 scanout/가시성 측정이라는 보장은 아니다. acquire 뒤 drop·제출만 성공한 frame은 presented로 기록하지 않는다.
 
-효과 전 topology/지원 범위·working-set 초과는 typed candidate 실패, 일시적 pin/in-flight 부족은 Busy/Pending으로 구분한다. partial upload 뒤 취소/실패한 자원도 해당 completion serial 전에는 실제 eviction/charge 반환을 하지 않는다. 기존 정상 packet/slot은 보존한다. device loss/OOM 같은 fatal 오류는 실제 실패로 보고하며 정상 표시로 위장하지 않는다. commit 뒤 표시 지연/실패는 committed와 presented identity를 따로 보고하고 world/source generation을 되감지 않는다.
+효과 전 topology/지원 범위·working-set 초과는 typed candidate 실패, 일시적 pin/in-flight 부족은 Busy/Pending으로 구분한다. **업로드 범위 완성 여부와 GPU serial 완료는 별개다.** 새 buffer/texture는 모든 필요한 record/row/mip가 채워지고 final serial도 완료되기 전까지 일반 ready cache hit가 아니다. 같은 content key라는 이유로 불완전 자원을 사용하지 않는다.
+
+취소/실패는 다음 chunk를 중단하며 partial 자원도 마지막 실제 serial 완료까지 charge/pin을 보존한다. 첫 구현안은 incomplete 객체를 그 뒤 폐기하고 새 시도에서 재생성한다. fence 완료만으로 incomplete를 ready 승격하지 않는다. 기존 complete key를 재사용한 자원은 기존 정상 상태를 유지한다. 기존 정상 packet/slot은 보존한다. device loss/OOM 같은 fatal 오류는 실제 실패로 보고하며 정상 표시로 위장하지 않는다. commit 뒤 표시 지연/실패는 committed와 presented identity를 따로 보고하고 world/source generation을 되감지 않는다.
 
 ## 인수와 다음 동결 목록
 
@@ -104,8 +131,8 @@ device staged 전에는 active source/slot bindings/last-good packet을 교체�
 
 - [ ] b.2 predecessor 인수와 필요한 native factory/consumer port·단일 lease/ACK 용량.
 - [ ] source retention token·prepared CPU cleanup owner graph와 실제 final-drop/byte 회계.
-- [ ] immutable stage 입력·public stage/pump/commit/cancel/status API 및 typed 오류·ID.
-- [ ] pump 작업량·resource 생성 수·submission/byte 예약·낮춘 config/fairness.
+- [ ] resource-only stage 입력·공유 ResourceRequests planner·public API 및 typed 오류·ID.
+- [ ] combined submit·pump4MiB/생성8회 제안·다음 frame byte 예약·낮춘 config/fairness와 partial completeness.
 - [ ] 실제 present ACK·post-commit 실패·최종 outcome 해제/종료 순서.
 - [ ] CLI/protocol2 확장·같은 fixture/helper 재사용·Luna 파일/manifest/Cargo owner.
 

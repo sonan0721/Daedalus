@@ -1,6 +1,6 @@
 # 개발 반복 작업의 공통화와 자동화
 
-상태: 실제 중복 감사·적용 진행 중 · 2026-10-16 · A-039/A-041
+상태: 실제 중복 감사·적용 진행 중 · 2026-10-17 · A-039/A-041
 
 ## 목적
 
@@ -14,10 +14,10 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1·model/sprite/audio·P03.3a persistent CPU 후보를 PR14까지 인수. warm decode/leaf cook0, read/parse는 남음. b.2 CPU 교체 구현 중, render/audio 전환 후속 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1·model/sprite/audio·P03.3a persistent CPU 후보를 PR14까지 인수. warm decode/leaf cook0, read/parse는 남음. b.2 CPU 교체 구현·CPU/CI 검증, native 출력 인수 보류. render/audio 전환 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite·audio 실제 소비 인수. 실행 중 patch 후속 |
-| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 기본 CPU18·기존 opt-in 합산 CPU50/native60을 같은 smoke backend에서 검증. CPU activation opt-in28의 실제 CLI 첫 검증 통과, 통합/최종 source/package 후속. 통합 환경 진단/전체 gate 자동화 후속 |
+| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 기존 helper의 assets/audio/preparation/activation CPU62와 양 package CI 검증. native 출력은 실제 실패로 인수 보류. 같은 binary의 native-only 분리 진단 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
 | DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh·model texture/sprite·native GPU cache·dirty instance/material 검증. 실행 중 세대 전환·skin 후속 |
 
@@ -26,6 +26,12 @@
 ### 실패 뒤 반복 범위 줄이기
 
 P03.3b.2의 실제 native audio 실패에서는 이미 생성·검증한 archive의 같은 extracted CLI/hash를 유지하고 기존 helper의 `--audio-native`만 분리 실행했다. 전체 assets/window/prepare/activation을 다시 실행하지 않고 같은 10초 종료 실패를 재현했다. 다음은 [test-only native 진행 진단](../03-architecture/native-audio-progress-diagnostics.md)으로 position/state·stream 오류를 관측한다. 원인을 모른 채 전체 suite/CI를 반복하거나 timeout을 늘리지 않는다. production 변경이 생기면 영향받는 통합·배포 경로를 다시 검증하며 이전 binary의 결과를 새 binary에 전용하지 않는다. 이는 실제 반복 범위 감소이며 wall-time 개선 배율이나 전체 DEV06 완료는 아니다.
+
+### CLI의 연결을 SDK에서 재사용하기
+
+source 감사 결과 project_view가 입력·snapshot 추출·window·actor의 조합을 직접 소유한다. [native project host](../03-architecture/native-project-host.md)는 이 조합을 공개 engine library로 옮기고 CLI/추후 MCP를 adapter로 만드는 구체안이다. [staged renderer](../03-architecture/staged-render-asset-generation.md)는 실제 entity binding의 resource-only 입력을 기존 planner에 투영하고, 작은 업로드와 기존 화면을 한 submit으로 조합하는 안이다. game/CLI마다 별도 lifecycle·cache·staging planner를 다시 작성하지 않게 한다. 아직 구현/속도 향상 결과는 아니다.
+
+기존 Rust type의 설계 probe에서는 renderer를 공유 cache로 한 번 빌드하고 누락 assertion 보완은 같은 rlib에 rustc --test를 직접 적용했다. 새 cold workspace/Cargo rebuild 없이 실제3건을 다시 확인했다. [작업 기록](../06-worklog/2026-10-17-native-host-design.md)에 source/hash·실패 상태·근거 한계를 보존한다. 이 일회성 probe를 새 상시 smoke framework로 늘리지 않는다.
 
 ## 이번 코드 감사에서 확인한 반복
 

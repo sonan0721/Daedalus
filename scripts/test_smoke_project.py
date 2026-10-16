@@ -19,12 +19,16 @@ from smoke_project import (
     MAX_STDOUT_PIPE_FILL_BYTES,
     SmokeError,
     _JsonlProjectServer,
+    _asset_preparation_command,
+    _asset_preparation_status,
     _fill_stdout_pipe,
     _parse_args,
+    _project_view_command,
     _v2_poll_until,
     _v2_submit,
     _decode_glb,
     _write_asset_project,
+    _write_asset_preparation_view_project,
     _write_audio_project,
     _write_model_view_project,
     _write_sprite_view_project,
@@ -196,6 +200,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertFalse(arguments.sprites)
         self.assertFalse(arguments.audio)
         self.assertFalse(arguments.audio_native)
+        self.assertFalse(arguments.asset_preparation)
         view_arguments = _parse_args(["--cli", "/bin/true", "--view"])
         self.assertTrue(view_arguments.view)
         asset_arguments = _parse_args(["--cli", "/bin/true", "--assets"])
@@ -208,6 +213,10 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertTrue(audio_arguments.audio)
         native_audio_arguments = _parse_args(["--cli", "/bin/true", "--audio-native"])
         self.assertTrue(native_audio_arguments.audio_native)
+        asset_preparation_arguments = _parse_args(
+            ["--cli", "/bin/true", "--asset-preparation"]
+        )
+        self.assertTrue(asset_preparation_arguments.asset_preparation)
         combined_arguments = _parse_args(["--cli", "/bin/true", "--assets", "--view"])
         self.assertTrue(combined_arguments.assets)
         self.assertTrue(combined_arguments.view)
@@ -222,9 +231,197 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         self.assertTrue(combined_audio.assets)
         self.assertTrue(combined_audio.audio)
         self.assertTrue(combined_audio.audio_native)
+        combined_preparation = _parse_args(
+            ["--cli", "/bin/true", "--asset-preparation", "--view"]
+        )
+        self.assertTrue(combined_preparation.asset_preparation)
+        self.assertTrue(combined_preparation.view)
+        combined_audio_preparation = _parse_args(
+            ["--cli", "/bin/true", "--audio", "--asset-preparation"]
+        )
+        self.assertTrue(combined_audio_preparation.audio)
+        self.assertTrue(combined_audio_preparation.asset_preparation)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])
+
+    def test_asset_preparation_view_flag_is_opt_in_and_fixture_keeps_all_assets(self) -> None:
+        project = self.root / "asset-preparation-view-fixture"
+        _write_asset_preparation_view_project(project)
+        manifest = json.loads((project / "daedalus.project.json").read_text(encoding="utf-8"))
+        scene = json.loads((project / "scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "offline-asset-preparation-view-smoke")
+        self.assertEqual(len(scene["assets"]), 6)
+        self.assertEqual(len(scene["entities"]), 1)
+        components = {item["type_id"]: item for item in scene["entities"][0]["components"]}
+        self.assertEqual(
+            components["daedalus.model_renderer"]["data"],
+            {"model": "asset:model-external"},
+        )
+
+        default = _project_view_command(project, self.root / "view.json", seconds=3)
+        prepared = _project_view_command(
+            project,
+            self.root / "view-prepared.json",
+            seconds=3,
+            asset_preparation=True,
+        )
+        self.assertNotIn("--asset-preparation", default)
+        self.assertNotIn("--audio", default)
+        self.assertIn("--stdio-control", prepared)
+        self.assertEqual(prepared[-1], "--asset-preparation")
+        prepared_audio = _project_view_command(
+            project,
+            self.root / "view-prepared-audio.json",
+            seconds=3,
+            asset_preparation=True,
+            audio=True,
+        )
+        self.assertEqual(
+            prepared_audio[prepared_audio.index("--audio") : prepared_audio.index("--audio") + 2],
+            ["--audio", "offline"],
+        )
+        self.assertEqual(prepared_audio[-1], "--asset-preparation")
+
+    def test_asset_preparation_status_uses_bounded_ticket_parser(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "status = {'session':'7','active_generation':'1','active_source_digest':'sha256:test',"
+            "'active_cooked_accounted_bytes':123,'desired':None,'running':None,'pending':None,"
+            "'state':'idle','ready_candidate':None,'latest_failure':None}\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,"
+            "'result':{'kind':'submitted','data':{'ticket':'t1','request_id_reused':False}}}), flush=True)\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "terminal = {'ok':True,'result':{'kind':'asset_preparation','data':{'kind':'status','data':status}}}\n"
+            "print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,"
+            "'result':{'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':terminal}}}), flush=True)\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,"
+            "'result':{'kind':'acked'}}), flush=True)\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=STUB_TIMEOUT_SECONDS,
+            protocol_version=2,
+            process_label="asset-preparation status stub",
+        )
+        with server:
+            status, result = _asset_preparation_status(
+                server,
+                "asset-status-test",
+                timeout=STUB_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(status["state"], "idle")
+            self.assertEqual(status["session"], "7")
+            self.assertEqual(result["kind"], "asset_preparation")
+        self.assertIsNotNone(server.process.returncode)
+
+    def test_asset_preparation_retries_only_terminal_busy_after_ack(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "def read(): return json.loads(sys.stdin.readline())\n"
+            "def reply(request, result):\n"
+            " print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,'result':result}), flush=True)\n"
+            "operation = {'op':'asset_preparation_prepare','command_id':'44'}\n"
+            "first_submit = read()\n"
+            "assert first_submit['request']['operation'] == operation\n"
+            "reply(first_submit, {'kind':'submitted','data':{'ticket':'busy-ticket','request_id_reused':False}})\n"
+            "poll = read()\n"
+            "busy = {'ok':False,'error':{'code':'busy','message':'try lock busy'}}\n"
+            "reply(poll, {'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':busy}})\n"
+            "ack = read()\n"
+            "assert ack['request']['op'] == 'ack' and ack['request']['ticket'] == 'busy-ticket'\n"
+            "reply(ack, {'kind':'acked'})\n"
+            "second_submit = read()\n"
+            "assert second_submit['request_id'] != first_submit['request_id']\n"
+            "assert second_submit['request']['operation'] == operation\n"
+            "reply(second_submit, {'kind':'submitted','data':{'ticket':'ready-ticket','request_id_reused':False}})\n"
+            "poll = read()\n"
+            "command = {'command_id':'44','observed_tick':'0','outcome':{'kind':'prepare_accepted','data':{'candidate':{'session':'7','epoch':'1'}}}}\n"
+            "terminal = {'ok':True,'result':{'kind':'asset_preparation','data':{'kind':'command','data':command}}}\n"
+            "reply(poll, {'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':terminal}})\n"
+            "ack = read()\n"
+            "assert ack['request']['op'] == 'ack' and ack['request']['ticket'] == 'ready-ticket'\n"
+            "reply(ack, {'kind':'acked'})\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=STUB_TIMEOUT_SECONDS,
+            protocol_version=2,
+            process_label="asset-preparation Busy retry stub",
+        )
+        with server:
+            command, _ = _asset_preparation_command(
+                server,
+                "asset-preparation-busy-retry",
+                {"op": "asset_preparation_prepare", "command_id": "44"},
+                command_id="44",
+                outcome_kind="prepare_accepted",
+                timeout=STUB_TIMEOUT_SECONDS,
+            )
+        self.assertEqual(command["command_id"], "44")
+        self.assertEqual(command["outcome"]["data"]["candidate"]["epoch"], "1")
+        self.assertIsNotNone(server.process.returncode)
+
+    def test_asset_preparation_timeout_terminates_and_reaps_server(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys, time\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,"
+            "'result':{'kind':'submitted','data':{'ticket':'t1','request_id_reused':False}}}), flush=True)\n"
+            "json.loads(sys.stdin.readline())\n"
+            "time.sleep(30)\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=1.0,
+            protocol_version=2,
+            process_label="asset-preparation stalled status stub",
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(SmokeError, "timed out"):
+            with server:
+                _asset_preparation_status(server, "asset-status-timeout", timeout=0.15)
+
+        self.assertIsNotNone(server.process.poll())
+        self.assertTrue(server._stdin.closed)
+        self.assertTrue(server._stdout.closed)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_asset_preparation_terminal_failure_surfaces_code_and_reaps_server(self) -> None:
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,"
+            "'result':{'kind':'submitted','data':{'ticket':'t1','request_id_reused':False}}}), flush=True)\n"
+            "request = json.loads(sys.stdin.readline())\n"
+            "terminal = {'ok':False,'error':{'code':'asset_preparation_unavailable','message':'disabled'}}\n"
+            "print(json.dumps({'protocol':2,'request_id':request['request_id'],'ok':True,"
+            "'result':{'kind':'poll','data':{'phase':'terminal','authority':None,'terminal':terminal}}}), flush=True)\n"
+            "import time; time.sleep(30)\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=STUB_TIMEOUT_SECONDS,
+            protocol_version=2,
+            process_label="asset-preparation failed status stub",
+        )
+        with self.assertRaisesRegex(SmokeError, "asset_preparation_unavailable"):
+            with server:
+                _asset_preparation_status(server, "asset-status-failure", timeout=STUB_TIMEOUT_SECONDS)
+
+        self.assertIsNotNone(server.process.poll())
+        self.assertTrue(server._stdin.closed)
+        self.assertTrue(server._stdout.closed)
 
     def test_invalid_jsonl_response_terminates_and_reaps_server_child(self) -> None:
         binary = self.create_server_stub(

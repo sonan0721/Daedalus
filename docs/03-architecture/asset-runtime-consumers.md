@@ -1,6 +1,6 @@
 # P03.2 실제 model·texture·sprite·audio 소비
 
-상태: a/b 하위 gate 인수, c 로컬 CPU/native/archive 검증·PR/CI/main 인수 대기·전체 P03.2 미통과 · 2026-10-16 · P03/DEV03/DEV05/DEV08
+상태: a/b/c 첫 consumer와 P03.2 인수, source generation/reload·전체 P03 미통과 · 2026-10-16 · P03/DEV03/DEV05/DEV08
 
 ## 목적과 선행 조건
 

@@ -91,14 +91,15 @@ jobs:
           fi
           python3 scripts/package_cli.py "${package_args[@]}"
 
-      - name: Verify packaged CLI asset and offline audio smoke
+      - name: Verify packaged CLI asset, audio, and preparation smoke
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
         run: |
           python3 scripts/smoke_project.py \
             --cli "dist/release-package/$EXPECTED_TARGET/daedalus" \
             --assets \
-            --audio
+            --audio \
+            --asset-preparation
 
       - name: Verify packaged Linux audio runtime linkage
         if: runner.os == 'Linux'

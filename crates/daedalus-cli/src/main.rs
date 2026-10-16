@@ -117,6 +117,9 @@ enum ProjectCommands {
         /// Explicitly start imported audio in the selected backend; no audio is loaded otherwise.
         #[arg(long, value_enum)]
         audio: Option<project::ProjectAudioArg>,
+        /// Enable the native bounded live asset-preparation worker (protocol 2 only).
+        #[arg(long)]
+        asset_preparation: bool,
     },
     /// Open the external project with a native window and optional protocol-2 control.
     #[cfg(feature = "window")]

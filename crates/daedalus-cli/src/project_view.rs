@@ -20,10 +20,11 @@ use daedalus_renderer::{
     run_packet_windowed_presented, window_input_channel,
 };
 use daedalus_runtime::{
-    EngineConfig, ProjectInfoPage, RequestPhase, RequestReadError, RequestTicket, SessionClockMode,
-    SessionControlClient, SessionControlConfig, SessionControlLimits, SessionControlService,
-    SessionEntityTarget, SessionOperation, SessionRequestResult, SessionSubmitError,
-    SessionTermination, WaitStage,
+    EngineConfig, NativeProjectPreparationOptions, NativeProjectPreparationService,
+    PreparationWorkerShutdown, ProjectInfoPage, RequestPhase, RequestReadError, RequestTicket,
+    SessionClockMode, SessionControlClient, SessionControlConfig, SessionControlLimits,
+    SessionControlService, SessionEntityTarget, SessionOperation, SessionRequestResult,
+    SessionSubmitError, SessionTermination, WaitStage,
 };
 use serde_json::{Value, json};
 
@@ -54,6 +55,9 @@ pub(super) struct ProjectViewArgs {
     /// Attach bounded protocol-2 JSONL control to stdin/stdout.
     #[arg(long)]
     pub stdio_control: bool,
+    /// Enable the native bounded live asset-preparation worker (requires --stdio-control).
+    #[arg(long)]
+    pub asset_preparation: bool,
     /// Stable entity ID controlled by the arrow-key diagnostic action.
     #[arg(long)]
     pub controlled_entity: Option<String>,
@@ -111,9 +115,28 @@ enum InputTicket {
 pub(super) fn run(args: ProjectViewArgs) -> Result<(), Box<dyn Error>> {
     validate_args(&args)?;
     let clock = args.clock.runtime();
-    let project = Arc::new(super::project_assets::load_project_runtime(
-        &args.directory,
-    )?);
+    if args.audio.is_some() && !cfg!(feature = "audio") {
+        return Err(
+            "audio support is not compiled into this CLI; rebuild with --features audio".into(),
+        );
+    }
+    if args.audio == Some(ProjectAudioArg::Native) && !cfg!(feature = "native-audio") {
+        return Err("native audio support is not compiled into this CLI; rebuild with --features native-audio".into());
+    }
+    let mut preparation_owner = if args.asset_preparation {
+        Some(NativeProjectPreparationService::start(
+            NativeProjectPreparationOptions::new(&args.directory),
+        )?)
+    } else {
+        None
+    };
+    let project = if let Some(owner) = preparation_owner.as_ref() {
+        Arc::clone(owner.initial_project())
+    } else {
+        Arc::new(super::project_assets::load_project_runtime(
+            &args.directory,
+        )?)
+    };
     let control_limits = SessionControlLimits::default();
     let mut service_config = SessionControlConfig {
         engine: EngineConfig::default(),
@@ -124,15 +147,34 @@ pub(super) fn run(args: ProjectViewArgs) -> Result<(), Box<dyn Error>> {
         .engine
         .snapshot_entity_capacity
         .max(project.entities().len());
-    let service =
-        super::project::start_control_service(Arc::clone(&project), service_config, args.audio)?;
+    let service_result = if let Some(owner) = preparation_owner.as_mut() {
+        match owner.take_control_port() {
+            Ok(port) => super::project::start_control_service_with_preparation(
+                Arc::clone(&project),
+                service_config,
+                port,
+                args.audio,
+            ),
+            Err(error) => Err(Box::new(error) as Box<dyn Error>),
+        }
+    } else {
+        super::project::start_control_service(Arc::clone(&project), service_config, args.audio)
+    };
+    let service = match service_result {
+        Ok(service) => service,
+        Err(error) => {
+            let _ = super::project::stop_preparation_worker(&mut preparation_owner);
+            return Err(error);
+        }
+    };
 
     let run_result = run_window(&args, Arc::clone(&project), &service, clock, control_limits);
     service.request_stop();
     let shutdown = service.shutdown();
+    let preparation_shutdown = super::project::stop_preparation_worker(&mut preparation_owner)?;
     let run = run_result?;
     let termination = shutdown.termination.clone();
-    let report = build_report(&args, project.as_ref(), run, shutdown);
+    let report = build_report(&args, project.as_ref(), run, shutdown, preparation_shutdown);
     emit_report(&args, report)?;
     if let Some(error) = session_termination_error(&termination) {
         return Err(error.into());
@@ -153,6 +195,9 @@ fn session_termination_error(termination: &SessionTermination) -> Option<String>
 }
 
 fn validate_args(args: &ProjectViewArgs) -> Result<(), Box<dyn Error>> {
+    if args.asset_preparation && !args.stdio_control {
+        return Err("--asset-preparation requires --stdio-control for project view".into());
+    }
     if !(64..=MAX_VIEW_WIDTH).contains(&args.width)
         || !(64..=MAX_VIEW_HEIGHT).contains(&args.height)
     {
@@ -681,6 +726,7 @@ fn build_report(
     project: &PreparedProject,
     run: WindowRun,
     shutdown: daedalus_runtime::SessionShutdownReport,
+    preparation_shutdown: Option<PreparationWorkerShutdown>,
 ) -> Value {
     let outcome = run.outcome;
     let asset_resources =
@@ -771,7 +817,7 @@ fn build_report(
             "source_digest":frame.source_digest,
         })),
     });
-    json!({
+    let mut report = json!({
         "command":"project_view",
         "project_name":project.manifest().name,
         "source_digest":project.digest(),
@@ -790,7 +836,12 @@ fn build_report(
         "coordinator":coordinator,
         "limits":{"width":args.width,"height":args.height,"seconds":args.seconds,"frames":args.frames},
         "live_capture":false,"mcp":false,
-    })
+    });
+    if let Some(status) = preparation_shutdown {
+        report["asset_preparation_worker"] =
+            json!(super::project::preparation_shutdown_name(status));
+    }
+    report
 }
 
 fn emit_report(args: &ProjectViewArgs, report: Value) -> Result<(), Box<dyn Error>> {

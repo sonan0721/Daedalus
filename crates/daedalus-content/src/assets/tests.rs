@@ -87,18 +87,98 @@ fn context<'a>(
     cache: &'a mut dyn CpuCookCache,
     cancellation: &'a ImportCancellation,
 ) -> AssetImportContext<'a> {
+    context_with_limits(resolver, cache, cancellation, ImportLimits::default())
+}
+
+fn context_with_limits<'a>(
+    resolver: &'a mut ByteMapSourceResolver,
+    cache: &'a mut dyn CpuCookCache,
+    cancellation: &'a ImportCancellation,
+    limits: ImportLimits,
+) -> AssetImportContext<'a> {
     let source = SourceBlob::new(
         SourceId::new("daedalus.project.json").unwrap(),
         Arc::<[u8]>::from(&b"{}"[..]),
     );
-    AssetImportContext::new(
-        resolver,
-        cache,
-        ImportLimits::default(),
-        cancellation,
-        [source],
-    )
-    .unwrap()
+    AssetImportContext::new(resolver, cache, limits, cancellation, [source]).unwrap()
+}
+
+#[test]
+fn parser_scratch_peak_tracks_accepted_overlaps_and_released_reservations() {
+    let limits = ImportLimits {
+        max_source_bytes: 32,
+        max_total_source_bytes: 32,
+        max_parser_scratch_bytes: 32,
+        ..ImportLimits::default()
+    };
+    let mut resolver = ByteMapSourceResolver::default();
+    let mut cache = MemoryCookCache::default();
+    let cancellation = ImportCancellation::never();
+    let import = context_with_limits(&mut resolver, &mut cache, &cancellation, limits);
+
+    let first = import
+        .reserve_temporary(
+            super::BudgetKind::ParserScratchBytes,
+            10,
+            ImportLocation::new("test", "first"),
+        )
+        .unwrap();
+    assert_eq!(
+        import.memory_summary().unwrap().parser_scratch_peak_bytes(),
+        10
+    );
+
+    let rejected = import.reserve_temporary(
+        super::BudgetKind::ParserScratchBytes,
+        23,
+        ImportLocation::new("test", "over-limit"),
+    );
+    assert_eq!(rejected.unwrap_err().code().as_str(), "limit_exceeded");
+    assert_eq!(
+        import.memory_summary().unwrap().parser_scratch_peak_bytes(),
+        10,
+        "a reservation rejected before admission must not advance the peak"
+    );
+
+    let second = import
+        .reserve_temporary(
+            super::BudgetKind::ParserScratchBytes,
+            22,
+            ImportLocation::new("test", "second"),
+        )
+        .unwrap();
+    assert_eq!(
+        import.memory_summary().unwrap().parser_scratch_peak_bytes(),
+        32
+    );
+    drop(first);
+
+    let replacement = import
+        .reserve_temporary(
+            super::BudgetKind::ParserScratchBytes,
+            10,
+            ImportLocation::new("test", "replacement"),
+        )
+        .unwrap();
+    assert_eq!(
+        import.memory_summary().unwrap().parser_scratch_peak_bytes(),
+        32
+    );
+    drop(second);
+    drop(replacement);
+
+    let full_limit = import
+        .reserve_temporary(
+            super::BudgetKind::ParserScratchBytes,
+            32,
+            ImportLocation::new("test", "released-all"),
+        )
+        .unwrap();
+    assert_eq!(
+        import.memory_summary().unwrap().parser_scratch_peak_bytes(),
+        32
+    );
+    drop(full_limit);
 }
 
 #[test]

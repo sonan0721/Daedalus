@@ -235,6 +235,7 @@ fn execute(directory: &Path, cache_root: &Path) -> Result<Vec<u8>, CookFailure> 
         },
         counts,
         metrics: report.metrics(),
+        memory: report.memory(),
         assets: report.assets(),
         sources: report.sources(),
     };
@@ -267,6 +268,7 @@ struct CookOutput<'a> {
     runtime_consumers: RuntimeConsumers,
     counts: CookCounts,
     metrics: &'a AssetImportMetrics,
+    memory: &'a daedalus_content::assets::AssetImportMemorySummary,
     assets: &'a [daedalus_content::assets::AssetSummary],
     sources: &'a [daedalus_content::assets::AssetSourceSummary],
 }
@@ -482,13 +484,18 @@ impl CookFailure {
 #[cfg(test)]
 mod loader_tests {
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use daedalus_content::assets::{AssetImportErrorCode, CacheLimits, FileCookCache};
     use daedalus_content::project::ProjectManifest;
     use daedalus_content::scene::{AssetDescriptor, SceneDocument, StableId};
 
-    use super::{load_project_read_only, load_project_runtime_with_cache_root};
+    use super::{
+        CookFailure, execute, load_project_read_only, load_project_runtime_with_cache_root,
+    };
+
+    static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 
     fn write_audio_project(path: &std::path::Path) {
         fs::create_dir_all(path).unwrap();
@@ -532,8 +539,9 @@ mod loader_tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "daedalus-cli-loader-{}-{nonce}",
-            std::process::id()
+            "daedalus-cli-loader-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed),
         ))
     }
 
@@ -597,6 +605,38 @@ mod loader_tests {
         );
         assert_eq!(file_error.path(), Some("project_root"));
         assert!(!file_cache.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_cook_emits_the_import_report_memory_summary_verbatim() {
+        let root = temporary_root();
+        let project_path = root.join("project");
+        let cache_root = root.join("cache");
+        write_audio_project(&project_path);
+
+        let output = match execute(&project_path, &cache_root) {
+            Ok(output) => output,
+            Err(CookFailure::Import(error)) => {
+                panic!(
+                    "project cook summary generation failed: {}",
+                    error.code().as_str()
+                )
+            }
+        };
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let expected_project = load_project_read_only(&project_path).unwrap();
+        let report = expected_project.asset_import_report().unwrap();
+        let expected_memory = serde_json::to_value(report.memory()).unwrap();
+        let expected_source_count = report.sources().len() as u64;
+
+        assert_eq!(value.get("memory"), Some(&expected_memory));
+        assert!(expected_memory["cookedAccountedBytes"].as_u64().unwrap() > 0);
+        assert_eq!(
+            expected_memory["uniqueSourceCount"].as_u64(),
+            Some(expected_source_count)
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

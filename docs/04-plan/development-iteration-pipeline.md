@@ -14,9 +14,9 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1 CPU/실제 원본·clean package/PR10 CI 인수. warm decode/leaf cook0, read/parse는 남음. 실제 consumer/reload 후속 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1과 model/sprite/audio 소비 인수. warm decode/leaf cook0, read/parse는 남음. P03.3a persistent CPU 후보 구현·검증 중, 실행 중 교체 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
-| DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite 실제 소비 인수. audio 소비 구현 중, 실행 중 patch 후속 |
+| DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite·audio 실제 소비 인수. 실행 중 patch 후속 |
 | DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
 | DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh handle·native GPU cache·dirty instance/material 검증, cook/reload·texture/skin 후속 |
@@ -137,3 +137,25 @@ PNG alpha 감사는 같은 readback/row-unpadding/encoder에 private 표현 poli
 QA에서도 관찰 경계를 재사용한다. 첫 sprite native 회귀가 initial frame coalescing 때문에 실패했고 published snapshot 조회는 실제 present ACK를 대신하지 못했다. 중복 polling·sleep을 추가하지 않고 최종 native actual view와 기존 ordered Metal dirty-write 시험으로 근거를 나눴다. device 없는 CPU24(audio 포함)와 실제 native1을 opt-in으로 결합하며, package CI도 기존 asset step에 audio를 붙인다. clean archive·CI/main 결과는 아직 대기이며 DEV06/07 전체 완료는 아니다.
 
 후속 clean archive `95de9b0`도 동일 helper의46건/15.094582초와 공개 WAV offline·native-view를 통과했다. same-window 음향 QA는 기존 public source·JSONL/ACK/timeout·window-report helper를 확장한 ignored 일회성 mode로 확인했다. 새 별도 protocol/게임 project를 추가하지 않았다. notice 누락은 실제 두 target graph를 먼저 검사해 macOS10/Linux공통2를 함께 보강했고 strict221/236dependency의 missing0을 확인했다. 실제 PR CI/main 인수는 아직 대기다. 구체 source/artifact hash와 첫 실패는 audio worklog를 따른다.
+
+그 뒤 PR13의 다섯 CI·두 packaged assets/audio37건·Linux 동적 linkage와 main 동일 tree를 확인해 P03.2c를 인수했다. 이 결과로 DEV06/07 전체나 엔진 제품을 완료 처리하지 않는다.
+
+## P03.3a에서 줄일 개발 반복
+
+[비동기 준비 계약](../03-architecture/project-asset-preparation.md)은 에셋을 고칠 때마다 project load·service/장치 생성·session handle 취득을 반복해야 하는 현재 경로를 다음 대상으로 삼는다. 한 native worker/cache owner를 유지하고 기존 protocol2의 Prepare/Cancel/Status와 ticket/replay를 사용한다. CLI 전용 importer나 두 번째 authority를 만들지 않는다. 첫 단계는 CPU 후보 준비까지이며 화면/audio 전환과 자동 watcher는 후속이다.
+
+메모리 계측도 importer의 기존 budget ledger와 captured input identities에서 한 번 만든다. library report·bounded CLI cook 출력·후속 preparation status가 같은 summary schema를 참조한다. cold/warm마다 payload를 다시 clone·hash하거나 별도 estimator를 유지하는 중복을 추가하지 않는다. CookedBytes는 전체 heap/RSS가 아니며 decoded image와 중복되는 범위를 명시한다.
+
+구현 분담은 content memory summary → runtime worker/공통 type의 정확한 signature 공유 → actor/CLI adapter 순서다. worker와 actor를 병렬로 작성하기 전에 private 오류·constructor·getter까지 맞춰 컴파일 후 API 재작업을 줄인다. Cargo는 한 담당이 shared target을 사용하고 focused 검증 뒤 통합·장치·archive로 확장한다. 테스트 count와 API 공유 자체는 개발 속도 개선의 측정 결과가 아니다. 실제 반복 import의 read/parse/decode/cook·epoch·session/active identity·wall time과 실패는 [준비 작업 기록](../06-worklog/2026-10-16-project-asset-preparation.md)에 남긴다.
+
+작은 cook-summary 테스트에서 두 번의 lexical compile 오류를 조정자 빌드→작업자 source 수정으로 왕복한 뒤 검증 소유권을 조정했다. source-only 병렬 작업 중에도 다른 Cargo 사용자가 없고 동시 source 변경을 멈춘 구간이면, 해당 Luna에게 **한정한 focused command와 shared-target lease**를 넘겨 자기 범위의 compile/test를 마치게 한다. 완료 뒤 source/Cargo를 명시적으로 회수하고 조정자는 실제 CLI/통합 동작을 검증한다. 하나의 Cargo owner·실패 raw log·독립 제품 검증은 유지하면서 단순 compiler feedback 전달을 줄이는 변경이다. 이전 대비 wall-time 개선은 측정하지 않았다.
+
+worker와 actor가 같은 runtime crate를 공유하는 점도 build 순서에 반영했다. 두 runtime 파일을 먼저 동결해 worker-focused9개와 strict runtime Clippy를 통과시키는 동안 CLI-only source 작업은 계속했다. stub-process Python25개는 Rust source 작성 중 별도 lease로 끝냈다. 이후 runtime/CLI default·audio 조합으로 검증 범위를 넓힌다. 각 담당의 파일을 바꾸는 도중 같은 crate를 컴파일하거나 동시에 프로세스 부하를 더하지 않는다. 첫 실패는 고유 attempt 로그로 보존하고, 새 source 변경이 있는 경우에만 관련 검사를 반복한다. 이 실행 순서 변경의 wall-time 절감 배율은 측정하지 않았다.
+
+후속 gate helper를 고친 뒤 이전의 unused-import 진단을 다시 대조하지 않아 조정자가 필요한 MutexGuard import 제거를 지시했고, runtime/CLI compile attempt03을 한 번 되돌렸다. 복구 뒤 진단과 현재 source/cfg의 대응을 확인하도록 정정했다. 작업 소유권 예외로 작은 수정을 다른 담당에게 넘길 때도 이전 warning을 그대로 적용하지 않고, 해당 심볼의 현재 사용 위치와 build feature를 확인한다. 이는 실제 추가 컴파일을 만든 조정 오류의 기록이며 개선 배율을 꾸미지 않는다.
+
+다음 schema 작업의 실제 중복 후보도 남긴다. protocol2 capability는 현재 base/audio/preparation/조합의 네 operation 배열에 공통 이름을 반복하고, CLI의 feature 사전 검사는 serve/view/factory에 유사 분기가 있다. 새 기능마다 조합 배열·검사 branch를 늘리지 않도록 DEV02의 공통 등록 정보/검증 adapter에서 다룬다. 내부 enum·권한 검사와 wire를 한 선언으로 생성할 때 기존 feature-off 오류·decimal ID·상한·conformance를 유지해야 한다. 이번 준비 기능의 인수 직전에 검증 없는 범용 생성기를 덧붙이지 않으며, 이 항목을 이미 제거한 중복으로 계산하지 않는다.
+
+첫 실제 preparation CPU smoke는 기존 helper 한 invocation으로49개/2.002032초에 통과했다. PNG·warm·node·atlas·WAV의 다섯 후보를 같은 service/cache owner에서 준비하고 epoch/replay/실제 취소를 관찰했다. unchanged warm은 read9/parse8이 남지만 decode·geometry/image/atlas/audio cook·cache write는 모두0이다. 매 수정마다 새 service/session을 만들지 않는 경로가 동작한다는 근거이며, 아직 표시/audio 전환이 연결되지 않아 완성된 edit→observe 루프나 개발 시간 개선율로 보고하지 않는다. binary/input/metrics는 [준비 worklog](../06-worklog/2026-10-16-project-asset-preparation.md)에 둔다.
+
+실제 process 결과 리뷰 뒤 audio와 preparation이 별도 service로만 검사된 빈틈을 보강했다. 기존 ticket/audio helper의 composition 함수 하나를 serve/view에 함께 쓰고 자동 server command ID로 caller high-water 충돌을 피했다. Python만 바뀌었으므로 전체 Rust/GPU를 중복 실행하지 않고 Python61·preparation-only30·combined CPU50·native60을 확인했다. 새 검사도 기존 archive/CI staged binary helper에서 그대로 실행한다. 검사 수/모드가 달라 단1회 wall time을 속도 비교에 쓰지 않는다.

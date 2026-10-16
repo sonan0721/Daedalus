@@ -44,6 +44,8 @@ CI는 read-only contents 권한으로 실행하고 checkout Action을 확인한 
 
 2026-10-16 PR10 종료 때도 API의 protected contexts는 위3개, strict는true였다. 엔진 인수 절차는 여기에 두 native package job 성공을 추가해 총5개를 확인한다. P03.1부터는 두 package 안의 `Verify packaged CLI asset cook smoke` step 성공도 확인한다. 저장소의 allow_merge_commit/allow_rebase_merge는false, allow_squash_merge는true이므로 `gh pr merge`에는 `--squash`를 사용한다. 조회한 최종 head를 `--match-head-commit`으로 고정하고, 병합 후 main file tree와 검증한 head의 동일성을 확인한다. 이는 기존 repo 정책의 실행 방법이며 새 승인 절차가 아니다.
 
+P03.2c에서는 같은 packaged step에 offline audio를 포함했다. P03.3a의 다음 변경은 이 step을 `Verify packaged CLI asset, audio, and preparation smoke`로 이름 붙이고 `--assets --audio --asset-preparation`을 같은 staged binary에 한 번 실행하는 것이다. 장치·다운로드·추가 job 없이 새 native worker/공통 제어도 실제 배포 바이너리에서 검사한다. source/로컬 통과와 두 CI의 실제 새 step 통과를 구분하며, 기존 보호 check3개·제품 gate5개·tag publish 조건은 유지한다.
+
 기여 문서의 구조는 Bevy·Godot의 공식 기여 입구를 참고하되 대규모 팀 규칙을 그대로 복제하지 않았다. [Bevy](https://github.com/bevyengine/bevy/blob/main/CONTRIBUTING.md), [Godot](https://raw.githubusercontent.com/godotengine/godot/master/CONTRIBUTING.md)
 
 ## 개발·CI 파이프라인 최적화

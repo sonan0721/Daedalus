@@ -1367,12 +1367,12 @@ mod tests {
             state
                 .lock()
                 .unwrap()
-                .0
+                .current
                 .get(&super::super::BudgetKind::ParserScratchBytes),
             Some(&reserved)
         );
         drop(lease);
-        assert!(state.lock().unwrap().0.is_empty());
+        assert!(state.lock().unwrap().current.is_empty());
 
         let path = cache.path_for(key);
         let mut file = OpenOptions::new().write(true).open(path).unwrap();

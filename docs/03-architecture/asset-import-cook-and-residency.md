@@ -135,6 +135,25 @@ cache는 session worker 하나만 연다. `FileCookCache::open`의 `.owner.lock`
 
 worker 종료도 협력적이다. 취소를 무시하는 parser 또는 blocking read를 강제 중단하거나 hard deadline 안에 join한다고 보장하지 않는다. UI/tick에서 join하지 않고 owner/control 경로에서 stop 요청과 worker/cache 소유권을 유지하며 실제 종료를 관찰한다. 시간이 지나도 작업이 남으면 Stopping과 lock 보유를 사실대로 보고한다. 구체적인 deadline·retention·process 종료 정책은 구현 전 상세 계약에 남긴다.
 
+## P03.3b/c 상세 계약을 위한 후속 source 감사
+
+P03.3a worker/adapter의 local source를 동결한 뒤 read-only로 확인했다. P03.3a 자체도 아직 clean package/CI 인수 전이며 아래는 다음 activation 설계의 입력이다. source map이나 준비 완료를 activation 구현으로 보고하지 않는다.
+
+| 확인한 경계 | 실제 source 동작 | 상세 계약에서 지켜야 할 조건 |
+| --- | --- | --- |
+| runtime `ProjectSession::new_shared` | 새 Engine·entity handle을 만들고 authored transform으로 초기화 | 새 ProjectSession으로 교체하지 않음. 같은 session/Engine/handle·현재 transform/revision 유지 |
+| actor `publish_frame` | 현재 source와 generation1을 게시 | 하나의 monotonic committed generation·expected-active 검사와 source/snapshot 일치 |
+| preparation worker | worker-local ready payload, status 요약만 공개 | bounded private ownership handoff·lease/회수 장부를 먼저 설계. ticket에 큰 payload를 싣지 않음 |
+| `ProjectRenderResources::prepare/extract` | 준비 때 bindings/resources를 고정하며 extract는 현재 snapshot의 pose/camera를 사용 | 기존 handle map에 후보를 준비하고 heavy CPU 작업은 actor/UI 밖에서 처리. authored pose로 live pose를 덮지 않음 |
+| `PacketRenderer`/window | redraw에서 candidate GPU admission; Busy는 이전 ready를 그리며 실제 `present()` 뒤 별도 identity 기록 | staged resource 슬롯과 recoverable candidate 오류 필요. CPU-ready·GPU-ready·submitted·actual-presented를 각각 보고 |
+| `ProjectAudioRuntime`/Kira | bank1개·voice alias index; backend는 Frame Arc를 보유 가능 | bank generation별 voice identity·같은 backend에서 새 bank staging·old loop와 callback backing을 포함한 bounded retirement |
+
+첫 asset-only activation은 scene entity/component/binding 구조를 검증한 뒤 기존 entity를 유지하는 방향이다. camera entity의 현재 pose 보존과 authored projection/config 변경 허용 여부는 별도 세부 규칙으로 고정한다. asset descriptor·model primitive 수·atlas/clip 변경의 허용 범위, 일반 scene patch와의 경계도 다음 상세 MD에서 명시한다. importer가 성공했다는 이유로 바뀐 scene topology를 자동 수락하지 않는다.
+
+안전한 순서는 CPU 후보 준비→off-actor topology/CPU render/audio staging→동일 device의 bounded GPU staging→같은 actor의 generation 검증 commit→실제 window present 확인→기존 GPU completion과 old audio backing의 회수다. 현재 source에 없는 GPU staging API나 payload lease를 이미 제공한다고 쓰지 않는다. worker·actor·render·audio callback을 하나의 전역 원자적 교체로 가정하지 않으며, commit 뒤 presentation 대기/실패 때 실제 표시 세대와 마지막 정상 자원을 어떻게 보고·보존할지도 동결해야 한다.
+
+256MiB cooked/catalog, renderer의 geometry/전체 GPU 한도, audio Frame 한도는 서로 다른 장부다. active/candidate/in-flight/retired가 겹치는 동안 모든 보유자가 해당 예산을 유지해야 한다. old looping voice나 외부 packet이 남아 있으면 새 준비/commit을 Busy/명시적 오류로 제한할 수 있어야 하며, voice reap만으로 callback의 마지막 Arc가 사라졌다고 단정하지 않는다. 이 후속 감사는 code/test 실행이 아닌 설계 입력이다.
+
 ## P03.1 착수 전 source 감사와 예산 후보
 
 2026-10-16 read-only 감사는 `PreparedProject`의 mesh map·byte API가 direct JSON mesh source만 알고, renderer의 24-byte vertex와 shader에는 UV/texture/sampler가 없음을 확인했다. audio adapter는 decoded PCM을 받을 수 있지만 WAV parser는 없다. import와 실제 GPU/2D/audio 사용은 별도 연결 작업이며 이 차이를 이름만 있는 asset catalog로 가리지 않는다.

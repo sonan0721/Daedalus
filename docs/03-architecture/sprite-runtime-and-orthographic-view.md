@@ -74,6 +74,18 @@ opaque legacy/model stage 뒤에 sorted sprite stage를 그린다. sprite stage�
 
 offscreen은 기존 Rgba8UnormSrgb를 사용한다. native는 기존 sRGB surface를 우선한다. sprite가 있는 packet에 non-sRGB target만 제공되면 첫 단계는 create/write 이전 typed Unsupported/InvalidScene으로 거부한다. 기존 manual sRGB encoding 뒤에 alpha blend를 붙이지 않는다. 검증하지 않은 compatible view/compositor fallback을 이번 gate에 포함하지 않는다. legacy/model의 non-sRGB fallback 의미는 유지한다.
 
+### 투명 capture와 불투명 native window의 alpha 경계
+
+2026-10-16 리뷰에서 기존 GPU reference는 clear alpha1만 검사했고, alpha가1보다 작은 clear에 합성한 target bytes를 PNG로 그대로 쓰면 색이 어두워지는 오류를 확인했다. clear의 RGB는 linear straight color, alpha는0..1이라는 source 계약을 유지한다. source 값을 수정하거나 투명 배경을 조용히 거부하지 않는다.
+
+packet offscreen capture는 **linear premultiplied target**을 사용한다. 첫 pass의 clear를 `P=clear.rgb*clear.a`, `A=clear.a`로 만들고 기존 sprite blend로 `Pout=Cs*As+Pd*(1-As)`, `Aout=As+Ad*(1-As)`를 유지한다. opaque model/legacy fragment는 alpha1로 같은 target을 덮으므로 이 invariant와 양립한다. sRGB attachment는 linear 합성 뒤 P를 encode한다. 예를 들어 투명 배경 위 빨강 alpha.5는 target의 대략 `[188,0,0,128]`을 곧바로 PNG에 쓰지 않고 straight PNG의 대략 `[255,0,0,128]`로 변환한다.
+
+PNG는 straight alpha이므로 공통 readback/row-unpadding/PNG encoder에 private alpha-representation policy를 전달한다. packet capture의 RGBA 배열을 **같은 backing에서** sRGB decode→linear P/A→clamp→sRGB encode하고 alpha는 보존한다. A=0은 RGB0으로 정규화하고 A=255는 byte-identical fast path로 둔다. gamma-encoded byte를 직접 alpha로 나누지 않는다. 새 GPU color target·두 번째 RGBA buffer·복제 PNG writer를 만들지 않는다. 기존 standalone legacy capture는 straight policy를 유지해 이중 변환하지 않는다. 기존 model manual-sRGB fallback을 회귀 검사하며 alpha-bearing clear를 다룰 때 target encoding과 clear encoding을 일치시킨다. 8-bit target/alpha 양자화 오차가 특히 낮은 alpha에서 커질 수 있음을 검사 tolerance와 결과에 명시한다. 이 subset은 HDR/고정밀 alpha capture를 인증하지 않는다.
+
+일반 native window는 불투명 표시다. surface capability에 Opaque가 있으면 우선하고, 다른 alpha mode만 있어도 packet 및 기존 scene window의 clear alpha를1로 렌더해 compositor로 완전 불투명 값을 전달한다. source RGB와 실제 화면의 배경색은 유지하며 source/packet을 복제·변경하지 않고 private render-target policy로 구분한다. capture는 source alpha를 보존한다. transparent desktop window 지원이나 OS compositor의 alpha 표현 호환성을 이번 gate에서 주장하지 않는다.
+
+검증은 nonblack clear의 alpha0/.25/1에서 untouched pixel·부분 alpha sprite·겹침을 독립 f64 source-over reference와 PNG decode로 대조한다. RGB와 alpha를 각각 검사하고 검증된 양자화 tolerance를 기록한다. 기존 opaque GPU 색·자원 counter 회귀를 유지한다. native target의 opaque policy도 실제 render-view readback 또는 명시적인 policy 검사를 통해 확인한다. CPU helper 검사만으로 GPU 합성을 통과 처리하지 않는다.
+
 ## packet·GPU 자원과 호환성
 
 `RenderProjection::{Perspective, Orthographic { vertical_size: f32 }}`를 additive 공개 enum으로 제공하고 opaque `RenderView`(private Camera+RenderProjection)에 보관한다. RenderView는 `new(camera, projection)`/`perspective(camera)` 생성, `camera()->&Camera`/`projection()->RenderProjection` 불변 accessor와 `with_camera`/`with_projection` immutable replacement, `validate()->Result<(), PacketRenderError>`를 가진다. projection enum은 Copy이며 기존 Camera 검사와 최종 finite view-projection을 사용 전에 검증한다. RenderPacket은 private RenderView를 보관한다. 기존 new는 Perspective, `view()`/`with_view()`/`projection()`/`with_projection()`을 추가하고 camera()/with_camera는 기존 signature와 projection을 보존한다. projection finite/positive 검사와 실제 globals 계산을 연결한다. with_instances로 binding을 지울 때 model/sprite 모두 같은 규칙을 적용한다.
@@ -132,7 +144,7 @@ GPU는 비대칭 colored/transparent atlas의 top/bottom·인접 region 경계·
 
 기존 smoke의 opt-in sprite mode를 사용하고 CPU/assets/view/models 기본 의미를 유지한다. 같은 창의 실제 authority 변경 후 표시/view JSON을 대조하고 가능하면 resize/2D pan/zoom도 실제 OS 입력과 report로 확인한다. 실제 공개 Kenney Tiny Dungeon 원본 PNG/CC0와 [provenance](../02-research/asset-validation-provenance.md)를 재사용해 화면을 확인하며 네트워크 다운로드는 CI에 추가하지 않는다. 작은 sprite 장면은 엔진 fixture이고 Terraria 구현이 아니다.
 
-하위 gate는 source 고정→focused→workspace/Python/managed CI→실제 Metal/native/public asset→clean archive/extracted smoke→최종 다섯 PR CI·main 동일 tree까지 확인한 뒤에만 P03.2b를 체크한다. source/API 리뷰를 반영해 계약을 확정했다. 실제 구현/검사는 아직 미실행이며 이 문서로 gate를 체크하지 않는다.
+하위 gate는 source 고정→focused→workspace/Python/managed CI→실제 Metal/native/public asset→clean archive/extracted smoke→최종 다섯 PR CI·main 동일 tree까지 확인한 뒤에만 P03.2b를 체크한다. 첫 구현의 독립 CPU259건은 통과했으나 리뷰 보완과 최종 GPU/native/package 검사가 남았다. 이 문서로 gate를 체크하지 않는다.
 
 ## 조사 근거와 적용 범위
 

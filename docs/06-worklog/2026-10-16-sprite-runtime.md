@@ -57,3 +57,11 @@ source 고정 checkpoint에서 조정자가 `cargo test --workspace --all-featur
 read-only 독립 리뷰는 view submit의 typed non-sRGB early reject·shared cache/stamp/UV admission과 실제 PresentedView 갱신을 확인했다. capture는 target를 만든 뒤 format reject해 계약과 어긋나는 점, Busy fallback의 실제 projection/non-sRGB 무변경 검사가 없는 점을 찾아 renderer owner에게 보완 요청했다. hardware 결과는 아직 없다.
 
 추가 source 감사에서 ProjectRenderResources의 prepared binding/template/order CPU metadata는 device renderer의8 MiB bookkeeping에 포함되지 않았음을 확인했다. 계약을 별도 prepared metadata8 MiB preflight·명시적 estimator/getter로 보완했다. 두 owner의 최대 reservation은 합산16 MiB이며 catalog payload/scratch와도 다르다. bounded allocation 전 borrowed precharge와 shared backing 단1회 계산을 구현/검증해야 하므로 기존259 CPU 통과만으로 새계약을 인수하지 않는다. final/current viewer view와 last-presented view 의미도 문서에서 분명히 나눴다.
+
+Luna renderer의 위 리뷰 보완 focused 결과는45 CPU pass/5GPU ignored, all-target/all-feature strict Clippy/fmt/diff pass다. Busy regression에 실제 fallback target과 old-ready Perspective+camera override target의 readback 비교를 넣었지만 아직 hardware 실행하지 않았다. metadata source는 8 MiB admission 이전 borrowed count/key 집계와 normal/reject/shared-template 검사를 포함하며 조정자 최종 검증은 후속이다.
+
+## 투명 PNG source 감사와 추가 계약
+
+별도 read-only alpha 감사가 clear alpha0..1 허용·sprite straight-source blend·sRGB target·raw PNG write를 추적했다. alpha1 배경 GPU reference만으로는 투명 PNG를 검증하지 못한다. 투명 배경 위 빨강 alpha.5의 premultiplied target 약 `[188,0,0,128]`을 straight PNG로 쓰면 외부 합성 시 색이 다시 줄어드는 실제 오류다. nonblack alpha0 clear의 RGB도 잘못 기여한다. 공식 PNG §6.2/§12.3와 pinned wgpu source를 다시 확인했다.
+
+code 전 [상세 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)에 capture의 premultiplied-linear clear/target, 공통 readback의 in-place straight PNG 변환, alpha255 fast path/alpha0 정규화와 일반 native window의 불투명 정책을 추가했다. 새 target/RGBA buffer/PNG writer를 중복 만들지 않는 제작 파이프라인 선택이다. alpha0/.25/1 nonblack 배경과 overlap의 실제 GPU 검사·양자화 tolerance 및 기존 opaque 색/자원 회귀가 필요하다. 이 추가는 구현/실행 결과가 아니다.

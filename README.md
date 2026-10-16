@@ -31,7 +31,7 @@ cargo run -p daedalus-cli -- project serve /tmp/my-daedalus-project
 
 The project manifest references a versioned scene. Current runnable content is root entities with transforms and indexed JSON meshes with scalar opaque materials. `project serve` retains one authority session; `project_info` exposes authored stable IDs and handles, and normal control operations query and change actual ECS state. `project capture` in a capture-enabled build renders the project's own geometry and snapshot to PNG. Initialization inserts no fixture objects.
 
-This is the first project foundation: hierarchy/prefabs, general model/texture/sprite import, attached gameplay modules, live project reload, same-window control/capture, saving, MCP, and game export remain unfinished. The existing `view` window still runs its named validation fixture. See the [project contract](docs/03-architecture/project-lifecycle.md) and [verification commands](TESTING.md).
+This is the first runnable project foundation: hierarchy/prefabs, imported model/texture/sprite execution, attached gameplay modules, live project reload, same-window control/capture, saving, MCP, and game export remain unfinished. The existing `view` window still runs its named validation fixture. See the [project contract](docs/03-architecture/project-lifecycle.md) and [verification commands](TESTING.md).
 
 The native Rust library provides a bounded `SessionControlService` with multiple clients, owned request results, Manual/Realtime clocks, and snapshots from one real project engine. A window-enabled build opens the same project session for native viewing and optional protocol-2 JSONL control:
 
@@ -43,6 +43,17 @@ cargo run -p daedalus-cli --features window -- project view /path/to/project --c
 The [viewer contract](docs/03-architecture/project-view-control.md) describes tickets, explicit Step, bounded I/O, and shutdown. Camera controls work without a selected entity; `--controlled-entity <stable-id>` enables diagnostic arrow movement, and manual mode uses F10 for one tick. Protocol 1 remains available through `project serve`. Live image capture, MCP, and managed attach to this viewer are still pending.
 
 The renderer's additive [packet API](docs/03-architecture/renderer-resource-reuse.md) shares immutable geometry, retains device-local buffers, and updates changed instance/material rows. Small native GPU tests verify reuse and pixel parity with the original capture path. Broader rendering quality, live project reload, and complete P02/D1 acceptance remain open.
+
+## CPU asset preparation
+
+The asset-aware loader and CLI share bounded source resolution, immutable CPU resources, dependency identities, and a versioned disk cache:
+
+```sh
+cargo run -p daedalus-cli -- project cook /path/to/project
+cargo run -p daedalus-cli -- project cook /path/to/project --cache-dir /path/to/cache
+```
+
+The first CPU subset covers static glTF/GLB triangles, PNG, versioned sprite-atlas JSON, and PCM/float WAV. The [import contract](docs/03-architecture/asset-import-foundation.md) defines settings, format limits, and unsupported features. The bounded JSON report exposes source hashes, resource keys, and per-invocation decode/cook/cache counters. Unchanged resources and geometry unaffected by image or material edits reuse their cooked identities. This command prepares CPU data; imported models, textures, sprites, and audio still need [runtime consumers](docs/03-architecture/asset-runtime-consumers.md) before they can be used in a running project. The report explicitly marks those consumers unavailable.
 
 ## Build a local CLI package
 

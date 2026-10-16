@@ -1,6 +1,6 @@
 # 실제 공개 에셋의 import 검증 출처
 
-상태: 원본 확보·구조/라이선스 확인, 엔진 import 실행 전 · 2026-10-16 · P03.1/DEV03
+상태: 원본·라이선스·hash와 실제 CPU import/미지원 진단 확인, runtime 소비 전 · 2026-10-16 · P03.1/DEV03
 
 ## 목적과 범위
 
@@ -22,7 +22,7 @@
 | LICENSE.md | 766 | 9f5611b2615694034748e579fd3b61bf760b2ae9cd084b6c5d3822132f391b3c |
 | README.md | 776 | 63b36a9a36b751d00ca02bd7f63802d1ac3ab8177aabd0be92dae19ab55d2a63 |
 
-실제 JSON/IHDR/chunk를 확인한 결과 scene/node/mesh/material은 각 1개이며 indexed triangles는 36 vertices/36 indices, POSITION/NORMAL/UV0와 추가 TANGENT를 가진다. 재질은 opaque base-color PNG, metallic 0, roughness 0.079다. PNG는 512×512, 8-bit RGB이며 IHDR/IDAT/IEND만 있다. 미사용 TANGENT와 normal map 등이 요구하는 tangent의 의미를 구분한다. 엔진 importer는 아직 실행하지 않았으며 이 구조 확인만으로 지원을 주장하지 않는다.
+실제 JSON/IHDR/chunk를 확인한 결과 scene/node/mesh/material은 각 1개이며 indexed triangles는 36 vertices/36 indices, POSITION/NORMAL/UV0와 추가 TANGENT를 가진다. 재질은 opaque base-color PNG, metallic 0, roughness 0.079다. PNG는 512×512, 8-bit RGB이며 IHDR/IDAT/IEND만 있다. 미사용 TANGENT와 normal map 등이 요구하는 tangent의 의미를 구분한다. 후속 실제 CLI CPU cook은 같은 모델2개 ID의 geometry1회 cook/공유 key와36/36 counts를 확인했다. 실제 화면 표시 인수는 아니다.
 
 ## 2D: Kenney Tiny Dungeon
 
@@ -32,7 +32,9 @@
 - 선택 이미지: `Tilemap/tilemap_packed.png`, 5,294 bytes, SHA-256 `d24e60a41e4ac7a745c0304dfde121143688557f40215f23221c29cfe683825f`.
 - License.txt: 570 bytes, SHA-256 `9f574a2f1f636a3db8a0665ba90212f34e2b5e61ecb533d77c05237766374111`.
 
-이미지 IHDR는 192×176, 8-bit indexed palette다. 16×16 region의 atlas JSON은 엔진 검증용으로 별도 작성하고 이미지 원본과 혼동하지 않는다. 이미지 확장·region 경계·nearest/no-mip을 검증할 계획이며 sprite renderer나 tile game이 완성됐다는 뜻은 아니다.
+이미지 IHDR는 192×176, 8-bit indexed palette다. 실제 chunk는 IHDR/gAMA/PLTE/tRNS/IDAT/IEND이며 gAMA 값은45455, sRGB chunk는 없다. 첫 실제 CLI cook은 이 색정보를 Unsupported로 종료했다. 원본을 재저장하지 않고 [명시 color policy](../03-architecture/asset-import-foundation.md)로 해석하는 보완을 진행한다. 16×16 region의 atlas JSON은 엔진 검증용으로 별도 작성하고 이미지 원본과 혼동하지 않는다. 이미지 확장·region 경계·nearest/no-mip을 검증하며 sprite renderer나 tile game이 완성됐다는 뜻은 아니다.
+
+보완 후 원본 SHA를 유지한 실제 CPU cook에서192×176 image와1 region atlas를 확인했다. warm 실행의 PNG decode0·atlas cook0도 확인했다. 실제 sprite 표시·타일 시뮬레이션은 별도다.
 
 ## 오디오: Kenney Interface Sounds와 명시적인 변환
 
@@ -59,6 +61,8 @@
 
 GLB JSON chunk에 `extensionsUsed: [KHR_materials_unlit]`가 있다. P03.1은 이 확장을 미지원으로 진단하는 계약이므로 원본의 성공을 요구하지 않는다. 선언을 지우고 opaque PBR로 표시하는 암묵적 변환은 하지 않는다. 미지원 오류가 source/path를 포함하는지 후속 검증한다.
 
-## 실행 후 추가할 근거
+실제 원본의 CLI 실행은 exit1, code `unsupported`, source `rock_smallA.glb`, path `extensionsUsed`와 해당 extension 이름을 반환했다. 원본 hash는 위와 동일하다.
 
-CLI executable/source identity, command, catalog/source digest, cold/warm counters, selective edit의 재처리 범위, 미지원 진단을 worklog에 남긴다. 여기의 hash는 취득과 구조 확인의 근거이며 엔진에 의한 import/cook/표시/재생 성공의 근거가 아니다. P03.1과 후속 runtime consumer 결과를 구분한다.
+## 실행 근거의 위치
+
+CLI executable/source identity, command, catalog/source digest, cold/warm counters와 미지원 진단은 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있다. 실제 WAV summary도 mono44,100Hz/2,689 frames와 원본 변환 hash를 확인했다. 위 hash 자체는 취득/원본 확인의 근거이고, 실제 CPU cook 결과를 화면 표시·재생 성공으로 확대하지 않는다. P03.1과 후속 runtime consumer 결과를 구분한다.

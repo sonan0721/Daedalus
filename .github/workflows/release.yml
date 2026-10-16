@@ -87,6 +87,14 @@ jobs:
           fi
           python3 scripts/package_cli.py "${package_args[@]}"
 
+      - name: Verify packaged CLI asset cook smoke
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          python3 scripts/smoke_project.py \
+            --cli "dist/release-package/$EXPECTED_TARGET/daedalus" \
+            --assets
+
       - name: Prepare CI artifact files
         env:
           EXPECTED_TARGET: ${{ matrix.target }}

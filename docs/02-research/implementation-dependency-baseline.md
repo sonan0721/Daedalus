@@ -48,4 +48,4 @@ oxijolt는 process-wide 초기화를 한 번 수행하고 process lifetime 동�
 
 이번 lock 변경의 신규 package는 gltf·gltf-json·gltf-derive1.4.1, hound3.5.1, inflections1.1.1, lazy_static1.5.1이다. 로컬 registry에 내려받은 manifest와 원문 license 파일을 확인했다. gltf 세 crate와 lazy_static은 MIT OR Apache-2.0, hound는 Apache-2.0, inflections는 MIT다. hound의 원문 파일명은 소문자 `license`이며 기존 notice collector의 대소문자 정규화 검색 대상이다. 따라서 파일명만 보고 license override를 추가하지 않는다.
 
-새 graph의 첫 `cargo check -p daedalus-content --lib`는 통과했다. 이 시점의 단위/통합·strict Clippy·Wasm·실제 공개 에셋·배포 notice 검사는 진행 중이다. 최종 결과는 [P03.1 작업 기록](../06-worklog/2026-10-16-asset-import.md)에 따로 남긴다. 이 단일 library compile을 workspace·브라우저·runtime consumer 호환 증거로 확장하지 않는다.
+새 graph는 후속 root workspace CPU240건·check/fmt/strict Clippy, content 담당자의 Wasm library compile과 실제 공개 에셋 CPU cook을 확인했다. notice collector는201개 resolved dependency, missing text0, reference-only4개를 별도 표기했다. clean package/PR CI는 다음 절차이며 최종 결과는 [P03.1 작업 기록](../06-worklog/2026-10-16-asset-import.md)에 따로 남긴다. Wasm compile·CPU cook을 브라우저·runtime consumer 호환 증거로 확장하지 않는다.

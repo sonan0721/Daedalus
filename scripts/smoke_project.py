@@ -9,10 +9,13 @@ import json
 import math
 import os
 import selectors
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import wave
+import zlib
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -22,6 +25,9 @@ VIEW_PROTOCOL_VERSION = 2
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 300.0
 MAX_JSONL_RESPONSE_BYTES = 1024 * 1024
+# Frozen v1 cache envelope layout; mutate only payload bytes so the type/key
+# identity stays valid and recovery exercises the stored payload digest.
+CACHE_ENVELOPE_HEADER_BYTES = 8 + 2 + 1 + 1 + 32 + 8 + 32
 NATIVE_VIEW_SECONDS = 3
 NATIVE_OBSERVER_SECONDS = 2
 NATIVE_VIEW_WIDTH = 640
@@ -125,7 +131,7 @@ def _json_output(result: subprocess.CompletedProcess[str], arguments: Sequence[s
 
 def _expect(condition: bool, message: str, context: Any = None) -> None:
     if not condition:
-        suffix = "" if context is None else f"; response: {json.dumps(context, sort_keys=True)}"
+        suffix = "" if context is None else f"; response: {json.dumps(context, sort_keys=True, default=str)}"
         raise SmokeError(message + suffix)
 
 
@@ -209,6 +215,503 @@ def _write_project(directory: Path, *, unsupported_component: bool = False) -> N
     (directory / "assets" / "smoke-mesh.json").write_text(
         json.dumps(mesh, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def _png_rgba(width: int, height: int, color: tuple[int, int, int, int]) -> bytes:
+    row = b"\x00" + bytes(color) * width
+    pixels = row * height
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        body = kind + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(pixels, level=9))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _triangle_binary(first_x: float = -0.5) -> bytes:
+    positions = (first_x, -0.5, 0.0, 0.5, -0.5, 0.0, 0.0, 0.5, 0.0)
+    normals = (0.0, 0.0, 1.0) * 3
+    texcoords = (0.0, 0.0, 1.0, 0.0, 0.5, 1.0)
+    return struct.pack("<9f9f6f3H", *positions, *normals, *texcoords, 0, 1, 2)
+
+
+def _gltf_triangle_document(image_uri: str) -> dict[str, Any]:
+    return {
+        "asset": {"version": "2.0", "generator": "Daedalus offline asset smoke"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0, "translation": [0.0, 0.0, 0.0]}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3, "material": 0}]}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.8, "baseColorTexture": {"index": 0}}}],
+        "textures": [{"source": 0, "sampler": 0}],
+        "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}],
+        "images": [{"uri": image_uri}],
+        "buffers": [{"uri": "triangle.bin", "byteLength": 102}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962},
+            {"buffer": 0, "byteOffset": 36, "byteLength": 36, "target": 34962},
+            {"buffer": 0, "byteOffset": 72, "byteLength": 24, "target": 34962},
+            {"buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963},
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [-0.5, -0.5, 0.0], "max": [0.5, 0.5, 0.0]},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
+            {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"},
+            {"bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR", "min": [0], "max": [2]},
+        ],
+    }
+
+
+def _encode_glb(document: dict[str, Any], binary: bytes) -> bytes:
+    document = json.loads(json.dumps(document))
+    document["buffers"][0]["byteLength"] = len(binary)
+    json_chunk = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    json_chunk += b" " * ((-len(json_chunk)) % 4)
+    binary_chunk = binary + b"\x00" * ((-len(binary)) % 4)
+    total_length = 12 + 8 + len(json_chunk) + 8 + len(binary_chunk)
+    return (
+        b"glTF"
+        + struct.pack("<II", 2, total_length)
+        + struct.pack("<II", len(json_chunk), 0x4E4F534A)
+        + json_chunk
+        + struct.pack("<II", len(binary_chunk), 0x004E4942)
+        + binary_chunk
+    )
+
+
+def _decode_glb(data: bytes) -> tuple[dict[str, Any], bytes]:
+    if data[:4] != b"glTF" or len(data) < 20:
+        raise SmokeError("offline smoke generated an invalid GLB header")
+    declared_length = struct.unpack_from("<I", data, 8)[0]
+    if declared_length != len(data):
+        raise SmokeError("offline smoke generated a GLB with the wrong declared length")
+    offset = 12
+    document: dict[str, Any] | None = None
+    binary: bytes | None = None
+    while offset < len(data):
+        chunk_length, chunk_type = struct.unpack_from("<II", data, offset)
+        offset += 8
+        chunk = data[offset : offset + chunk_length]
+        offset += chunk_length
+        if chunk_type == 0x4E4F534A:
+            document = json.loads(chunk.decode("utf-8").rstrip(" \x00"))
+        elif chunk_type == 0x004E4942:
+            binary = chunk
+    if document is None or binary is None:
+        raise SmokeError("offline smoke generated a GLB without JSON or BIN chunks")
+    return document, binary
+
+
+def _write_asset_project(directory: Path) -> None:
+    for subdirectory in ("models", "images", "atlases", "audio"):
+        (directory / subdirectory).mkdir(parents=True, exist_ok=True)
+    base_png = _png_rgba(2, 2, (210, 80, 40, 255))
+    atlas_png = _png_rgba(16, 16, (40, 180, 70, 255))
+    model_png = _png_rgba(2, 2, (40, 80, 210, 255))
+    (directory / "images" / "base.png").write_bytes(base_png)
+    (directory / "images" / "atlas.png").write_bytes(atlas_png)
+    external_document = _gltf_triangle_document("../images/base.png")
+    (directory / "models" / "external.gltf").write_text(
+        json.dumps(external_document, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    (directory / "models" / "triangle.bin").write_bytes(_triangle_binary())
+
+    embedded_binary = _triangle_binary()
+    image_offset = (len(embedded_binary) + 3) & ~3
+    embedded_binary += b"\x00" * (image_offset - len(embedded_binary)) + model_png
+    embedded_document = _gltf_triangle_document("unused.png")
+    embedded_document["buffers"] = [{"byteLength": len(embedded_binary)}]
+    embedded_document["images"] = [
+        {"bufferView": 4, "mimeType": "image/png"}
+    ]
+    embedded_document["bufferViews"].append(
+        {"buffer": 0, "byteOffset": image_offset, "byteLength": len(model_png)}
+    )
+    (directory / "models" / "embedded.glb").write_bytes(
+        _encode_glb(embedded_document, embedded_binary)
+    )
+
+    atlas = {
+        "schema_version": 1,
+        "image_asset": "asset:image-atlas",
+        "filter_policy": "nearest_no_mip_v1",
+        "regions": [
+            {
+                "id": "sprite:stone",
+                "rect": [0, 0, 8, 8],
+                "pivot": [0.5, 0.5],
+                "pixels_per_unit": 16.0,
+            }
+        ],
+    }
+    (directory / "atlases" / "sprites.json").write_text(
+        json.dumps(atlas, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    with wave.open(os.fspath(directory / "audio" / "tone.wav"), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8_000)
+        audio.writeframes(struct.pack("<4h", 0, 1_000, -1_000, 0))
+
+    manifest = {"schema_version": 1, "name": "offline-asset-smoke", "scene": "scene.json"}
+    scene = {
+        "schema_version": 1,
+        "revision": 0,
+        "entities": [],
+        "assets": [
+            {"id": "asset:model-external", "kind": "daedalus.model", "uri": "models/external.gltf", "metadata": {"schema_version": 1}},
+            {"id": "asset:model-embedded", "kind": "daedalus.model", "uri": "models/embedded.glb", "metadata": {"schema_version": 1}},
+            {"id": "asset:image-base", "kind": "daedalus.image", "uri": "images/base.png", "metadata": {"schema_version": 1}},
+            {"id": "asset:sprite-atlas", "kind": "daedalus.sprite_atlas", "uri": "atlases/sprites.json", "metadata": {"schema_version": 1}},
+            {"id": "asset:image-atlas", "kind": "daedalus.image", "uri": "images/atlas.png", "metadata": {"schema_version": 1, "role": "sprite_atlas_srgb", "mip_policy": "none", "sampler": {"min_filter": "nearest", "mag_filter": "nearest", "mipmap_filter": "none", "wrap_u": "clamp_to_edge", "wrap_v": "clamp_to_edge"}}},
+            {"id": "asset:audio-tone", "kind": "daedalus.audio", "uri": "audio/tone.wav", "metadata": {"schema_version": 1}},
+        ],
+    }
+    (directory / "daedalus.project.json").write_text(
+        json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    (directory / "scene.json").write_text(
+        json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def _cook_project(
+    binary: Path,
+    project: Path,
+    *,
+    cwd: Path,
+    timeout: float,
+    cache_dir: Path | None = None,
+    expect_success: bool = True,
+) -> dict[str, Any]:
+    arguments = ["project", "cook", os.fspath(project)]
+    if cache_dir is not None:
+        arguments.extend(("--cache-dir", os.fspath(cache_dir)))
+    result = _run_cli(
+        binary,
+        arguments,
+        cwd=cwd,
+        timeout=timeout,
+        expect_success=expect_success,
+    )
+    response_bytes = result.stdout.encode("utf-8")
+    _expect(
+        len(response_bytes) <= MAX_JSONL_RESPONSE_BYTES,
+        "project cook response exceeded the 1 MiB JSON line limit",
+        len(response_bytes),
+    )
+    output = _json_output(result, arguments)
+    _expect(output.get("command") == "project_cook", "project cook returned wrong command", output)
+    _expect(output.get("ok") is expect_success, "project cook returned wrong result status", output)
+    return output
+
+
+def _cook_metrics(output: dict[str, Any]) -> dict[str, Any]:
+    metrics = output.get("metrics")
+    _expect(isinstance(metrics, dict), "project cook omitted its metrics", output)
+    return metrics
+
+
+def _cook_expect_unchanged_work(output: dict[str, Any], *, label: str) -> None:
+    metrics = _cook_metrics(output)
+    for name in (
+        "modelGeometryCooks",
+        "pngBaseDecodes",
+        "imageCooks",
+        "atlasCooks",
+        "audioCooks",
+    ):
+        _expect(metrics.get(name) == 0, f"{label} unexpectedly repeated {name}", metrics)
+
+
+def _cook_expect_only(
+    output: dict[str, Any],
+    *,
+    label: str,
+    changed_metric: str,
+    minimum: int = 1,
+) -> None:
+    metrics = _cook_metrics(output)
+    _expect(
+        isinstance(metrics.get(changed_metric), int) and metrics[changed_metric] >= minimum,
+        f"{label} did not perform the expected {changed_metric}",
+        metrics,
+    )
+    for name in ("modelGeometryCooks", "imageCooks", "atlasCooks", "audioCooks"):
+        if name != changed_metric:
+            _expect(metrics.get(name) == 0, f"{label} unexpectedly repeated {name}", metrics)
+    expected_decodes = 1 if changed_metric == "imageCooks" else 0
+    decode_count = metrics.get("pngBaseDecodes")
+    if expected_decodes:
+        _expect(
+            isinstance(decode_count, int) and decode_count >= expected_decodes,
+            f"{label} did not decode the changed PNG source",
+            metrics,
+        )
+    else:
+        _expect(decode_count == 0, f"{label} unexpectedly decoded an unchanged PNG", metrics)
+
+
+def _geometry_keys(output: dict[str, Any]) -> set[str]:
+    assets = output.get("assets")
+    _expect(isinstance(assets, list), "project cook omitted asset summaries", output)
+    return {
+        item["key"]
+        for asset in assets
+        if asset.get("kind") == "model"
+        for item in asset.get("resourceKeys", [])
+        if item.get("kind") == "geometry"
+    }
+
+
+def _run_asset_cook_smoke(
+    binary: Path,
+    *,
+    root: Path,
+    cwd: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    project = root / "offline-asset-project"
+    _write_asset_project(project)
+    cache_root = project / ".daedalus" / "cache"
+
+    original_sources = {
+        path.relative_to(project).as_posix(): _sha256_file(path)
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+    initial = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _expect(initial.get("ok") is True, "project cook did not report a valid catalog", initial)
+    _expect(
+        Path(initial.get("cacheRoot", "")) == cache_root,
+        "project cook did not use the default project-local cache root",
+        initial.get("cacheRoot"),
+    )
+    _expect(initial.get("cacheNamespace") == "v1", "project cook omitted its versioned cache namespace", initial)
+    counts = initial.get("counts", {})
+    _expect(
+        counts.get("assetsByKind")
+        == {"models": 2, "images": 2, "spriteAtlases": 1, "audio": 1},
+        "asset fixture did not cook glTF, GLB, PNG, atlas, and WAV content",
+        counts,
+    )
+    summaries = initial.get("assets")
+    _expect(isinstance(summaries, list) and len(summaries) == 6, "asset fixture returned the wrong catalog size", initial)
+    model_summaries = [asset for asset in summaries if asset.get("kind") == "model"]
+    _expect(
+        len(model_summaries) == 2
+        and all(asset.get("nodes") == 1 and asset.get("primitives") == 1 for asset in model_summaries)
+        and all(asset.get("vertices") == 3 and asset.get("indices") == 3 for asset in model_summaries),
+        "model summaries omitted actual cooked triangle data",
+        model_summaries,
+    )
+    atlas_summary = next((asset for asset in summaries if asset.get("kind") == "sprite_atlas"), None)
+    audio_summary = next((asset for asset in summaries if asset.get("kind") == "audio"), None)
+    _expect(atlas_summary is not None and atlas_summary.get("atlasRegions") == 1, "atlas summary omitted its region", atlas_summary)
+    _expect(
+        audio_summary is not None
+        and audio_summary.get("audioFrames") == 4
+        and audio_summary.get("audioChannels") == 1
+        and audio_summary.get("audioSampleRate") == 8_000,
+        "WAV summary omitted its decoded PCM metadata",
+        audio_summary,
+    )
+    image_dimensions = {
+        (asset.get("width"), asset.get("height"))
+        for asset in summaries
+        if asset.get("kind") == "image"
+    }
+    _expect((2, 2) in image_dimensions and (16, 16) in image_dimensions, "PNG summaries omitted decoded dimensions", image_dimensions)
+    first_geometry_keys = _geometry_keys(initial)
+    _expect(
+        len(first_geometry_keys) == 1,
+        "equivalent glTF and GLB primitives did not share one canonical geometry identity",
+        first_geometry_keys,
+    )
+    _expect(
+        _cook_metrics(initial).get("modelGeometryCooks") == 1,
+        "equivalent glTF and GLB primitives performed more than one geometry cook",
+        _cook_metrics(initial),
+    )
+    source_ids = {source.get("sourceId") for source in initial.get("sources", [])}
+    _expect(
+        {"models/external.gltf", "models/triangle.bin", "models/embedded.glb", "images/base.png", "images/atlas.png", "audio/tone.wav"}.issubset(source_ids),
+        "cook report omitted transitive source identities",
+        source_ids,
+    )
+    _expect(
+        original_sources
+        == {
+            path.relative_to(project).as_posix(): _sha256_file(path)
+            for path in project.rglob("*")
+            if path.is_file() and ".daedalus" not in path.parts
+        },
+        "project cook modified authored project source files",
+        project,
+    )
+
+    warm = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_unchanged_work(warm, label="warm no-change cook")
+    _expect(_cook_metrics(warm).get("cacheHits", 0) > 0, "warm no-change cook reported no cache reuse", warm)
+    checks = ["asset_cook_formats_and_typed_payload_summary", "asset_cook_warm_no_change_reuse"]
+
+    base_png = project / "images" / "base.png"
+    base_png.write_bytes(_png_rgba(2, 2, (211, 81, 41, 255)))
+    external_image = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_only(external_image, label="external PNG edit", changed_metric="imageCooks")
+    _expect(_geometry_keys(external_image) == first_geometry_keys, "external PNG edit changed geometry identity", external_image)
+    checks.append("asset_cook_external_png_keeps_geometry")
+
+    glb_path = project / "models" / "embedded.glb"
+    glb_document, glb_binary = _decode_glb(glb_path.read_bytes())
+    image_view = glb_document["bufferViews"][4]
+    image_start = image_view["byteOffset"]
+    embedded_png = _png_rgba(2, 2, (41, 81, 211, 255))
+    image_view["byteLength"] = len(embedded_png)
+    glb_path.write_bytes(_encode_glb(glb_document, glb_binary[:image_start] + embedded_png))
+    embedded_image = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_only(embedded_image, label="GLB embedded PNG edit", changed_metric="imageCooks")
+    _expect(_geometry_keys(embedded_image) == first_geometry_keys, "embedded PNG edit changed geometry identity", embedded_image)
+    checks.append("asset_cook_embedded_png_keeps_geometry")
+
+    external_gltf_path = project / "models" / "external.gltf"
+    external_document = json.loads(external_gltf_path.read_text(encoding="utf-8"))
+    external_document["nodes"][0]["translation"] = [0.25, 0.0, 0.0]
+    _write_json(external_gltf_path, external_document)
+    node_edit = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_unchanged_work(node_edit, label="node transform edit")
+    _expect(_geometry_keys(node_edit) == first_geometry_keys, "node transform edit changed geometry identity", node_edit)
+    checks.append("asset_cook_node_transform_keeps_geometry")
+
+    external_document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] = [0.75, 0.8, 0.9, 1.0]
+    _write_json(external_gltf_path, external_document)
+    material_edit = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_unchanged_work(material_edit, label="material factor edit")
+    _expect(_geometry_keys(material_edit) == first_geometry_keys, "material factor edit changed geometry identity", material_edit)
+    checks.append("asset_cook_material_keeps_geometry")
+
+    (project / "models" / "triangle.bin").write_bytes(_triangle_binary(-0.4))
+    external_document["accessors"][0]["min"][0] = -0.4
+    _write_json(external_gltf_path, external_document)
+    geometry_edit = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_only(geometry_edit, label="geometry payload edit", changed_metric="modelGeometryCooks")
+    changed_geometry_keys = _geometry_keys(geometry_edit)
+    _expect(
+        len(changed_geometry_keys) == 2 and first_geometry_keys.issubset(changed_geometry_keys),
+        "geometry edit did not add one distinct identity beside the shared unchanged GLB geometry",
+        geometry_edit,
+    )
+    checks.append("asset_cook_geometry_payload_invalidates")
+
+    atlas_path = project / "atlases" / "sprites.json"
+    atlas_document = json.loads(atlas_path.read_text(encoding="utf-8"))
+    atlas_document["regions"][0]["rect"] = [4, 4, 8, 8]
+    _write_json(atlas_path, atlas_document)
+    atlas_edit = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_only(atlas_edit, label="atlas rectangle edit", changed_metric="atlasCooks")
+    checks.append("asset_cook_atlas_metadata_keeps_png")
+
+    with wave.open(os.fspath(project / "audio" / "tone.wav"), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8_000)
+        audio.writeframes(struct.pack("<4h", 0, 1_001, -1_001, 0))
+    audio_edit = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _cook_expect_only(audio_edit, label="WAV sample edit", changed_metric="audioCooks")
+    checks.append("asset_cook_wav_edit_keeps_geometry")
+
+    model_asset = next(
+        asset for asset in audio_edit["assets"] if asset.get("assetId") == "asset:model-embedded"
+    )
+    geometry_key = next(
+        key["key"] for key in model_asset["resourceKeys"] if key.get("kind") == "geometry"
+    )
+    cache_entry = cache_root / "v1" / "cook" / f"{geometry_key}.bin"
+    _expect(cache_entry.is_file(), "shared geometry cooked cache entry was not published", cache_entry)
+    corrupt_entry = bytearray(cache_entry.read_bytes())
+    _expect(
+        len(corrupt_entry) > CACHE_ENVELOPE_HEADER_BYTES,
+        "shared geometry cache entry had no payload to corrupt",
+        cache_entry,
+    )
+    corrupt_entry[-1] ^= 0x01
+    cache_entry.write_bytes(corrupt_entry)
+    cache_recovery = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _expect(
+        _cook_metrics(cache_recovery).get("cacheCorrupt", 0) >= 1,
+        "cook did not report and rebuild a corrupt cached payload",
+        cache_recovery,
+    )
+    _expect(
+        _cook_metrics(cache_recovery).get("modelGeometryCooks", 0) >= 1,
+        "cook reported payload corruption without rebuilding shared geometry",
+        cache_recovery,
+    )
+    checks.append("asset_cook_corrupt_payload_cache_rebuilt")
+
+    cache_entry.write_bytes(b"corrupt offline smoke cache envelope")
+    header_recovery = _cook_project(binary, project, cwd=cwd, timeout=timeout)
+    _expect(
+        _cook_metrics(header_recovery).get("cacheCorrupt", 0) >= 1,
+        "cook did not report a malformed cache envelope",
+        header_recovery,
+    )
+    _expect(
+        _cook_metrics(header_recovery).get("modelGeometryCooks", 0) >= 1,
+        "cook reported a malformed envelope without rebuilding shared geometry",
+        header_recovery,
+    )
+    checks.append("asset_cook_malformed_header_cache_rebuilt")
+
+    override_cache = root / "asset-cache-override"
+    overridden = _cook_project(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        cache_dir=override_cache,
+    )
+    _expect(
+        Path(overridden.get("cacheRoot", "")) == override_cache,
+        "project cook ignored the explicit cache root",
+        overridden.get("cacheRoot"),
+    )
+    checks.append("asset_cook_cache_root_override")
+
+    bad_document = json.loads(external_gltf_path.read_text(encoding="utf-8"))
+    bad_document["extensionsRequired"] = ["KHR_draco_mesh_compression"]
+    _write_json(external_gltf_path, bad_document)
+    unsupported = _cook_project(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        expect_success=False,
+    )
+    error = unsupported.get("error", {})
+    _expect(error.get("code") == "unsupported", "unsupported glTF capability lacked its typed error code", unsupported)
+    _expect(
+        error.get("source_id") == "models/external.gltf" and error.get("path"),
+        "unsupported glTF diagnostic omitted source/path location",
+        unsupported,
+    )
+    checks.append("asset_cook_unsupported_feature_has_typed_location")
+    return {
+        "checks": checks,
+        "asset_counts": counts.get("assetsByKind"),
+        "warm_cache_hits": _cook_metrics(warm).get("cacheHits"),
+        "corrupt_cache_rebuilds": _cook_metrics(cache_recovery).get("cacheCorrupt"),
+        "unsupported_error_code": error.get("code"),
+    }
 
 
 class _JsonlProjectServer:
@@ -1493,6 +1996,7 @@ def run_project_smoke(
     cwd: str | Path | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     view: bool = False,
+    assets: bool = False,
 ) -> dict[str, Any]:
     """Exercise empty and authored external projects using an existing CLI binary."""
 
@@ -1623,6 +2127,16 @@ def run_project_smoke(
         )
         checks.append("unsupported_component_explicit_failure")
 
+        asset_results: dict[str, Any] | None = None
+        if assets:
+            asset_results = _run_asset_cook_smoke(
+                binary,
+                root=root,
+                cwd=working_directory,
+                timeout=timeout,
+            )
+            checks.extend(asset_results.pop("checks"))
+
         view_results: dict[str, Any] | None = None
         if view:
             timed_view = _run_native_project_view(
@@ -1683,6 +2197,8 @@ def run_project_smoke(
     }
     if view_results is not None:
         result["native_view"] = view_results
+    if asset_results is not None:
+        result["asset_cook"] = asset_results
     return result
 
 
@@ -1702,13 +2218,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="also open the authored project in an already-built native-window CLI and verify presentation/Close reports",
     )
+    parser.add_argument(
+        "--assets",
+        action="store_true",
+        help="also run offline multi-format CPU asset-cook and selective-cache-reuse checks",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parse_args(argv)
     try:
-        result = run_project_smoke(arguments.cli, timeout=arguments.timeout, view=arguments.view)
+        result = run_project_smoke(
+            arguments.cli,
+            timeout=arguments.timeout,
+            view=arguments.view,
+            assets=arguments.assets,
+        )
         print(json.dumps(result, sort_keys=True))
         return 0
     except SmokeError as error:

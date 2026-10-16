@@ -9,6 +9,7 @@ use serde_json::json;
 
 mod control;
 mod project;
+mod project_assets;
 #[cfg(feature = "window")]
 mod project_view;
 #[cfg(feature = "window")]
@@ -90,6 +91,13 @@ enum ProjectCommands {
     },
     /// Load and validate a project using the shared content loader.
     Validate { directory: PathBuf },
+    /// Import and cook the project's declared assets into the bounded CPU cache.
+    Cook {
+        directory: PathBuf,
+        /// Override the default project-local `.daedalus/cache` root.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+    },
     /// Inspect the project session's authored stable IDs and live entity state.
     Inspect { directory: PathBuf },
     /// Run an external project for an explicit bounded number of fixed ticks.

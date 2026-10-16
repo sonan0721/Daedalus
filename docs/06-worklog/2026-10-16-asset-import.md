@@ -1,6 +1,6 @@
 # P03.1 공통 에셋 import·cook 작업 기록
 
-상태: 구현 진행 중·인수 검사 전 · 2026-10-16
+상태: 로컬 CPU·원본 에셋·native 회귀 통과, clean package·PR CI 대기 · 2026-10-16
 
 ## 이번 목표와 선행 상태
 
@@ -54,6 +54,35 @@ root workspace check/fmt·strict all-target/all-feature Clippy와 CPU234건이 �
 
 실제 공개 자료 project의 첫 cold cook은 Kenney palette PNG의 gAMA45455 때문에 Unsupported로 종료했다. 원본 chunk는 IHDR/gAMA/PLTE/tRNS/IDAT/IEND이며 sRGB chunk는 없다. generated fixture만 통과한 것을 공개 원본 성공으로 기록하지 않는다. S78의 PNG 규격을 확인하고, gAMA 기반 RGB를 linear를 거쳐 sRGB로 정규화하는 정책과 decoder-cache version을 계약에 먼저 보완했다. 원본/alpha 보존·표준 primaries 가정·특수 profile 미지원 의미를 명시한다. 이 변경 후 관련 검사를 다시 수행해야 P03.1 인수를 판단할 수 있다.
 
-## 다음 검사
+## color policy 보완 후 최종 로컬 검증
 
-native/byte parity, 실제 네 포맷 출력, aggregate/preallocation 한도, 외부/embedded PNG edit의 selective reuse, geometry/atlas/WAV 변경, corrupt/atomic/pin/cache ownership, 취소/이전 정상 catalog 보존, bounded CLI 진단과 기존 CPU18/view22 회귀를 확인한다. 새 dependency의 locked graph·notice·필요한 Wasm compile도 별도 확인한다. 실제 명령과 counter가 나오기 전에는 DEV03/DEV05 최적화 효과를 달성했다고 표시하지 않는다.
+glTF의 image transfer 규칙(S79)도 확인해 standalone normalization을 model image에 적용하지 않게 했다. 공통 decoder에 `PngColorPolicy`를 전달한다. header를 먼저 확인하고 effective output policy로 memo/persistent key를 만들기 때문에 no-op 두 정책은 Arc/cache를 공유하며, 실제 gamma 변환이 필요한 결과는 구분한다. source-header dimensions와 cache metadata가 같은지도 확인한다. importer별 decoder나 추가 image 전체 복사를 만들지 않았다.
+
+source 고정 후 root의 `cargo check --workspace --all-features --locked`, `cargo test --workspace --all-features --locked`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, `cargo fmt --all --check`가 모두 통과했다. CPU 합계240건, hardware 기본 제외3건이다. content65건에는 gamma1.0의128→188·alpha·sRGB precedence·gltf encoded128 유지·표준/비표준 cHRM·palette/tRNS·policy non-alias/no-op 공유·same-byte-count wrong cache dimensions 복구가 들어 있다. content 담당자의 최종 Wasm library compile도 이 source로 통과했다. Python 전체53건은 script 최종 변경 뒤6.684초/exit0이며 이후 gamma 변경은 script를 수정하지 않았다.
+
+window-enabled debug binary SHA-256은 `e429412da466ceb0140bcae0ecf888d25a8359ae3c7100c85b2e285837d70537`다. 같은 binary에서 offline CPU+assets31건/2.863836초, 별도 실제 Mac/Metal native viewer22건/7.667029초가 통과했다. native는 기존 project/protocol/종료 회귀이며 imported texture 표시가 아니다. 로그는 ignored `dist/project-evidence/p03-*-final.*`와 `p03-native-view-smoke.json`에 있다.
+
+실제 공개 원본 project에는 같은 Cube를2개 asset ID로, 원본 Tiny Dungeon PNG와1-region atlas, 변환 provenance를 보존한 WAV를 등록했다. atlas를 image보다 먼저 선언한 입력도 사용했다. fresh cache의 실제 명령은 다음과 같다. `time`은 shell 내장 대신 `/usr/bin/time -p`를 사용했다.
+
+```sh
+/usr/bin/time -p target/debug/daedalus project cook dist/qa-assets/import-project --cache-dir dist/qa-assets/p03-real-cache-v2
+```
+
+| 관찰 | cold | warm no-change |
+| --- | --- | --- |
+| source read/files | 8 / 8 | 8 / 8 |
+| container parse / range hash bytes | 7 / 2448 | 7 / 2448 |
+| PNG base decode | 2 | 0 |
+| geometry / image / atlas / audio cook | 1 / 2 / 1 / 1 | 0 / 0 / 0 / 0 |
+| cache hit / write | 0 / 7 | 7 / 0 |
+| wall time, debug 단1회 관찰 | 0.34초 | 0.21초 |
+
+총 source583,313 bytes, cooked cache7 entries/1,546,236 bytes, catalog metadata16,739 bytes다. 두 Cube의 geometry key는 같고 각 model은36 vertices/36 indices다. image192×176, atlas1 region, PCM mono44,100Hz/2,689 frames를 확인했다.8개 source의 실제 파일 SHA를 report와 다시 비교했고 모두 일치했다. cold/warm source digest `sha256:901b2e5584caca0ac14a484dfecfbe8915fdf267a7beb2f7ad9ae5c686955022`, catalog digest `a9a8f13ac68b2643796b94c5eaa1929ea9084ae74f8bdbbc66563f342e429301`도 같다.
+
+이 관찰은 full decode/leaf cook의 재사용 근거이며 read/container parse까지0이 된 것은 아니다. 큰 데이터·release profile·통제된 반복 표본이 없어 일반 개선 배율이나 P03.4 성능 인수를 주장하지 않는다. runtime consumer flags는 모두false다.
+
+원본 Nature Kit GLB는 exit1·`unsupported`·source `rock_smallA.glb`·path `extensionsUsed`·`KHR_materials_unlit` 진단을 확인했다. 미지원 extension을 삭제하지 않았다. notice collector는 native CLI의201개 resolved dependency를 생성했고 missing license text0, reference-only4개를 별도 표기했다. 신규 여섯 package에 불필요한 override를 추가하지 않았다.
+
+## 남은 인수 절차
+
+위 로컬 결과의 clean-source package를 만들고 extracted binary의 archive/CPU18/assets31을 확인한다. PR의 필수 다섯 job과 두 native packaged asset smoke까지 확인한 뒤 P03.1 최종 gate를 판단한다. 이후 실제 model/texture·sprite/audio 소비 P03.2를 구현한다. P03 전체·DEV03 전체·D1/D2/D3는 계속 미완료다.

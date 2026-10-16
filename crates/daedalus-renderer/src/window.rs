@@ -22,8 +22,8 @@ use winit::{
 pub use winit::keyboard::KeyCode as WindowKeyCode;
 
 use crate::{
-    Camera, PacketRenderError, PacketRenderer, PacketRendererLimits, PacketResourceStats,
-    RenderPacket, RenderScene, Renderer, RendererError, RendererInfo,
+    Camera, PacketAssetLimits, PacketRenderError, PacketRenderer, PacketRendererLimits,
+    PacketResourceStats, RenderPacket, RenderScene, Renderer, RendererError, RendererInfo,
 };
 use daedalus_core::{SessionId, Tick};
 
@@ -321,6 +321,13 @@ pub struct PacketWindowOutcome {
     pub resource_stats: PacketResourceStats,
 }
 
+/// Packet presentation outcome with imported-model resource counters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PacketAssetWindowOutcome {
+    pub packet: PacketWindowOutcome,
+    pub asset_resource_stats: crate::PacketAssetResourceStats,
+}
+
 /// Opens a native winit window and returns its report and final owned scene.
 /// The event loop stays on the calling/main thread. Messages are drained with
 /// a bounded `try_recv` loop; callbacks do not wait for a producer or perform
@@ -362,15 +369,34 @@ pub fn run_packet_windowed_reported(
     options: WindowOptions,
     limits: PacketRendererLimits,
 ) -> Result<PacketWindowOutcome, PacketWindowError> {
+    run_packet_windowed_reported_with_asset_limits(
+        initial_packet,
+        messages,
+        options,
+        limits,
+        PacketAssetLimits::default(),
+    )
+    .map(|outcome| outcome.packet)
+}
+
+/// Opens the persistent packet path with explicit model texture/residency limits.
+pub fn run_packet_windowed_reported_with_asset_limits(
+    initial_packet: Arc<RenderPacket>,
+    messages: Receiver<PacketWindowMessage>,
+    options: WindowOptions,
+    limits: PacketRendererLimits,
+    asset_limits: PacketAssetLimits,
+) -> Result<PacketAssetWindowOutcome, PacketWindowError> {
     validate_options(&options)
         .map_err(|error| PacketWindowError::InvalidOptions(error.to_string()))?;
     limits.validate().map_err(PacketWindowError::Packet)?;
+    asset_limits.validate().map_err(PacketWindowError::Packet)?;
     initial_packet
         .validate(limits)
         .map_err(PacketWindowError::Packet)?;
     let event_loop =
         EventLoop::new().map_err(|error| PacketWindowError::EventLoop(error.to_string()))?;
-    let mut app = WindowApp::new_packet(initial_packet, messages, options, limits);
+    let mut app = WindowApp::new_packet(initial_packet, messages, options, limits, asset_limits);
     event_loop
         .run_app(&mut app)
         .map_err(|error| PacketWindowError::EventLoop(error.to_string()))?;
@@ -380,7 +406,14 @@ pub fn run_packet_windowed_reported(
             WindowFailure::Legacy(error) => PacketWindowError::Renderer(error),
         });
     }
-    Ok(app.into_packet_outcome())
+    let asset_resource_stats = app.packet_renderer.as_ref().map_or_else(
+        crate::PacketAssetResourceStats::default,
+        PacketRenderer::asset_resource_stats,
+    );
+    Ok(PacketAssetWindowOutcome {
+        packet: app.into_packet_outcome(),
+        asset_resource_stats,
+    })
 }
 
 fn validate_options(options: &WindowOptions) -> Result<(), RendererError> {
@@ -583,6 +616,7 @@ struct WindowApp {
     renderer: Option<Renderer>,
     packet_renderer: Option<PacketRenderer>,
     packet_limits: PacketRendererLimits,
+    asset_limits: PacketAssetLimits,
     packet: Option<Arc<RenderPacket>>,
     last_presented: Option<PresentedPacket>,
     renderer_info: Option<RendererInfo>,
@@ -624,6 +658,7 @@ impl WindowApp {
             None,
             options,
             PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
             now,
             initial_loading,
             width,
@@ -636,6 +671,7 @@ impl WindowApp {
         messages: Receiver<PacketWindowMessage>,
         options: WindowOptions,
         limits: PacketRendererLimits,
+        asset_limits: PacketAssetLimits,
     ) -> Self {
         let now = Instant::now();
         let initial_loading = options.initial_loading;
@@ -648,6 +684,7 @@ impl WindowApp {
             Some(initial_packet),
             options,
             limits,
+            asset_limits,
             now,
             initial_loading,
             width,
@@ -663,6 +700,7 @@ impl WindowApp {
         packet: Option<Arc<RenderPacket>>,
         options: WindowOptions,
         packet_limits: PacketRendererLimits,
+        asset_limits: PacketAssetLimits,
         now: Instant,
         initial_loading: bool,
         width: u32,
@@ -681,6 +719,7 @@ impl WindowApp {
             renderer: None,
             packet_renderer: None,
             packet_limits,
+            asset_limits,
             packet,
             last_presented: None,
             renderer_info: None,
@@ -855,7 +894,7 @@ impl WindowApp {
         if self.packet.is_some() {
             self.packet_renderer = Some(
                 renderer
-                    .into_packet_renderer(self.packet_limits)
+                    .into_packet_renderer_with_asset_limits(self.packet_limits, self.asset_limits)
                     .map_err(|error| WindowFailure::Packet(PacketWindowError::Packet(error)))?,
             );
         } else {
@@ -1087,6 +1126,11 @@ impl WindowApp {
                 loading_elapsed,
             ) {
                 Ok(packet) => Some(packet),
+                Err(PacketRenderError::ResidencyBusy) => {
+                    // The acquired surface texture is deliberately dropped without
+                    // presenting or advancing presented-packet metadata.
+                    return;
+                }
                 Err(error) => {
                     self.fail_packet(event_loop, PacketWindowError::Packet(error));
                     return;
@@ -1451,8 +1495,8 @@ mod tests {
     use winit::keyboard::KeyCode;
 
     use crate::{
-        Camera, DirectionalLight, Material, Mesh, PacketRendererLimits, RenderObject, RenderPacket,
-        RenderScene, Vertex,
+        Camera, DirectionalLight, Material, Mesh, PacketAssetLimits, PacketRendererLimits,
+        RenderObject, RenderPacket, RenderScene, Vertex,
     };
 
     use super::{
@@ -1499,6 +1543,7 @@ mod tests {
             receiver,
             WindowOptions::default(),
             PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
         );
 
         assert_eq!(

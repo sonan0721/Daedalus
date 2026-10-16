@@ -140,6 +140,8 @@ pub struct Renderer {
     pub(crate) materials_layout: wgpu::BindGroupLayout,
     pub(crate) mesh_pipeline: wgpu::RenderPipeline,
     pub(crate) packet_mesh_pipeline: wgpu::RenderPipeline,
+    pub(crate) model_packet_mesh_pipeline: Option<wgpu::RenderPipeline>,
+    pub(crate) model_textures_layout: Option<wgpu::BindGroupLayout>,
     pub(crate) overlay_pipeline: wgpu::RenderPipeline,
     pub(crate) overlay_globals: wgpu::Buffer,
     pub(crate) overlay_bind_group: wgpu::BindGroup,
@@ -179,7 +181,200 @@ impl Renderer {
         self,
         limits: PacketRendererLimits,
     ) -> Result<PacketRenderer, PacketRenderError> {
-        PacketRenderer::new(self, limits)
+        self.into_packet_renderer_with_asset_limits(limits, crate::PacketAssetLimits::default())
+    }
+
+    /// Converts this renderer into the same packet path with independent
+    /// geometry and imported-asset residency/upload budgets.
+    pub fn into_packet_renderer_with_asset_limits(
+        self,
+        limits: PacketRendererLimits,
+        asset_limits: crate::PacketAssetLimits,
+    ) -> Result<PacketRenderer, PacketRenderError> {
+        PacketRenderer::new(self, limits, asset_limits)
+    }
+
+    pub(crate) fn ensure_model_packet_pipeline(&mut self) -> Result<(), PacketRenderError> {
+        if self.model_packet_mesh_pipeline.is_some() {
+            return Ok(());
+        }
+        let limits = self.device.limits();
+        if limits.max_vertex_attributes < 11
+            || limits.max_vertex_buffer_array_stride < std::mem::size_of::<GpuModelVertex>() as u32
+            || limits.max_bind_groups < 3
+            || limits.max_sampled_textures_per_shader_stage < 1
+            || limits.max_samplers_per_shader_stage < 1
+        {
+            return Err(PacketRenderError::DeviceLimit(format!(
+                "textured model packets require 11 vertex attributes, a {} byte vertex stride, three bind groups, one sampled texture and one sampler; device exposes {} attributes, {} stride, {} groups, {} textures and {} samplers",
+                std::mem::size_of::<GpuModelVertex>(),
+                limits.max_vertex_attributes,
+                limits.max_vertex_buffer_array_stride,
+                limits.max_bind_groups,
+                limits.max_sampled_textures_per_shader_stage,
+                limits.max_samplers_per_shader_stage,
+            )));
+        }
+        let texture_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Daedalus packet model texture layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Daedalus packet model pipeline layout"),
+                bind_group_layouts: &[
+                    &self.globals_layout,
+                    &self.materials_layout,
+                    &texture_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Daedalus packet model textured PBR shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Daedalus packet model textured PBR pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_packet_model"),
+                    compilation_options: Default::default(),
+                    buffers: &[
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<GpuModelVertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x3,
+                                    offset: 0,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x3,
+                                    offset: 12,
+                                    shader_location: 1,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 24,
+                                    shader_location: 10,
+                                },
+                            ],
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: 128,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 0,
+                                    shader_location: 2,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 16,
+                                    shader_location: 3,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 32,
+                                    shader_location: 4,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 48,
+                                    shader_location: 5,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 64,
+                                    shader_location: 6,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 80,
+                                    shader_location: 7,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 96,
+                                    shader_location: 8,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Uint32,
+                                    offset: 112,
+                                    shader_location: 9,
+                                },
+                            ],
+                        },
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_model"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        self.model_textures_layout = Some(texture_layout);
+        self.model_packet_mesh_pipeline = Some(pipeline);
+        Ok(())
+    }
+
+    pub(crate) fn model_textures_layout(&self) -> Option<&wgpu::BindGroupLayout> {
+        self.model_textures_layout.as_ref()
+    }
+
+    pub(crate) fn model_packet_mesh_pipeline(&self) -> Option<&wgpu::RenderPipeline> {
+        self.model_packet_mesh_pipeline.as_ref()
     }
 
     pub(crate) async fn from_adapter(
@@ -482,6 +677,8 @@ impl Renderer {
             materials_layout,
             mesh_pipeline,
             packet_mesh_pipeline,
+            model_packet_mesh_pipeline: None,
+            model_textures_layout: None,
             overlay_pipeline,
             overlay_globals,
             overlay_bind_group,
@@ -911,6 +1108,14 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), Re
 struct GpuVertex {
     position: [f32; 3],
     normal: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct GpuModelVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
+    pub(crate) uv0: [f32; 2],
 }
 
 #[repr(C)]

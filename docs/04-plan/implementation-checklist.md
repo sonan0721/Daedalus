@@ -101,13 +101,19 @@ P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 
 
 - [x] P02.1a: typed operation/result·attachment별 소유권·admission/outcome credit·clock mode의 public API 고정.
 - [x] P02.1b: 실제 ProjectSession의 generic host/client·manual/realtime·frame·stop/shutdown과 복수 attachment 검증.
-- [ ] P02.1c: 기존 fixture LiveSession의 공통 kernel 재사용·호환 검사, migration 중 임시 중복의 명시/제거.
+- [x] P02.1c: 기존 fixture LiveSession의 공통 kernel 재사용·호환 검사, migration 중 임시 중복의 명시/제거.
+
 - [x] P02.2a: 외부 project view와 같은 session의 JSONL 제어, 입력/창 종료/포화 실패 처리.
 - [x] P02.2a.1: shared source·실제 tick 0·같은 actor의 native 창/JSONL·실제 Mac 입력과 정상 종료·단위 수준 포화/실패 검증.
 - [x] P02.2a.2: 실제 process의 EOF 후 viewer 유지·의도적으로 막힌 stdout·manual F10/일반 입력과 reserved Step 경합 검증. native 22-check smoke와 별도 release physical 입력/report로 확인.
 - [x] P02.2b: 불변 loaded generation의 CPU/GPU resource 재사용과 transform-only update 계측. 실제 source watch/reload·asset generation 교체는 P01.2/P03로 남는다.
 - [ ] P02.3: live capture/조건/입력·실제 MCP·SDK attach·trace, 필요한 2D/UI/서버 연결까지 제품 인수.
+- [ ] P02.3a: [같은 frame의 비동기 capture](../03-architecture/live-capture-and-artifacts.md), 공통 ticket·유한 artifact·실제 PNG/authority 대조. 현재 설계 리뷰 중.
 
-P02.1a/b의 native library 로컬 검증은 수정 후 workspace CPU 158건·check/fmt/strict Clippy와 별도 기존 JSONL·managed·fixture window 회귀로 확인한다. 첫 PR CI의 회수 경쟁 수정과 재검사는 worklog에 별도 기록하며, 실패한 head를 병합하지 않는다. `LiveSession`은 mailbox/stop만 공유하고 count-only result guard/receiver migration이 남아 P02.1c는 미체크다. 그 158건은 frontend 연결 전 근거이며 P02.2의 실제 창/JSONL 검증은 worklog에 별도로 둔다. MCP/SDK·P02 전체/D1은 계속 열려 있다. [구체 근거](../06-worklog/2026-10-16-product-readiness-audit.md).
+P02.1a/b의 native library 로컬 검증은 수정 후 workspace CPU 158건·check/fmt/strict Clippy와 별도 기존 JSONL·managed·fixture window 회귀로 확인한다. 첫 PR CI의 회수 경쟁 수정과 재검사는 worklog에 별도 기록하며, 실패한 head를 병합하지 않는다. 그 P02.1 시점에는 legacy count-only result guard가 남아 있었다. 후속 P02.1c는 common credit lease와 FIFO 호환·unknown failure를 실제 구현하고 workspace CPU 200건으로 검증했다. 그 158건은 frontend 연결 전 근거이며 P02.2의 실제 창/JSONL 검증은 worklog에 별도로 둔다. MCP/SDK·P02 전체/D1은 계속 열려 있다. [구체 근거](../06-worklog/2026-10-16-product-readiness-audit.md).
 
-P02 내부 의존성에서 P02.2의 native project 표시 경로는 P02.1a/b kernel을 사용한다. P02.1c의 나머지 legacy migration과 결과 소유권 정리는 P02 전체 exit 전까지 추적한다. P02.2의 resource library·window API를 먼저 고정하고 그 위에 CLI adapter를 연결하며, full P02 gate 전에 P03 전체 구현으로 건너뛰지 않는다.
+P02.1c의 [결과 수명 계약](../03-architecture/legacy-session-result-lifetimes.md)은 공통 CreditPool/lease와 기존 FIFO API를 연결한다. fixture gameplay를 project actor에 합치지 않으며 panic 중 lost ID는 OutcomeUnknown으로 마감한다. 로컬 구현·회귀는 통과했으며 PR 필수 검사를 별도로 확인한다.
+
+**P02 foundation exit**는 실제 외부 project 경로에서 P02.1a~c·P02.2a/b를 통과하고 asset 반복 제작에 필요한 control/capture consumer 계약을 고정한 상태다. 이 선행 gate를 통과해야 P03/W4 asset 통합에 착수한다. 이는 P02.3·P02 제품 인수·D1 통과가 아니다. 현재 foundation의 로컬 기능 검증은 통과했고 PR 필수 검사·병합을 기다린다. 그 전에는 P03 구현에 착수하지 않는다.
+
+**P02 product acceptance**는 MCP/SDK attach·조건/입력·UI 조회·실제 capture·assert/trace/replay와 필요한 2D/UI/server 연결까지 모두 검증한 뒤에만 통과한다. 이 최종 증거는 P03/P04/P05/P08/P10의 기능도 필요하므로 해당 W4~W7 선행 구현 뒤 통합한다. P02.1c도 필수 조건이다. P01~P16은 제품 인수 영역 ID이고 숫자 순서의 별도 phase가 아니며, 실제 워터폴 단계는 W0~W8과 상위 D1→D2→D3다. 순환 의존성을 없애되 어떤 품질 gate도 삭제하거나 조기 통과시키지 않는다.

@@ -58,7 +58,9 @@
 | [Native live session](03-architecture/native-live-session.md) | 실제 창·권한 ECS·background terrain 연결과 입력/반응성 증거 계약 |
 | [외부 project lifecycle](03-architecture/project-lifecycle.md) | 사용자 project/scene/mesh 자료를 같은 Engine·snapshot·renderer에 연결하는 선행 계약 |
 | [같은 session의 공통 제어](03-architecture/session-control-service.md) | 하나의 project actor에 창/CLI/MCP/SDK를 연결하는 결과·clock·입력·capture·종료 계약 |
+| [Legacy 결과 수명 공통화](03-architecture/legacy-session-result-lifetimes.md) | 진단용 실행의 수동 credit 반환을 공통 lease로 바꾸고 panic 중 unknown outcome을 명시하는 계약 |
 | [Project 실행 창·protocol 2](03-architecture/project-view-control.md) | source 공유·실제 tick 0·동일 session JSONL·유한 I/O와 종료를 연결하는 CLI 계약 |
+| [Live capture·artifact 수명](03-architecture/live-capture-and-artifacts.md) | 같은 실제 presentation의 비동기 readback·공통 ticket·유한 이미지/파일 소유권을 정의하는 다음 계약 |
 | [렌더 자원 재사용](03-architecture/renderer-resource-reuse.md) | 반복 geometry 복사/업로드를 mesh handle·instance 갱신·in-flight cache 예산으로 줄이는 다음 설계 |
 | [릴리스·공개 API](03-architecture/releases-and-public-api.md) | 엔진·API·저장·네트워크 버전과 HTML/Wasm export의 경계 |
 | [CLI 빌드·태그 릴리스](03-architecture/cli-build-and-release.md) | 로컬 실행 파일 관리와 후속 tag push 기반 GitHub Release 자동화 계약 |

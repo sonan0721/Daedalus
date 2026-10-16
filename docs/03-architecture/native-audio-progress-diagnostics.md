@@ -1,6 +1,6 @@
 # Native 오디오 재생 진행·종료 진단 계약
 
-상태: Kira·직접 CPAL default/HAL 진행 진단 모두 실패 / 시스템 비교 조사 중 · 2026-10-17 · P03 회귀/DEV06 · 제품 인수 미통과
+상태: 과거 Kira/CPAL 진행 진단 실패·A-042 뒤 같은 배포 CLI native-only 통과·clean package 통합 대기 · 2026-10-17 · P03 회귀/DEV06 · 제품 인수 미통과
 
 ## 이 문서의 목적
 
@@ -72,3 +72,7 @@ HAL만 진행하면 같은 물리 장치의 DefaultOutput/HAL 경로 차이를 �
 같은 Mac에 기본 제공되는 `afplay`와 기존 system sound 파일을 사용해 **해당 재생만 volume0**으로 finite playback을 비교할 수 있다. 전역 volume/default device/daemon 설정을 바꾸지 않고 파일을 repo/package로 복사하지 않는다. 최초 시도는10초 대기 뒤 중단을 요청했으나 tool 왕복 동안 실제15.30초가 지났고 AudioQueueStart(-66681)/exit1을 얻었다. 중단 신호와 자연 오류의 순서를 확정하지 못하므로 독립적인 무중단 실패 근거로 삼지 않는다.
 
 이 모호함 때문에 OS utility만 한 번 더20초 연속 관측한다. 그 전에 신호를 보내지 않고 자연 exit/error를 확인하며,20초 뒤에도 실행 중이면 자기 process만 종료하고 관측 한도로 표시한다. 이것은 engine/CLI의10초 Ended 인수 조건 증가가 아니다. 정상 exit는 OS utility의 process 완료일 뿐 실제 가청 출력이나 callback 계수 증거가 아니다. 실패/대기 정지는 정확한 종료와 stderr를 남긴다. OS utility가 완료돼도 기존 CPAL/CLI 회귀가 통과한 것으로 보고하지 않는다. 이 비교 뒤 production 수정이나 장치 복구는 별도 원인·회귀 계획에 근거해야 한다.
+
+## 사용자 가청 보고 뒤 재검증
+
+2026-10-17 A-042에서 사용자는 다른 앱의 출력이 정상이고 조정자가 실행한 소리도 일부 들렸다고 답했다. 어느 과거 시도/시점인지 특정하지 않았으므로 실패한 callback0/position0 로그를 삭제하거나 성공으로 바꾸지 않는다. 시스템 전체가 무음이라는 가정도 하지 않는다. 앞선 검사 이후 수 시간이 지나 환경 상태가 같다고 단정할 수 없으므로, 먼저 보존된 수정본 archive의 동일 CLI/hash와 unchanged helper로 native-only 한 번을 실행한다. Ended 기준/10초 deadline·장치·backend·설정은 그대로다. 성공하면 현재 실행의 진행/종료 근거이고 원인 확정/과거 실패 면제가 아니다. 실패하면 실행 process의 user/Aqua session·기본 출력 경로와 일반 앱 차이를 read-only로 조사하며 새 코드/OS 조작 전에 한 요인 계약을 다시 명시한다.

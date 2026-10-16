@@ -33,6 +33,8 @@ source 감사 결과 project_view가 입력·snapshot 추출·window·actor의 �
 
 기존 Rust type의 설계 probe에서는 renderer를 공유 cache로 한 번 빌드하고 누락 assertion 보완은 같은 rlib에 rustc --test를 직접 적용했다. 새 cold workspace/Cargo rebuild 없이 실제3건을 다시 확인했다. [작업 기록](../06-worklog/2026-10-17-native-host-design.md)에 source/hash·실패 상태·근거 한계를 보존한다. 이 일회성 probe를 새 상시 smoke framework로 늘리지 않는다.
 
+A-042 사용자 가청 보고 뒤에는 보존 binary/hash를 유지한 native-only19건으로 먼저 회복을 확인했다. 전체 combined72는 최신 clean archive의 extracted binary에서 한 번 수행할 계획이다. 기존 binary의 전체 suite→문서 commit→새 package의 전체 suite라는 중복을 만들지 않는다. 이 선택은 검사 대상 source/artifact의 정확성을 유지하는 실행 순서 개선이며 아직 전체 장치 인수나 속도 개선율을 뜻하지 않는다.
+
 ## 이번 코드 감사에서 확인한 반복
 
 - CLI `control.rs`의 `Operation`과 native bridge `lib.rs`의 `Operation`, managed `NativeEngineSession.cs`의 수동 JSON field 구성은 겹치는 DTO를 별도로 유지한다. stdio request ID/protocol과 bridge atomic batch는 의도적인 차이이므로 envelope까지 하나로 억지 통합하지 않는다.

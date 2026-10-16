@@ -52,3 +52,15 @@ Rust run38933842814/job117084243182는326passed/0failed/12ignored이며 실제 S
 현재 공통 출력 경로의 실패라는 관측만 유지하며 OS/driver/daemon의 근본 원인은 미확정이다. 다른 앱의 실제 소리 상태에 대한 사용자 질문은 답변 대기 중이다. 답변이나 환경 변화가 없는 동안 동일 helper/native suite를 반복해서 성공을 기다리지 않는다. CoreAudio 재시작·전역 설정 변경·다른 장치 선택은 하지 않았다.
 
 안전하게 진행할 host/renderer source 조사·설계는 계속했지만 이 작업은 b.2 실패를 면제하지 않는다. 실제 native 인수와 최종 API/CPU 수치 동결 이후에만 b.3 구현을 배정한다. P03·D1·D2·D3는 열린 상태다.
+
+## A-042 이후 오디오 조사 재개
+
+사용자는 다른 앱에서 정상적으로 소리가 나며 조정자의 실행음도 일부 들렸다고 답했다. 정확한 시도/시점은 미확정이다. 직전 goal turn은 실제 원격 CI job을 확인·기다리고 최종 다섯 성공/동일 tree를 PR에 반영한 진행이다. 새 답변으로 조사를 재개하며 이전 blocked 판정 이후의 감사는 새로 센다. 다른 앱 정상/가청 보고를 failed helper의 Ended 통과로 취급하지 않는다.
+
+재검증 전 같은 console user danny/UID501·launchctl Aqua/UID501을 read-only 확인했다. 별도 다른 UID/비GUI session이라고 단정할 근거는 없다. macOS26.6.2/build25G83은 그대로이고 agent가 OS 설정을 변경하지 않았다. 보존 extracted 수정본 CLI SHA-256 `b6ab0afc72d6c82a2eeab8116a9b877f9fcadd24e5fe381e7db5f7cc4f098596`를 먼저 확인했다. 같은 helper native-only 한 번의 새 raw는 기존 attempt와 다른 prefix에 exclusive로 보존한다.
+
+실제 unchanged helper의 `--audio-native` 실행은 **19/19·0.660931초·stderr0**으로 통과했다. 그 안의 finite voice는6polls·0.490285초 뒤 backend-reported Ended였고 session1/voice1을 대조했다. speaker loopback을 측정한 것은 아니다. raw `dist/project-evidence/p03-native-recovery-user-report-root-attempt01.json` SHA-256은 `d73f88fea6ec3ac017a70a08a668a5da0dce1616d88a0edfc3416662e5cd762e`, empty stderr hash는 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`다. binary/backend/10초 deadline/장치/production을 바꾸지 않았다. 과거 실패와 원인 미확정은 보존한다.
+
+source676f93f의 원격 CI도 최종 다섯 성공을 확인했다. Rust run38937185868/job117095527277의326passed/0failed/12ignored·실제 Stage 회귀/Clippy, 두 package의 CPU62/62·macOS4.708728초/Linux0.992508초, managed와 docs 성공, Publish skipped다. actual CI checkout `a70556d52b90b1a869391b0971bb130dd436d481`과676f93f의 tree는 `430e359e609ba206fd20987f516df39aef57ebaf`로 같았다. raw `p03-host-design-pr16-rust-root-attempt01.log` SHA-256은 `a3fcfa21c4042ec943c4ece7a759c8982a71896db6153fed41689d37dff2ab57`이다. main은 아직 변경하지 않았다.
+
+다음은 이 문서 묶음을 commit한 clean source로 새 local archive를 한 번 만들고 실제 extracted binary에 기존 combined72 helper를 실행하는 것이다. 이미 회복한 보존 binary에 전체72를 먼저 반복하지 않는다. 새 head의 다섯 CI·archive identity·실제 장치 통합·source review/main 동일 tree까지 확인한 뒤에만 b.2를 인수한다. 원인 미확정인 transient 출력 실패를 엔진 수정으로 해결했다고 보고하지 않는다.

@@ -1,6 +1,6 @@
 # P03.3b.2 동일 authority의 CPU 세대 commit
 
-상태: native headless 계약 동결·Stage 경합 수정 후 CPU/CI 통과·배포 native audio 회귀로 PR 인수 보류 · 2026-10-17
+상태: native headless 계약 동결·CPU/CI 통과·A-042 뒤 native-only 회복·clean package 전체 인수 대기 · 2026-10-17
 
 ## 목적과 제한
 

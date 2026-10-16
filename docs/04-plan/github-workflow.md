@@ -56,6 +56,8 @@ PR14에서 두 새 combined50 step·Linux linkage·다섯 CI와 main 동일 tree
 
 P03.3b.2에서는 [headless 계약](../03-architecture/headless-asset-generation.md)의 local runtime/CLI 검증 뒤 기존 staged-binary step에 activation flag를 더했다. 한 helper가 지원 조합의 별도 sub-smoke를 순차 실행하며 activation+audio 동시 지원으로 보고하지 않는다. 새 job/backend/장치 의존성을 추가하지 않았다. [PR16/30d910b 작업 기록](../06-worklog/2026-10-17-native-host-design.md)에서 두 실제 packaged CPU62·Publish skipped·다섯 check·head/synthetic tree 일치를 확인했다. 로컬 native 출력이 실패해 draft를 유지하며 merge/main 동일 tree와 b.2 인수는 보류다. CI 성공이 장치 실패를 면제하지 않는다.
 
+그 뒤676f93f도 다섯 CI를 통과했고, A-042 사용자 출력 보고 이후 같은 보존 extracted CLI의 native-only19건이 실제 Ended로 통과했다. 현재 회복 결과는 과거 실패를 지우거나 근본 원인을 확정하지 않는다. 최신 clean source/package의 combined 장치 검사와 새 head CI를 확인한 뒤 PR ready/정확한 head의 squash/main 동일 tree를 처리한다. 반복 비용을 줄이기 위해 보존 binary에 전체 suite를 먼저 돌린 뒤 새 package에서 다시 반복하지 않는다.
+
 기여 문서의 구조는 Bevy·Godot의 공식 기여 입구를 참고하되 대규모 팀 규칙을 그대로 복제하지 않았다. [Bevy](https://github.com/bevyengine/bevy/blob/main/CONTRIBUTING.md), [Godot](https://raw.githubusercontent.com/godotengine/godot/master/CONTRIBUTING.md)
 
 ## 개발·CI 파이프라인 최적화

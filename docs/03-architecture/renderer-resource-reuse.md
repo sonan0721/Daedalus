@@ -54,6 +54,8 @@ outcome의 present 정보는 함수가 종료한 뒤의 근거다. 실행 중 �
 
 ## 첫 GPU layout 후보
 
+packet window는 같은 session의 sequence/tick/project generation 역행과 동일 generation의 source digest 변경을 거부한다. 같은 sequence 재전송은 같은 packet의 idempotent 재전송만 허용하며 충돌하는 내용/identity를 새 화면으로 채택하지 않는다. local camera는 packet identity를 고쳐 쓰지 않는 view override다. model 값과 determinant가 유한해도 inverse 결과가 overflow할 수 있으므로 normal matrix 결과의 finite 검증까지 새 candidate의 cache/slot 변경 전에 수행한다.
+
 geometry는 local-space position/normal indexed buffer로 보존한다. instance record는 model mat4, padded inverse-transpose mat3, material index와 padding으로 128 bytes다. normal은 nonuniform scale에서도 올바르게 변환하며 finite inverse 검증을 유지한다. CPU는 instance가 바뀔 때만 해당 record를 준비한다. vertex마다 world transform을 다시 계산하지 않는다.
 
 첫 instance-step vertex layout은 mesh attribute 2개와 instance attribute 8개를 사용한다. material index는 명시적 attribute이며 `instance_index == material array index`라는 결합을 없앤다. 첫 구현은 mesh별 indexed draw와 안정적인 instance slot을 사용하고, draw batching/indirect/meshlet은 실제 부하를 본 뒤 추가한다.

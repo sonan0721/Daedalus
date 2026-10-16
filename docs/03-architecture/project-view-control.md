@@ -14,7 +14,7 @@ CLI가 `Arc<PreparedProject>` 한 개를 보유하고 additive `ProjectSession::
 
 service startup 성공 전에 현재 ECS의 tick-0 snapshot/frame을 게시한다. 별도의 current-state extraction은 clock 증가·begin_tick·command 적용·gameplay schedule·revision 변경을 실행하지 않는다. 기존 tick snapshot 추출의 entity/retention/sequence 한도를 재사용하고 실패를 typed startup error로 돌려준다. direct ProjectSession 생성자가 즉시 snapshot을 만드는 것으로 의미를 몰래 바꾸지 않는다. Step/bootstrap tick으로 초기 표시를 위조하지 않는다.
 
-CLI는 bounded ProjectInfo page로 실제 stable ID→EntityHandle binding을 얻고 같은 source Arc로 ProjectRenderResources를 준비한다. startup에는 유한 deadline이 있고 Busy만 한도 안에서 재시도한다. renderer prepare/extract는 실제 frame session/sequence/generation/source digest를 보존한다. 이전 frame Arc를 불필요하게 보유하지 않는다. packet은 불변 geometry handle과 작은 instance 데이터만 보유한다.
+CLI는 bounded ProjectInfo page로 실제 stable ID→EntityHandle binding을 얻고 같은 source Arc로 ProjectRenderResources를 준비한다. binding/frame/result 대기에는 유한 deadline이 있고 Busy만 한도 안에서 재시도한다. source 파일 I/O·driver 초기화 전체에 강제 취소 보장을 더한 것은 아니다. renderer prepare/extract는 실제 frame session/sequence/generation/source digest를 보존한다. 이전 frame Arc를 불필요하게 보유하지 않는다. packet은 불변 geometry handle과 작은 instance 데이터만 보유한다.
 
 ## 스레드·소유권과 표시
 
@@ -25,6 +25,8 @@ window와 packet backend는 기존 ApplicationHandler의 event/input/resize/came
 ## Protocol 2 envelope와 결과
 
 `--stdio-control`에서만 stdout은 UTF-8 JSONL 응답이다. 요청은 `protocol: 2`, ASCII 비제어 문자 1~128 byte `request_id`, 명시적 operation을 가진다. 알 수 없는 version/field/operation·잘못된 target·비유한 숫자는 구조화한 오류다. tick/revision/session/client/sequence/command ID와 handle의 정수 필드는 decimal string으로 encode/decode해 JavaScript 정밀도를 잃지 않는다. offset/limit/count/크기는 고정 상한 내 JSON number다. native와 wire DTO를 검증하되 protocol 1의 DTO를 바꾸지 않는다.
+
+envelope는 `{"protocol":2,"request_id":"q1","request":{"op":"submit","operation":{"op":"get_transform","target":{"stable_id":"entity.hero"}}}}` 형태다. handle target은 `{"handle":{"session":"1","index":"0","generation":"1"}}`이며 실제 조회한 값만 사용한다. poll/ack/forget은 `request`에 `op`와 `ticket`을 넣는다. 응답은 protocol/request_id/ok와 result 또는 code/message/details 오류를 가지며 startup 안내·diagnostics를 stdout에 섞지 않는다. 최종 schema는 CLI 구현과 conformance 시험으로 대조한다.
 
 | 요청 | 의미 |
 | --- | --- |
@@ -52,7 +54,7 @@ blocking reader/writer는 사용자 pipe가 닫히지 않으면 portable std API
 
 WASDQE·pointer camera와 Escape/resize/focus는 공통 window 경로다. controlled entity가 없으면 camera-only이며 첫 entity를 임의 선택하지 않는다. 지정 ID가 없으면 startup 오류다. 첫 entity 조작은 arrow press별 작은 translation 명령을 정상 query→expected revision→SetTransform으로 보낸다. bounded observer가 press/release를 drop할 수 있어 held movement의 권한 상태로 사용하지 않는다. 누락·충돌·포화는 진단하고 continuous action system 지원이라 표시하지 않는다. UI callback에서 재시도 대기하지 않는다.
 
-manual 모드의 F10은 명시 Step 1 요청이다. 자동 tick/implicit apply는 없고 realtime에서는 Step을 보내지 않는다. 입력 ticket도 별도 client/유한 credit로 보유·회수해 protocol Step reserve를 빼앗지 않는다. 이 제한된 조작은 연결 검증이며 정식 gameplay action·AI device injection은 P02.3 후속이다.
+manual 모드의 F10은 명시 Step 1 요청이다. 자동 tick/implicit apply는 없고 realtime에서는 Step을 보내지 않는다. 입력 ticket은 별도 client로 per-client 한도를 분리하지만 session-wide reserved Step lane은 1개를 공유한다. 먼저 수락한 요청이 이를 점유하며 다른 client의 Step은 ResultCapacity를 명시 반환한다. F10 결과는 즉시 관찰·회수하고 protocol terminal Step은 사용자의 ack/forget까지 유효하다. UI callback에서 lane을 기다리거나 reserve를 몰래 추가하지 않는다. 이 제한된 조작은 연결 검증이며 정식 gameplay action·AI device injection은 P02.3 후속이다.
 
 ## 검증과 완료 조건
 

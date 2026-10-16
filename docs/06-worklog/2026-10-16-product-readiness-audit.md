@@ -148,3 +148,5 @@ read-only credit 재감사에서는 실제 reader lease·pending/종료·panic c
 새 [project-view-control.md](../03-architecture/project-view-control.md)는 여러 frontend마다 source/state/command를 복제하는 개발 반복을 줄이기 위해 만들었다. 하나의 불변 source Arc, simulation을 실행하지 않는 실제 tick-0 게시, 같은 service의 protocol-2 ticket adapter, 유한 process I/O와 정상 Close를 명세한다. realtime viewer를 기본으로 두고 deterministic manual은 명시 선택이다. live capture/MCP나 정식 action system은 이 연결만으로 지원한다고 표시하지 않는다.
 
 Luna xhigh renderer 담당자는 renderer 전체·Cargo.lock·공유 Cargo target을 단독 소유한다. runtime 담당자는 disjoint project/session/lib의 shared source/tick-0와 테스트 source부터 작성하며 Cargo는 기다린다. 별도 Luna는 새 계약을 read-only 검토한다. root는 문서·리뷰·통합 검증을 맡는다. 새 범용 개발 도구나 cold target을 만들어 작업을 중복하지 않는다. 아직 새 코드의 최종 검증·개선 수치는 없다.
+
+read-only 계약 감사는 별도 input client가 session-wide Step reserve까지 분리한다는 문구 오류를 찾았다. 실제 native reserve는 한 lane이며 per-client quota와 다르다. 계약을 먼저 수락한 Step이 점유하고 다른 client는 ResultCapacity를 받는 것으로 바로잡았다. UI 입력 결과는 즉시 회수하되 protocol의 retained Step 결과는 ack/forget까지 보존한다. 추가 무제한 lane이나 hidden retry를 넣지 않는다.

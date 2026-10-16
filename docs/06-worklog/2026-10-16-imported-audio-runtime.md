@@ -1,6 +1,6 @@
 # P03.2c imported audio 작업 기록
 
-상태: source/API 리뷰 반영·구현 계약 확정·인수 미통과 · 2026-10-16
+상태: P03.2c 하위 gate 인수·PR13/main 동일 tree 확인 · 2026-10-16 · P03/D1/D2/D3 진행 중
 
 ## 이 문서를 만든 이유
 
@@ -143,6 +143,14 @@ archive는 ignored `dist/local/daedalus-0.1.0-aarch64-apple-darwin-95de9b034bcd-
 추출 binary의 같은 `--assets --view --models --sprites --audio --audio-native`는 **46/46,15.094582초**로 통과했다(`p03-audio-package-combined-smoke.*`). 공개 WAV offline도0.144476초/exit0으로 통과했고(`p03-public-audio-offline-package.*`), native-view는3.141553초/actual present340회·same session/source·Play→Ended·EOF detach→TimeLimit·exit0을 확인했다(`p03-public-audio-native-view-package.*`). 이는 로컬 Mac backend/Metal과 bounded fixture 동작이며144fps나 실제 게임 품질 시험이 아니다.
 
 이후 변경은 이 증거를 기록하는 MD뿐이다. PR 다섯 CI, 양쪽 packaged asset+offline-audio step 및 Linux ALSA linkage, 검증한 head와 main 동일 tree를 확인하기 전 P03.2c를 체크하지 않는다. P03.3/03.4·전체 P03/D1/D2/D3도 계속 열려 있다. tag/공개 Release를 만들지 않았다.
+
+## PR13과 main 인수
+
+[PR13](https://github.com/sonan0721/Daedalus/pull/13)의 최종 head `68910e86d615829d18da050fc3ee034f625a1f6f`에서 required docs/rust/managed native integration과 macOS/Linux native package가 모두 성공했다. 보호 규칙의 required3/strict=true/admins 적용, clean merge 상태를 실제 API로 재조회했다. 두 package의 `Verify packaged CLI asset and offline audio smoke`는 실제37/37로 통과했다(macOS0.894508초/Linux0.43486초; 서로 다른 runner의 단1회 결과이며 속도 비교 아님). Linux `Verify packaged Linux audio runtime linkage`도 성공했다. publish job은 skipped다.
+
+실제 [release dry-build run](https://github.com/sonan0721/Daedalus/actions/runs/38896739327), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38896739319), [managed](https://github.com/sonan0721/Daedalus/actions/runs/38896739492), [docs](https://github.com/sonan0721/Daedalus/actions/runs/38896739591)를 확인했다. 두 native job raw 로그는 ignored `p03-audio-ci-apple-package.log`/`p03-audio-ci-linux-package.log`에 보존했다.
+
+`--squash --match-head-commit 68910e…`로 병합한 main은 `0b98805986f17598ccd2fca7dfaf5109f2f2cf7c`다. fetch 후 검증한 head와 origin/main의 full file-tree diff가0임을 확인했다. 이 근거로 **P03.2c와 a/b/c 전체의 P03.2만 체크**한다. source generation/reload·계측 P03.3/03.4, 고급 audio P07, 전체 엔진 D1과 두 게임 D2/D3는 계속 열려 있다. 공개 tag/Release를 만들지 않았다.
 
 ## 조사 한계
 

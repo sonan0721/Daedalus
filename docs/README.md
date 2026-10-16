@@ -55,6 +55,7 @@
 | [에셋 실제 실행 소비](03-architecture/asset-runtime-consumers.md) | 다음 model/texture·sprite·audio 연결의 공통 packet·authority·자원 공유·검증 초안 |
 | [스프라이트·정사영 계약](03-architecture/sprite-runtime-and-orthographic-view.md) | P03.2b의 실제 atlas/alpha·공통 unit quad·authority camera·실제 표시 view와 반복 검증 경계 |
 | [Imported audio 실행 계약](03-architecture/imported-audio-runtime.md) | P03.2c의 공유 Frame bank·공통 actor/replay·장치 없는 PCM와 실제 native 출력·voice 수명 계약 |
+| [비동기 에셋 후보 준비](03-architecture/project-asset-preparation.md) | 다음 P03.3a의 단일 cache worker·최신 후보/취소·private payload·공통 제어·논리적 메모리 한도 초안 |
 | [모델·텍스처 실행 계약](03-architecture/model-texture-runtime.md) | P03.2a의 실제 project binding·공통 창/capture·cache pin 해제·GPU 한도/색/수명·회귀 기준 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |

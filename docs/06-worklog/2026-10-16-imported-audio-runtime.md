@@ -150,6 +150,8 @@ archive는 ignored `dist/local/daedalus-0.1.0-aarch64-apple-darwin-95de9b034bcd-
 
 실제 [release dry-build run](https://github.com/sonan0721/Daedalus/actions/runs/38896739327), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/38896739319), [managed](https://github.com/sonan0721/Daedalus/actions/runs/38896739492), [docs](https://github.com/sonan0721/Daedalus/actions/runs/38896739591)를 확인했다. 두 native job raw 로그는 ignored `p03-audio-ci-apple-package.log`/`p03-audio-ci-linux-package.log`에 보존했다.
 
+CI checkout은 PR head 자체가 아니라 synthetic merge `10bf03f5b5b4d2b04dc2fd97997c4f0eb51ac682`였다. GitHub API로 이 commit의 tree `364f30204dacba8805b439a89fc5ca5ac273c44f`를 조회하고 PR head/main의 local tree와 같음을 확인했다. local archive source `95de9b0`, PR head `68910e8`, CI checkout과 squash main을 같은 commit인 것처럼 쓰지 않는다. 새 native-audio package cache key는 첫 run에서 두 target 모두 miss했고 release compile은 macOS1분50초/Linux2분01초였다. 두 cache save 성공도 확인했으나 후속 cache-hit 개선 시간은 아직 측정하지 않았다.
+
 `--squash --match-head-commit 68910e…`로 병합한 main은 `0b98805986f17598ccd2fca7dfaf5109f2f2cf7c`다. fetch 후 검증한 head와 origin/main의 full file-tree diff가0임을 확인했다. 이 근거로 **P03.2c와 a/b/c 전체의 P03.2만 체크**한다. source generation/reload·계측 P03.3/03.4, 고급 audio P07, 전체 엔진 D1과 두 게임 D2/D3는 계속 열려 있다. 공개 tag/Release를 만들지 않았다.
 
 ## 조사 한계

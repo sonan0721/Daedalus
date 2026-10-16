@@ -99,6 +99,7 @@
 | [모델·텍스처 실행 작업 기록](06-worklog/2026-10-16-model-texture-runtime.md) | P03.2a의 사전 계약·소유권·공통화·로컬/package/PR11 인수 근거를 추적 |
 | [스프라이트 실행 작업 기록](06-worklog/2026-10-16-sprite-runtime.md) | P03.2b의 source/API 감사·반복 제거 선택·Luna 분담과 후속 실측을 구분 |
 | [Imported audio 작업 기록](06-worklog/2026-10-16-imported-audio-runtime.md) | P03.2c의 source/API 선택과 이후 PCM·native·패키지 실측을 구분 |
+| [비동기 후보 준비 작업 기록](06-worklog/2026-10-16-project-asset-preparation.md) | P03.3a의 memory 장부·단일 worker/cache 소유권·API 동결·실제 후속 검증을 구분 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

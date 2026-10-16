@@ -168,7 +168,30 @@ Cancel은 새 preparation epoch를 발급하지 않는다. 현재 desired의 pen
 
 protocol2의 submit operation은 `asset_preparation_status`, `asset_preparation_prepare {command_id?}`, `asset_preparation_cancel {command_id?,candidate:{session,epoch}}`다. 결과는 `{kind:"asset_preparation",data:{kind:"status"|"command",data:...}}`로 기존 ticket/poll/ack에 담는다. ID·command ID·tick·scene revision은 decimal string이다. bounded memory/metrics counters는 content summary의 numeric camelCase schema를 재사용하고 새 별도 estimator/JSON report를 복제하지 않는다. result serialization은 exhaustive match를 사용한다.
 
+외부 wire의 정확한 spelling도 고정한다. status/command/candidate/failure의 field는 기존 control/audio와 같은 snake_case이며, nested `memory`/`metrics`만 기존 content camelCase schema를 그대로 쓴다. generation 역시 decimal string이다. state는 `idle/pending/preparing/cpu_prepared/cancel_requested/cancelled/superseded/failed/stopping/stopped`다. 대표 result body는 다음과 같다(기존 ticket envelope는 생략).
+
+```json
+{"kind":"asset_preparation","data":{"kind":"command","data":{"command_id":"101","observed_tick":"0","outcome":{"kind":"prepare_accepted","data":{"candidate":{"session":"7","epoch":"1"}}}}}}
+```
+
+status data의 field는 `session`, `active_generation`, `active_source_digest`, numeric `active_cooked_accounted_bytes`, optional `desired/running/pending`, `state`, optional `ready_candidate/latest_failure`다. candidate는 `id/is_current/source_digest/catalog_digest/source_scene_revision/asset_count/entity_count/memory/metrics`, failure는 `id/code/message/source_id/path/diagnostic_truncated`다. source digest는 PreparedProject의 digest이고 catalog digest와 바꿔 쓰지 않는다. runtime read-only DTO에는 이와 경쟁하는 자동 Serialize wire를 추가하지 않으며 CLI adapter 한 곳에서 정수 정책과 exhaustive 변환을 유지한다.
+
+| 요청의 pre-effect 오류 | wire `code` |
+| --- | --- |
+| candidate0·foreign session·future epoch | `invalid_candidate` |
+| 이전에 발급했지만 current가 아닌 epoch | `candidate_expired` |
+| current가 이미 실패/취소되어 취소할 작업/ready가 없음 | `candidate_not_active` |
+| catalog 합산 capacity 부족 | `preparation_capacity` |
+| port의 짧은 try-lock contention | 기존 retryable `busy` |
+| worker admission 종료 | `preparation_stopped` |
+| preparation worker 없는 기본 service | `asset_preparation_unavailable` |
+| monotonic epoch 공간 고갈 | `preparation_epoch_exhausted` |
+
+AlreadyTaken/AlreadyBound/initial source mismatch는 startup 오류이며 foreign candidate 요청과 섞지 않는다. 기존 command ID/replay/권한 오류 code는 유지한다. 실제 parser/cache failure는 accepted receipt를 바꾸지 않고 status의 bounded `latest_failure`에 기존 importer code와 함께 기록한다. process smoke는 실제 ready를 취소해 결정적으로 해제 완료를 확인하고, 진행 중 비협력적 parser·stale 반환의 순서는 worker 경계의 주입 테스트에서 따로 검사한다.
+
 capability 목록은 실제 연결 상태를 반영한다. worker를 켜지 않은 service는 명시적 unavailable이고 경로/asset payload를 요청 인자로 받지 않는다. 정상 inspect/mutate와 normal/Step ticket 예산, terminal을 AuthorityAccepted wait 충족으로 보는 기존 동작을 그대로 적용한다. 상태 복사 전에 count/byte를 검사하며 진단이 잘리면 truncated flag를 보존한다.
+
+현재 ticket 하나의 결과 상한은 기존 고정1MiB이며 public limits의 가변 total byte 예산과 구분한다. bounded status의 최대 DTO/진단/digest 크기에 대해 공통 보수 상한32KiB를 두고 이 cap 안에 드는지 복사 전에 검사한다. CLI에 또 다른 추정기를 만들거나, 존재하지 않는 가변 per-ticket 설정을 추가하지 않는다. Prepare/Cancel receipt도 effect 전에 결과 공간을 확인한다.
 
 ## CLI·종료·파일 책임
 

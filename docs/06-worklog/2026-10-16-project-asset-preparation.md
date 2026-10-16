@@ -24,7 +24,8 @@ Luna의 read-only 감사와 조정자 리뷰는 TaskPool의 단일 completion re
 
 - content 담당: `crates/daedalus-content/src/assets/mod.rs`, `types.rs`, `tests.rs`와 report construction에 필요한 `project.rs`. 기존 private BudgetState를 읽는 `cache.rs`의 테스트2곳도 소유권을 확장해 수정했다. memory summary만 구현하며 runtime/manifest/lock은 건드리지 않는다.
 - worker 담당: 새 runtime `project_preparation` module/types와 `lib.rs` export. 공통 signature를 먼저 전달하고 worker/cache owner·bounded payload 수명·취소/종료를 구현한다.
-- control/CLI 담당: runtime `session_control.rs`와 CLI adapter/기존 smoke를 소유한다. 같은 actor/replay와 opt-in factory를 연결하며 worker나 `lib.rs`를 중복 구현하지 않는다. 작은 독립 작업으로 cook 출력에 기존 memory summary를 싣는다.
+- control/CLI 담당: runtime `session_control.rs`와 CLI Rust adapter/테스트를 소유한다. 같은 actor/replay와 opt-in factory를 연결하며 worker나 `lib.rs`를 중복 구현하지 않는다. 작은 독립 작업으로 cook 출력에 기존 memory summary를 싣는다.
+- smoke 담당: content source를 동결한 담당자에게 기존 `scripts/smoke_project.py`와 해당 Python regression만 새로 배정한다. opt-in `--asset-preparation`을 사용하고 CLI 담당은 이 파일을 수정하지 않는다. 정확한 wire example을 공유한 뒤 dependent assertions를 작성한다.
 - 조정자: MD·통합/source 리뷰·Cargo/target owner 인계·실제 검증·Git/gh를 담당한다. content focused 검증 종료 뒤 Cargo를 회수했으며 worker/adapter는 source-only로 진행한다.
 
 준비 worker는 큰 private candidate 하나를 worker/result 전체에서 보유하고 다음 준비 전 worker에서 이전 ready를 해제한다. 정상 ticket의 ACK는 candidate payload 회수 근거가 아니다. 이번 하위 단계의 제어 결과에는 요약만 싣고 activation/export lease는 후속 계약으로 남긴다.
@@ -70,5 +71,11 @@ target/debug/daedalus project cook dist/qa-assets/audio-runtime-project --cache-
 두 출력 모두 `memory.uniqueSourceCount == sources.length`, `memory.capturedSourceBytes == sum(sources.byteLen)`를 실제 JSON에 대해 확인했다. warm은 cook/write를 재사용했지만 read/parse는 남으며, 이 입력에서는 cache 검증을 포함한 scratch peak가 오히려 크다. elapsed 비교나 일반적인 speedup을 주장하지 않는다. 이16,001bytes 장부는 후속 audio runtime의21,512bytes Frame bank와 다른 scope이므로 서로 대신 쓰거나 전체 RSS로 해석하지 않는다. 이미지가 없는 입력의 decoded base image0은 실제 값이다.
 
 live Prepare/Cancel·worker 수명·새 전체 통합·clean package·CI는 아직 검증하지 않았다. 이전 단계의 CPU281·Python56·Metal9·smoke46을 새 worker 기능의 통과 근거로 사용하지 않는다.
+
+content summary와 작은 CLI cook wiring은 `f132506`으로 commit/push했다. 이 source milestone에 worker/actor/자동 smoke 구현을 포함했다고 보고하지 않는다. 이후 worker·control·smoke는 disjoint source-only 작업 중이며 root가 Cargo를 소유한다.
+
+후속 source 리뷰에서는 stop의 blocking mutex·shared state가 가진 마지막 candidate backing·cache drop 전 Stopped 게시가 계약을 어길 수 있음을 찾아 수정 요청했다. stop은 atomic signal/notify, 큰 ready payload는 worker-local owner, 실제 Drop 후 terminal/상태 전이로 다룬다. worker panic을 catch해 join 성공처럼 숨기지 않으며 callback/actor에서 join하지 않는다. 이 시점의 발견은 리뷰 결과이며 수정 코드의 실행 통과를 뜻하지 않는다.
+
+worker/CLI/Python을 연결하기 전에 protocol result의 snake_case·decimal IDs·content summary의 camelCase·정확한 오류 code를 MD에 동결했다. 라이브러리 DTO에 별도 raw-number/camelCase 자동 wire를 추가하지 않고 control adapter의 exhaustive 변환을 사용한다. 문서 checker와 해당 regression8개는 통과했다(ignored `p03-preparation-docs.log`, `p03-preparation-doc-tests.log`). worker/제어 기능의 통과 근거와는 구분한다.
 
 worker의 syscall/parser 취소는 협력적이고 captured files는 디스크의 동일 순간 snapshot이 아니다. 실제 source/input hash·candidate epoch·stale/cancel/failure와 마지막 정상 active generation을 별도로 관찰해야 한다. 일반 source watch·GPU/audio 교체·최초 loading UI·전체 P03.3 인수는 아직 구현하지 않았다.

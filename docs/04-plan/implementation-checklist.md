@@ -102,6 +102,9 @@ P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 
 - [x] P02.1a: typed operation/result·attachment별 소유권·admission/outcome credit·clock mode의 public API 고정.
 - [x] P02.1b: 실제 ProjectSession의 generic host/client·manual/realtime·frame·stop/shutdown과 복수 attachment 검증.
 - [ ] P02.1c: 기존 fixture LiveSession의 공통 kernel 재사용·호환 검사, migration 중 임시 중복의 명시/제거.
+
+P02.1c의 [결과 수명 계약](../03-architecture/legacy-session-result-lifetimes.md)은 공통 CreditPool/lease와 기존 FIFO API를 연결한다. fixture gameplay를 project actor에 합치지 않으며 panic 중 lost ID는 OutcomeUnknown으로 마감한다. 아직 구현·검증 전이다.
+
 - [x] P02.2a: 외부 project view와 같은 session의 JSONL 제어, 입력/창 종료/포화 실패 처리.
 - [x] P02.2a.1: shared source·실제 tick 0·같은 actor의 native 창/JSONL·실제 Mac 입력과 정상 종료·단위 수준 포화/실패 검증.
 - [x] P02.2a.2: 실제 process의 EOF 후 viewer 유지·의도적으로 막힌 stdout·manual F10/일반 입력과 reserved Step 경합 검증. native 22-check smoke와 별도 release physical 입력/report로 확인.

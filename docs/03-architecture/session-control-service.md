@@ -182,3 +182,5 @@ attachment는 inspect/input/mutate/manual-step/capture/shutdown capability를 �
 P02.1 종료 시 조정자의 로컬 all-feature workspace 검사는 CPU 158건 통과·hardware 2건 기본 ignored, check/fmt/strict Clippy 통과다. 첫 Linux PR 검사의 terminal/credit 회수 경쟁과 수정 후 CI는 별도로 추적한다. 기존 18-check external-project JSONL smoke, 새 bridge build의 managed self-test·2 integration scenario와 실제 Metal fixture window의 ongoing-job 종료도 별도 회귀로 확인한다. 세부 입력·binary identity·각 실행 시점과 한계는 [작업 기록](../06-worklog/2026-10-16-product-readiness-audit.md)에 둔다.
 
 legacy `LiveSession`은 같은 mailbox/stop primitive를 사용하지만 count-only AtomicUsize result credit와 기존 단일 result receiver는 유지한다. owned ticket 서비스와 accounting 의미가 달라 강제로 통합하지 않았다. 이 남은 migration은 P02.1c/DEV01 미완료이며 두 path의 테스트를 유지한다. CLI protocol 2와 실제 project window는 후속 P02.2 adapter로 연결·검증했다. MCP·SDK attach와 P02 전체 제품 gate는 계속 열려 있다. process I/O 극단 사례는 후속 native22 smoke에서 별도로 통과했으며 실제 F10/Step 경합도 release physical 입력으로 확인했다.
+
+후속 [legacy 결과 수명 계약](legacy-session-result-lifetimes.md)은 fixture actor/FIFO API를 유지한 채 CreditPool/lease만 공통화한다. by-value 결과 소비 뒤 caller clone은 ticket reader retention과 다르다. panic 중 popped command의 unknown 결과도 명시하며 아직 해당 구현은 진행 전이다.

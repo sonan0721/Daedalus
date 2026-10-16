@@ -63,6 +63,8 @@ V-005·014·015의 상세 인수는 [SDK](../03-architecture/gameplay-and-mod-sd
 
 ## CI의 실제와 미래
 
-현재 CI는 Markdown·문서 검사기만 검증한다. 미래에는 CPU correctness·Wasm conformance·실제 GPU smoke·성능 전용 runner·30명 server 부하·장시간 soak를 비용과 환경에 맞춰 나눈다. GPU 없는 일반 runner의 문서 테스트를 그래픽·144fps 검증으로 표현하지 않는다.
+현재 PR CI는 docs/Python, Rust all-feature locked check/test/fmt/strict Clippy, 실제 native bridge와 .NET integration, macOS arm64/Linux x64 CLI package·압축 해제 CPU smoke를 실행한다. P03.1부터 두 native package의 staged binary로 offline assets smoke도 실행한다. 실제 [PR10](https://github.com/sonan0721/Daedalus/pull/10)의 다섯 job과 두 assets step은 통과했다. 최신 검증 명령과 한계는 루트 [TESTING](../../TESTING.md)을 따른다.
+
+Wasm library compile과 실제 Mac/Metal/native 입력·표시 검증은 로컬 증거로 구분한다. 브라우저 conformance·GPU 전용 CI·성능 전용 runner·30명 server 부하·장시간 soak는 후속이다. 일반 CPU/package CI를 그래픽 품질·모든 플랫폼·144fps 검증으로 표현하지 않는다.
 
 성능 회귀는 기준 장비에서 같은 input·profile·warmup·원시 자료로 비교한다. GPU별 pixel 차이를 blanket snapshot update로 숨기지 않고, 정확성 허용 오차와 품질 변화의 검토 이유를 남긴다.

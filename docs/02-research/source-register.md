@@ -95,6 +95,7 @@
 | S85 | [Rust Arc::try_unwrap](https://doc.rust-lang.org/std/sync/struct.Arc.html#method.try_unwrap)·[Arc::get_mut](https://doc.rust-lang.org/std/sync/struct.Arc.html#method.get_mut) | 2026-10-16: 현재 공식1.99.1 문서의 stable1.4 API 설명 확인. 단독 strong일 때 owned 값 회수, 실패 시 원래 Arc 반환, weak가 남아도 try_unwrap 가능. get_mut은 weak도 없어야 함. 1.94.0 version URL은 web tool에서 접근 실패 | 세대 회수 owner는 실패 Arc를 유지해 재시도해야 함. `.ok()`로 실패 Arc를 버리는 경로와 unsized Frame backing에 Sized 회수를 그대로 적용하지 않음. pinned1.94 실제 source/build 검증은 구현 단계에서 별도 |
 | S86 | [wgpu Queue completion](https://docs.rs/wgpu/latest/wgpu/struct.Queue.html#method.on_submitted_work_done), 고정27.0.1 Cargo registry의 `src/api/queue.rs`·`device.rs` | 2026-10-16: 현재 온라인30.0.1 설명과 별도로 pinned27.0.1 source를 직접 확인. native callback은 submit/poll 진행 thread에서 실행되고 callback이 끝나야 해당 호출이 반환됨. write는 staging 복사와 후속 submission을 사용. pinned docs.rs URL은 web 조회 실패 | stage-only도 기존 serial/completion 장부를 사용하고 callback에는 작은 완료 metadata만 둔다. PollType::Wait를 UI에 넣거나 submission 완료를 present로 해석하지 않음. API 조사이며 장치 staging 구현/성능 근거 아님 |
 | S87 | [Rust trait-object bounds](https://doc.rust-lang.org/reference/types/trait-object.html), [E0785](https://doc.rust-lang.org/error_codes/E0785.html), [rustc OwnedSlice](https://doc.rust-lang.org/nightly/nightly-rustc/rustc_data_structures/owned_slice/struct.OwnedSlice.html) | 2026-10-16: 현재 공식 bounds/E0785의 non-auto trait 최대1개 규칙과 compiler 자체 `owner: Arc<dyn Send + Sync>` 확인. principal trait가 없는 dyn object의 inherent impl 제약과 type 자체의 허용을 구분 | renderer source-retention 제안에 새 공유 marker trait가 문법상 필수라는 가정을 배제. pinned Rust1.94 compile·엔진 API/수명·장치 지원은 아직 검증하지 않음 |
+| S88 | [CPAL 0.18.2 CoreAudio monitor](https://raw.githubusercontent.com/RustAudio/cpal/v0.18.2/src/host/coreaudio/macos/mod.rs), [device stream](https://raw.githubusercontent.com/RustAudio/cpal/v0.18.2/src/host/coreaudio/macos/device.rs), [upgrading notes](https://github.com/RustAudio/cpal/blob/master/UPGRADING.md) | 2026-10-17: pinned source의 processor-overload listener→Xrun·DefaultOutput/HAL 선택·AudioUnit callback/start 대조. master notes는 비동기 Xrun 의미 보강에만 사용 | 실제 native 진행 실패의 원인 분리. Xrun 하나만으로 data callback 부재나 장치 결함을 단정하지 않음. 0.19 API/업그레이드는 채택하지 않음 |
 
 S67~S70의 확인 결과와 CPU cook/GPU resource identity 적용안은 [에셋 상세 계약](../03-architecture/asset-import-cook-and-residency.md)에 둔다. 해당 추가는 포맷 조사이며 새 dependency를 Cargo에 설치한 결과가 아니다.
 
@@ -108,6 +109,7 @@ S74~S77의 실제 원본·archive·변환 hash와 라이선스 범위는 [에셋
 - 과거 fluid CA 블로그 주소는 본문을 확보하지 못했다. R01 유체 설계는 자체 제안이며 해당 글이나 Terraria의 실제 구현에 근거했다고 주장하지 않는다.
 - Lightyear의 과거 또는 잘못된 저장소 주소 대신 현재 조회된 `cBournhonesque/lightyear`를 사용한다.
 - 콘솔 SDK·실기기·유료 런타임·DCC 도구의 통합 시험은 수행하지 않았다.
+- 2026-10-17 native 진단의 Kira0.12.5 tag/raw·docs.rs 링크는 web 도구에서 본문을 확보하지 못했다. 해당 API/수명 사실은 lockfile과 로컬 registry의 pinned0.12.5 source(`.cargo_vcs_info` commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`, path `crates/kira`)를 직접 읽어 확인했다. 온라인 조회 성공으로 표시하지 않는다.
 
 ## 후속 근거 강화
 

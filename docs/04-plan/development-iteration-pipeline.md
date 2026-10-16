@@ -23,6 +23,10 @@
 
 위 표는 backlog다. `제안/미구현`을 기존 기능으로 홍보하지 않는다. 현재 코드 근거와 우선순위는 readiness 감사에 보완한다.
 
+### 실패 뒤 반복 범위 줄이기
+
+P03.3b.2의 실제 native audio 실패에서는 이미 생성·검증한 archive의 같은 extracted CLI/hash를 유지하고 기존 helper의 `--audio-native`만 분리 실행했다. 전체 assets/window/prepare/activation을 다시 실행하지 않고 같은 10초 종료 실패를 재현했다. 다음은 [test-only native 진행 진단](../03-architecture/native-audio-progress-diagnostics.md)으로 position/state·stream 오류를 관측한다. 원인을 모른 채 전체 suite/CI를 반복하거나 timeout을 늘리지 않는다. production 변경이 생기면 영향받는 통합·배포 경로를 다시 검증하며 이전 binary의 결과를 새 binary에 전용하지 않는다. 이는 실제 반복 범위 감소이며 wall-time 개선 배율이나 전체 DEV06 완료는 아니다.
+
 ## 이번 코드 감사에서 확인한 반복
 
 - CLI `control.rs`의 `Operation`과 native bridge `lib.rs`의 `Operation`, managed `NativeEngineSession.cs`의 수동 JSON field 구성은 겹치는 DTO를 별도로 유지한다. stdio request ID/protocol과 bridge atomic batch는 의도적인 차이이므로 envelope까지 하나로 억지 통합하지 않는다.

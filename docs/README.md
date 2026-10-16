@@ -55,6 +55,7 @@
 | [에셋 실제 실행 소비](03-architecture/asset-runtime-consumers.md) | 다음 model/texture·sprite·audio 연결의 공통 packet·authority·자원 공유·검증 초안 |
 | [스프라이트·정사영 계약](03-architecture/sprite-runtime-and-orthographic-view.md) | P03.2b의 실제 atlas/alpha·공통 unit quad·authority camera·실제 표시 view와 반복 검증 경계 |
 | [Imported audio 실행 계약](03-architecture/imported-audio-runtime.md) | P03.2c의 공유 Frame bank·공통 actor/replay·장치 없는 PCM와 실제 native 출력·voice 수명 계약 |
+| [Native 오디오 진행 진단](03-architecture/native-audio-progress-diagnostics.md) | 실제 finite voice 종료 실패를 position/state·stream 오류로 좁히고 전체 회귀 반복을 줄이는 opt-in 진단 계약 |
 | [비동기 에셋 후보 준비](03-architecture/project-asset-preparation.md) | P03.3a의 동결한 단일 cache worker·최신 후보/취소·private payload·공통 제어·논리적 메모리 한도 계약 |
 | [에셋 세대 전환·회수](03-architecture/project-asset-activation.md) | P03.3b/c의 live state 보존·consumer staging·actor commit·실제 표시·old audio/GPU 회수를 동결하기 위한 상세 초안 |
 | [에셋 교체 authored 호환성](03-architecture/asset-replacement-compatibility.md) | P03.3b.1의 단일 content 비교기·허용 field/revision/order·유한 오류/임시 index를 먼저 동결해 consumer별 중복 판정을 방지 |

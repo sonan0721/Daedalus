@@ -650,6 +650,10 @@ mod tests {
         PCM_FRAME_BYTES, PcmClip, probe_default_output_device,
     };
     use kira::Frame;
+    #[cfg(feature = "native")]
+    use kira::sound::PlaybackState;
+    #[cfg(feature = "native")]
+    use std::time::{Duration, Instant};
 
     fn constant_clip(value: f32, frames: usize) -> PcmClip {
         PcmClip::from_interleaved(48_000, 1, vec![value; frames]).unwrap()
@@ -919,6 +923,167 @@ mod tests {
             Ok(None) => println!("no default output device is available"),
             Err(error) => println!("default output probe unavailable: {error}"),
         }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    #[ignore = "requires an actual CPAL output device and is a diagnostic, not a CI test"]
+    fn native_cpal_voice_progress_and_completion_diagnostic() {
+        const SAMPLE_RATE: u32 = 8_000;
+        const FRAME_COUNT: usize = 2_000;
+        const POST_PLAY_TIMEOUT: Duration = Duration::from_secs(10);
+        const SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
+        const MAX_OBSERVATIONS: usize = 205;
+        const MAX_ERRORS_PER_OBSERVATION: usize = 4;
+        const MAX_RETAINED_ERRORS: usize = 16;
+        const MAX_RETAINED_CPU_SAMPLES: usize = 16;
+
+        // Match scripts/smoke_project.py's PCM16 fixture exactly before the same signed-int16
+        // normalization used by the imported WAV path: int() truncates toward zero.
+        let pcm16: Vec<i16> = (0..FRAME_COUNT)
+            .map(|frame| {
+                (12_000.0
+                    * (std::f64::consts::TAU * 440.0 * frame as f64 / SAMPLE_RATE as f64).sin())
+                    as i16
+            })
+            .collect();
+        let peak_pcm16 = pcm16
+            .iter()
+            .map(|sample| i32::from(*sample).unsigned_abs())
+            .max()
+            .unwrap_or_default();
+        let normalized: Vec<f32> = pcm16
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_768.0)
+            .collect();
+        let clip = PcmClip::from_interleaved_slice(SAMPLE_RATE, 1, &normalized)
+            .expect("the bounded fixture must be valid PCM");
+
+        let config = AudioConfig::default();
+        let startup_started = Instant::now();
+        let mut service = AudioService::<kira::backend::cpal::CpalBackend>::native(config)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "native CPAL service startup failed after {:?}: {error}",
+                    startup_started.elapsed()
+                )
+            });
+        let startup_elapsed = startup_started.elapsed();
+        println!(
+            "native_startup=ok startup_elapsed_ms={} sample_rate={} fixture_frames={} duration_ms=250 frequency_hz=440 pcm16_peak={} normalized_peak={:.6} config={{max_voices:{},internal_buffer_frames:{}}}",
+            startup_elapsed.as_millis(),
+            SAMPLE_RATE,
+            FRAME_COUNT,
+            peak_pcm16,
+            peak_pcm16 as f64 / 32_768.0,
+            config.max_voices,
+            config.internal_buffer_frames,
+        );
+
+        let voice = service
+            .play(&clip, 1.0, 0.0)
+            .expect("native Play must be accepted");
+        let playback_started = Instant::now();
+        let deadline = playback_started + POST_PLAY_TIMEOUT;
+        let mut observation_count = 0usize;
+        let mut max_position_seconds = 0.0f64;
+        let mut popped_error_count = 0usize;
+        let mut retained_errors = Vec::with_capacity(MAX_RETAINED_ERRORS);
+        let mut cpu_sample_count = 0usize;
+        let mut retained_cpu_samples = Vec::with_capacity(MAX_RETAINED_CPU_SAMPLES);
+        let mut last_discarded_error_count;
+        let mut stopped_observed = false;
+
+        loop {
+            assert!(
+                observation_count < MAX_OBSERVATIONS,
+                "native diagnostic exceeded its bounded {MAX_OBSERVATIONS} observations"
+            );
+            let elapsed = playback_started.elapsed();
+            let (state, position_seconds) = {
+                let handle = service.voices.slots[voice.index as usize]
+                    .voice
+                    .as_ref()
+                    .expect("voice must remain tracked until the explicit reap");
+                (handle.state(), handle.position())
+            };
+            max_position_seconds = max_position_seconds.max(position_seconds);
+
+            let (discarded_errors, cpu_usage) = {
+                let backend = service.manager.backend_mut();
+                for _ in 0..MAX_ERRORS_PER_OBSERVATION {
+                    let Some(error) = backend.pop_error() else {
+                        break;
+                    };
+                    popped_error_count = popped_error_count.saturating_add(1);
+                    if retained_errors.len() < MAX_RETAINED_ERRORS {
+                        retained_errors
+                            .push(error.to_string().chars().take(256).collect::<String>());
+                    }
+                }
+                let cpu_usage = backend.pop_cpu_usage();
+                if cpu_usage.is_some() {
+                    cpu_sample_count = cpu_sample_count.saturating_add(1);
+                    if retained_cpu_samples.len() < MAX_RETAINED_CPU_SAMPLES {
+                        retained_cpu_samples.push(cpu_usage.unwrap_or_default());
+                    }
+                }
+                (backend.num_stream_errors_discarded(), cpu_usage)
+            };
+            last_discarded_error_count = discarded_errors;
+            observation_count += 1;
+            println!(
+                "observation={observation_count} elapsed_ms={} state={state:?} position_ms={:.3} stream_errors_discarded={discarded_errors:?} cpu_usage={cpu_usage:?}",
+                elapsed.as_millis(),
+                position_seconds * 1_000.0,
+            );
+
+            if state == PlaybackState::Stopped {
+                stopped_observed = true;
+                break;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            std::thread::sleep(SAMPLE_INTERVAL.min(deadline.saturating_duration_since(now)));
+        }
+
+        let final_elapsed = playback_started.elapsed();
+        let final_state = service.voices.slots[voice.index as usize]
+            .voice
+            .as_ref()
+            .expect("voice must still be tracked before the explicit reap")
+            .state();
+        println!(
+            "native_playback_summary startup_elapsed_ms={} playback_elapsed_ms={} observations={} max_position_ms={:.3} final_state={final_state:?} stopped_observed={stopped_observed} errors_popped={} errors_retained_count={} errors_retained={:?} stream_errors_discarded={last_discarded_error_count:?} cpu_usage_samples={} cpu_usage_retained={:?}",
+            startup_elapsed.as_millis(),
+            final_elapsed.as_millis(),
+            observation_count,
+            max_position_seconds * 1_000.0,
+            popped_error_count,
+            retained_errors.len(),
+            retained_errors,
+            cpu_sample_count,
+            retained_cpu_samples,
+        );
+
+        assert!(
+            max_position_seconds > 0.01,
+            "native voice made no observable playback progress in {final_elapsed:?}; final state={final_state:?}, observations={observation_count}, errors={retained_errors:?}, discarded={last_discarded_error_count:?}"
+        );
+        assert!(
+            stopped_observed && final_state == PlaybackState::Stopped,
+            "native finite voice did not reach Stopped within {POST_PLAY_TIMEOUT:?}; final state={final_state:?}, max position={max_position_seconds:.6}s, observations={observation_count}, errors={retained_errors:?}, discarded={last_discarded_error_count:?}"
+        );
+
+        let reaped = service
+            .reap_stopped()
+            .expect("observed stopped native voice must be safely reapable");
+        assert_eq!(reaped, 1, "exactly the diagnostic voice should be reaped");
+        assert_eq!(service.active_voice_count(), 0);
+        assert!(!service.contains_voice(voice));
+        println!("native_reap=ok reaped={reaped} active_voice_count=0 contains_voice=false");
     }
 
     #[cfg(not(feature = "native"))]

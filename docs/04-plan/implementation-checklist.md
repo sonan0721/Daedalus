@@ -133,7 +133,7 @@ P03.1 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있
 - [ ] P03.2: 같은 project/catalog의 실제 model primitive·UV/texture/sampler·sprite/2D·audio consumer 연결과 렌더/출력 검증. [소비 계약 초안](../03-architecture/asset-runtime-consumers.md)의 a/b/c 경로를 각각 확정·검증하며 모두 통과해야 체크한다.
 - [x] P03.2a: [모델·텍스처 실행 계약](../03-architecture/model-texture-runtime.md)의 binding·공통 view/capture·유한 GPU 자원·실제 픽셀/공개 모델 검증. 로컬 CPU254·Python54·assets31·실제 Metal4·native/model24와 공개 원본 Cube를 확인했다. clean release package/extracted assets31·native-model24도 통과했다. [PR11](https://github.com/sonan0721/Daedalus/pull/11) 최종 head `770bc71`의 다섯 CI·두 packaged-assets step과 main `6d1711f` 동일 tree까지 확인해 이 하위 gate만 인수했다.
 - [x] P03.2b: [sprite/정사영 상세 계약](../03-architecture/sprite-runtime-and-orthographic-view.md)의 실제 atlas·alpha·공통 unit quad·authority camera·실제 view 보고와 픽셀/반복 검증. CPU264·Python55·Metal9·통합 smoke39·공개 원본·clean package/extracted smoke39 확인. [PR12](https://github.com/sonan0721/Daedalus/pull/12) 최종 head `6e8fa50`의 다섯 CI/두 packaged-assets step과 main `dd2de2e` 동일 tree를 확인해 이 하위 gate만 인수했다.
-- [ ] P03.2c: imported PCM의 실제 audio 소비와 voice/device 수명 검증. 별도 상세 계약 후 착수.
+- [ ] P03.2c: [imported audio 계약](../03-architecture/imported-audio-runtime.md)의 공유 bank·공통 actor/replay·offline PCM·native 출력·voice/device 수명 검증. 상세 API/source 리뷰 중·code 미착수.
 - [ ] P03.3: background import/cook·candidate/active resource generation·실행 중 변경/취소/stale·실패 last-good·CPU/GPU/audio 회수.
 - [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.
 

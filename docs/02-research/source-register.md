@@ -89,6 +89,7 @@
 | S79 | [glTF image transfer 정의](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#images)·[규격 원문](https://github.com/KhronosGroup/glTF/blob/main/specification/2.0/Specification.adoc) | 2026-10-16: image의 embedded 색공간보다 material의 transfer 정의를 사용 | standalone PNG 정규화와 glTF encoded-color 정책을 공통 decoder/API 안에서 구분하고 cache non-alias 검증 |
 | S80 | [wgpu v27.0.1 types 원본](https://github.com/gfx-rs/wgpu/blob/v27.0.1/wgpu-types/src/lib.rs) | 2026-10-16: pinned local source와 ALPHA_BLENDING factors·sRGB texture format·CompositeAlphaMode 정의 대조 | sprite의 linear 합성과 PNG/native alpha 경계 설계. 새 sprite runtime 통과 근거 아님 |
 | S81 | [PNG 3rd edition alpha](https://www.w3.org/TR/2025/REC-png-3-20250624/#6AlphaRepresentation) | 2026-10-16: PNG RGB의 unassociated alpha·§12.3 변환/alpha0 규칙 확인 | decoder alpha와 GPU 합성·PNG encode 표현을 구분. premultiplied linear target은 decode 후 나누고 다시 encode하는 엔진 설계 |
+| S82 | [Kira pinned StaticSoundData](https://raw.githubusercontent.com/tesselode/kira/74b3ef0fd8bd15f90e3b469208ee741f04374a62/crates/kira/src/sound/static_sound/data.rs) | 2026-10-16: local kira0.12.5 VCS metadata의 commit과 upstream raw source를 대조해 Arc Frame sharing·loop configuration 확인. 개별 docs.rs API와 다른 raw 페이지 일부는 조회 실패 | imported audio의 one-time bank conversion/voice 공유 설계. native 출력·callback drop·플랫폼 통과 근거 아님 |
 
 S67~S70의 확인 결과와 CPU cook/GPU resource identity 적용안은 [에셋 상세 계약](../03-architecture/asset-import-cook-and-residency.md)에 둔다. 해당 추가는 포맷 조사이며 새 dependency를 Cargo에 설치한 결과가 아니다.
 

@@ -16,7 +16,7 @@
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
 | DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1 CPU/실제 원본·clean package/PR10 CI 인수. warm decode/leaf cook0, read/parse는 남음. 실제 consumer/reload 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
-| DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model 실제 소비 인수. sprite 통합 검증 중, audio·실행 중 patch 후속 |
+| DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite 실제 소비 인수. audio 소비 구현 중, 실행 중 patch 후속 |
 | DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
 | DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh handle·native GPU cache·dirty instance/material 검증, cook/reload·texture/skin 후속 |
@@ -116,3 +116,16 @@ PNG alpha 감사는 같은 readback/row-unpadding/encoder에 private 표현 poli
 실제 후속 결과는 CPU264·Metal9·debug 통합 smoke39/14.288578초와 clean archive의 같은 smoke39/14.522841초다. 공개 원본의 네 sprite도 unit geometry1개/88 bytes·image1회/135,168 bytes를 공유했고8초 native939 present 동안 추가 geometry/texture/instance/material 업로드가 없었다. alpha255는 기존 byte를 보존하고 부분 alpha만 공통 backing 안에서 변환한다. 서로 다른 범위·profile의 단1회 관찰로 speedup을 주장하지 않는다. 실제 실패·수정·source/binary identity는 [작업 기록](../06-worklog/2026-10-16-sprite-runtime.md)을 따른다.
 
 이번 smoke의 float64 literal과 f32 wire 기대값 불일치도 DEV02의 후속 conformance 대상으로 기록한다. SDK/schema 생성 시 float의 실제 표현·정밀도와 JSON round-trip을 명시해 각 adapter가 잘못된 exact 비교를 반복하지 않도록 한다. 현재는 작은 fixture 기대값을 고쳤으며 범용 SDK 생성기를 구현한 것은 아니다.
+
+## P03.2c에서 줄일 개발 반복
+
+[imported audio 계약](../03-architecture/imported-audio-runtime.md)은 다음 네 경로를 새 기능 착수 전에 공통 책임으로 고정했다. 계약 commit은 `b1b50e8`이며 아래 결과는 아직 검증 전이다.
+
+| 반복 위험 | 구현할 공통 경로 | 결과 판정 |
+| --- | --- | --- |
+| native 창과 headless 테스트가 별도 JSONL·ticket·Close 구현을 유지 | renderer-neutral protocol2와 같은 SessionControlService. owner만 창 Close 또는 actor 종료로 변환 | 동일 operation/result·capability·재시도와 EOF/blocked output 회귀 |
+| AudioAsset→임시 sample Vec→Frame 변환을 load/play마다 반복 | borrowed PCM의 unique LeafCookKey당 한 bank 변환, voice는 Frame Arc 공유 | alias 수와 unique conversion 수·payload bytes·여러 Play 후 불변 counter |
+| audio마다 또 다른 command replay/클라이언트 수명 구현 | 기존 actor의 bounded world/audio 공통 high-water·FIFO 결과 | ACK/detach/cross-kind/eviction 후 중복 Play·offline clock 진행0회 |
+| 장치 의존 테스트와 CPU/package fixture를 각각 수동 조립 | 기존 offline asset generator·bounded subprocess/JSONL·cleanup과 opt-in audio smoke | 동일 추출 binary의 offline 검사, 명시적 native 실제 출력 검사, 실패 cleanup |
+
+작업 분담도 manifest 먼저 고정→단일 Cargo.lock/target owner→source-only 병렬 구현→focused→통합→hardware→clean archive 순서로 유지한다. 루프별 wall time·변환/재생/clock counter와 source/binary hash는 실행 후 [작업 기록](../06-worklog/2026-10-16-imported-audio-runtime.md)에 남긴다. 재사용한 함수 수나 CI cache만으로 개발 시간 향상을 주장하지 않는다. C# SDK/schema 생성·source reload·AI live capture 같은 아직 없는 제작 기능도 이 공통화로 완료 처리하지 않는다.

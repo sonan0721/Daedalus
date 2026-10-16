@@ -14,12 +14,12 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1과 model/sprite/audio 소비 인수. warm decode/leaf cook0, read/parse는 남음. P03.3a persistent CPU 후보 구현·검증 중, 실행 중 교체 후속 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1·model/sprite/audio·P03.3a persistent CPU 후보를 PR14까지 인수. warm decode/leaf cook0, read/parse는 남음. b.2 CPU 교체 구현 중, render/audio 전환 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite·audio 실제 소비 인수. 실행 중 patch 후속 |
-| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
+| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 기본 CPU18·기존 opt-in 합산 CPU50/native60을 같은 smoke backend에서 검증. 새 activation 모드는 실제 CLI 검증 전. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
-| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh handle·native GPU cache·dirty instance/material 검증, cook/reload·texture/skin 후속 |
+| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh·model texture/sprite·native GPU cache·dirty instance/material 검증. 실행 중 세대 전환·skin 후속 |
 
 위 표는 backlog다. `제안/미구현`을 기존 기능으로 홍보하지 않는다. 현재 코드 근거와 우선순위는 readiness 감사에 보완한다.
 
@@ -182,7 +182,7 @@ PR15의 다섯 체크 성공·Publish skipped를 확인했다. head `9c7e2710330
 
 ## P03.3b에서 공통화할 반복
 
-[호환성 계약](../03-architecture/asset-replacement-compatibility.md)은 content의 단일 비교기를 두고 consumer마다 authored field 판단·정렬/진단을 중복 구현하지 않도록 한다. [headless 세대 계약](../03-architecture/headless-asset-generation.md)은 새 session 생성 대신 기존 worker·actor/replay·현재 Engine을 이어 쓰며 source 변경→Stage/Commit→같은 상태 조회를 한 실행에서 검증한다. authored topology 비교의 reference index만 한도 내에 만들고 payload 재복사/해시/parse는 하지 않는다. 이는 구현/검증 전 계약이며 실제 개발 시간 개선율을 주장하지 않는다.
+[호환성 계약](../03-architecture/asset-replacement-compatibility.md)은 content의 단일 비교기를 두고 consumer마다 authored field 판단·정렬/진단을 중복 구현하지 않도록 한다. 이 b.1 비교기는 content 로컬 검증을 통과했다. [headless 세대 계약](../03-architecture/headless-asset-generation.md)은 새 session 생성 대신 기존 worker·actor/replay·현재 Engine을 이어 쓰며 source 변경→Stage/Commit→같은 상태 조회를 한 실행에서 검증한다. authored topology 비교의 reference index만 한도 내에 만들고 payload 재복사/해시/parse는 하지 않는다. b.2 실제 세대 전환은 검증 전이며 개발 시간 개선율을 주장하지 않는다.
 
 CLI adapter는 실제 네 capability 배열의 base7 반복을 base/extension composer로 제거한다. 기존 feature-off 오류·네 조합의 operation 순서·새 headless-only 지원 경계를 함께 검사한 뒤에만 구현 결과로 기록한다. 범용 schema generator를 이번 선행 작업에 끼워 넣지 않고 source에서 확인한 작은 중복만 제거한다. runtime public type/getter·wire decimal ID를 먼저 고정해 별도 작업자가 private source를 추측하며 재작성하는 반복도 줄인다. compile/test 소유권과 focused→통합 순서는 유지한다.
 

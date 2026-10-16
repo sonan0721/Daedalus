@@ -78,4 +78,8 @@ worker 구현에는 commit metadata→pending promotion과 다음 Prepare의 순
 
 CLI adapter source는 고정한 public API 기준으로 먼저 완성해 scoped rustfmt/diff를 통과했다. 기존 stdio pump·capability composer를 공유하고 실제 service를 쓰는 stage→commit→status/frame test를 추가했지만, runtime actor integration/Cargo 검증은 아직 대기다. root는 worker Stop에서 candidate reclamation Arc를 먼저 비우는 경로도 발견해 수정/지연 reader 테스트를 요청했다. 종료 요청이나 actor 종료만으로 worker final drop을 증명하지 않는다.
 
+CLI 담당의 read-only 교차 검토는 helper wire/tags·ACK/retry·단일 issuer와 controller 사이 충돌을 찾지 않았다. 다만 staged/committed summary 자체의 source digest 일치 검사가 빠져 두 assertion을 보강했다. 최종 smoke source SHA-256은 `53c5a3c86d77551eaf764c14626ad62cb64f5e96e926957c53969e534d3b0256`이며 Python 재검증 전이다. renderer 후속 리뷰는 runtime-neutral lease의 신뢰 경계·stage-only completion ledger 재사용·현재 부재한 live presentation ACK를 위 명세에 반영했다. token/callback 새 API는 제안이며 source로 배정하지 않았다.
+
+S86은 최신 웹 문서를 pinned API의 증거로 대신하지 않고 로컬 Cargo registry의 wgpu27.0.1 원본도 읽었다. `src/api/queue.rs` SHA-256은 `a7f918a08db2b084343a6973eae999e5b92ae862f1d0e4515d16fa78179ed993`, `device.rs`는 `02d3a6be80612a669ace9a27d9f90691547989e8b41c69ed903ff25484dcf8f0`다. callback의 thread/비용·write staging·Wait/WebGPU poll 차이를 확인했으며 렌더러 source나 dependency를 변경하지 않았다.
+
 audio read-only 리뷰도 마쳤다. pinned Kira0.12.5의 render-owned sound가 실제 Frame Arc를 잡고 있고 handle reap은 이를 증명하지 않는다. weak observer만으로 callback의 마지막 큰 free를 막을 수 없어 실제 leaf 공유 store·generation alias/voice·cleanup strong sentinel과 정확한 owner baseline이 필요하다. project-audio/service source map은 명세에 반영했으며 audio 새 API·multibank/실제 회수는 아직 구현하지 않았다. 리뷰 담당은 source 수정과 tests를 실행하지 않았다.

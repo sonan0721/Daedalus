@@ -107,6 +107,12 @@ GPU staging은 기존 device와 completion tracking을 사용한다. CPU upload 
 
 또한 현재 submission은 한 candidate의 전체 geometry/texture upload와 draw를 묶는다. 비동기 CPU import만으로 UI의 device 작업이 작아지는 것은 아니다. 후속 설계에서는 pump별 upload bytes·resource 생성 수·단계별 실패/취소 회수와 기존 in-flight 한도 안의 presentation 진행 여유를 동결하고 실제 driver/GPU/표시 시간을 측정해야 한다. 아직 숫자·stage API·성능을 확정한 구현은 아니다.
 
+후속 read-only 교차 리뷰는 정확한 연결 지점도 확인했다. renderer `packet.rs::ProjectRenderResources::prepare`는 `&PreparedProject`와 현재 authored handle map을 받지만, 추출된 sidecar/packet에 generation 회계 lease는 없다. `packet_renderer.rs::note_submission/poll_retirement`의 serial·callback watermark·staging ledger를 stage-only에도 재사용하되 draw/present를 수행한 것으로 기록하지 않아야 한다. `window.rs`는 최종 presented report만 제공하고 실행 중 candidate의 stage/present ACK 채널은 아직 없다. GPU 완료는 현재 화면에 필요한 old generation을 축출해도 된다는 뜻이 아니다.
+
+다음 계약은 host가 소유하는 bounded stage/present ACK 경계와 prepared-resource/packet까지 이어지는 source cleanup pin을 함께 정해야 한다. opaque move-only lease·짧은 borrowed callback·content read-only view는 아직 대안이며 `Any` token/framework를 채택한 결정이 아니다. 기존 PreparedProject는 Clone 가능한 native type이므로 borrowed 참조도 신뢰된 SDK 경계임을 명시해야 한다. control status에 payload를 노출하지 않는 보장과, 임의 native caller의 별도 clone/allocation을 제한한다는 주장을 혼동하지 않는다.
+
+[S86](../02-research/source-register.md)의 pinned wgpu27.0.1 source 확인은 callback의 비용도 분리해야 함을 보여준다. native 완료 callback은 submit/poll 진행 thread에서 실행될 수 있어 작은 serial/watermark 게시만 맡긴다. 큰 후보/packet의 마지막 drop이나 import·정리를 callback에 넣지 않는다. write 호출의 반환·후속 submission 완료·실제 present를 별도로 추적하며 stage-only도 draw 없이 completion reservation을 사용한다. UI의 blocking Wait로 이를 대신하지 않는다. staging 재사용 방식/작업량 수치와 실제 장치 검증은 아직 후속 동결 항목이다.
+
 ## audio bank와 old voice
 
 새 Play는 commit 후 current bank에서 clip을 찾고, 이미 재생 중인 voice는 원래 generation/clip identity를 유지한다. voice의 volume/pan/Stop/query는 old bank를 포함해 원래 voice를 대상으로 한다. alias index만 새 bank에 재사용해 다른 clip을 가리키게 하지 않는다. old loop 때문에 여러 generation이 남으면 한도에서 Busy가 가능해야 한다.

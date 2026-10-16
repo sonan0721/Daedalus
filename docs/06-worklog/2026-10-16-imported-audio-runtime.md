@@ -104,6 +104,12 @@ Rust source `fdae55d`를 push하고 all-feature debug CLI를 다시 빌드했다
 
 별도 bridge를 실제 다시 빌드하고 pinned .NET10.0.402의 Release build0warning/0error, Rust-backed self-test와 module lifecycle integration2scenarios를 통과했다. `p03-audio-bridge-build.log`, `p03-audio-managed-build.log`, `p03-audio-managed-selftest.log`, `p03-audio-managed-integration.log`에 남긴다. 기본 PATH의 `/usr/local/share/dotnet`은 SDK6/7뿐이라 첫 version 조회가 실패했고 이미 설치된 `/Users/danny/.dotnet`을 명시해 진행했다. SDK를 다시 설치하거나 global.json을 낮추지 않았다. 이것은 transform SDK 회귀이며 audio managed binding 구현은 아니다.
 
+## 첫 clean release package — notice 누락으로 중단
+
+통합 Python/실제 consumer/docs 회귀 후 `6459fcc`를 commit/push하고 clean tree에서 기존 `python3 scripts/package_cli.py`를 실행했다. native-audio+window release build는17.43초에 성공했으나 strict notice 수집이 새 dependency10개의 원문 누락으로 중단했다. `dist/project-evidence/p03-audio-local-package.log`가 첫 실패 raw 로그다. archive 검증 성공으로 보고하지 않는다.
+
+누락은 block2 0.6.2, dasp_sample0.11.0, dispatch2 0.3.1, kira0.12.5, objc2 0.6.5, objc2-audio-toolbox/core-audio/core-audio-types/core-foundation0.3.2, objc2-foundation0.3.2다. 기본 license 메타데이터만으로 통과시키지 않고 기존 exact crate checksum·VCS commit/path·원문 SHA 정책으로 curated evidence를 보강한다. 다른 Luna가 공식 source를 read-only 조사하고 collector 담당은 같은 정책으로 macOS/Linux target graph를 미리 대조한다. 모든 CI를 한 번 돌리고 누락을 나중에 찾는 반복을 줄이되 실제 PR 검사는 생략하지 않는다.
+
 ## 조사 한계
 
 버전 고정 docs.rs API 세 페이지 조회는 실패했다. local registry의 Kira0.12.5 source를 읽어 Frame Arc sharing/loop/state/final clamp를 확인했다. 이후 local VCS metadata의 commit `74b3ef0fd8bd15f90e3b469208ee741f04374a62`로 upstream StaticSoundData raw 원문을 확보·대조했으며 다른 raw 페이지 일부는 실패했다. browser audio·loopback/audibility·다른 장치/플랫폼은 현재 미검증이다.

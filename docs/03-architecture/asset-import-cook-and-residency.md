@@ -1,6 +1,6 @@
 # 외부 에셋 import·cook·resource generation
 
-상태: P03 전체 설계·P03.1 CPU 구현 검증 중 · 2026-10-16 · D1 제품 인수 미통과
+상태: P03 전체 설계·P03.1/P03.2a·b 인수, imported audio c의 배포 인수 진행 중 · 2026-10-16 · D1 제품 인수 미통과
 
 ## 만든 이유와 현재 경계
 
@@ -106,6 +106,34 @@ CLI load/validate/inspect/capture와 후속 MCP는 같은 importer/IR/cache/serv
 - cold/warm no-change·PNG edit·buffer edit·atlas metadata edit·WAV edit·실패 reload에 대해 wall time, read/decode/cook/upload 수, 수동 단계, active identity와 capture를 남긴다. 실제 측정 전 속도 배율을 약속하지 않는다.
 
 첫 구현을 시작할 때 public IR/API·수치 예산·소유 파일·lock owner와 위 항목의 실행 명령을 더 고정한다. 이 설계 문서가 생성되었다는 이유로 현재 P01/P03/DEV03을 완료 처리하지 않는다.
+
+## P03.3 착수 전 현재 API 감사
+
+다음은 P03.2c source `6459fcc`에 대한 read-only 조사다. a/b는 인수됐지만 c는 clean archive/CI/main 대기이며 아래 reload 구현은 시작하지 않았다. 과거 P03.1 착수 전 내용과 구분한다.
+
+| 현재 seam | 확인한 동작 | 다음 계약에서 해결할 일 |
+| --- | --- | --- |
+| `PreparedProject`·`load_project_with_assets` | 불변 catalog와 validated model/sprite/camera binding. native load는 동기 resolver/import이고 취소는 협력적. watcher 없음 | actor/window 밖 유한 candidate 준비. 기존 importer/cache/cancellation을 재사용하고 파일별 loader를 새로 만들지 않음 |
+| `ProjectSession` | startup에서 Engine과 StableId→EntityHandle을 만들고 source Arc를 고정 | 같은 Engine/handle·현재 authority transform을 유지하는 source/binding 교체. 새 session으로 재시작하는 것을 reload로 부르지 않음 |
+| service frame·native coordinator | generation1과 첫 source digest를 고정하며 변경 source를 거부 | 하나의 generation owner와 monotonic candidate ID, expected-active 검증·stale completion 거부, 동일 세대 snapshot/source identity |
+| `ProjectRenderResources`·`PacketRenderer` | immutable CPU 준비·snapshot extract·payload/layout reuse. ResidencyBusy 때 이전 ready packet 표시 가능 | 후보 CPU 준비와 GPU residency/submit·실제 present를 분리. renderer가 authority를 소유하지 않으며 실제 present identity를 coordinator에 보고 |
+| `ProjectAudioRuntime` | bank/backend1개. voice는 이 bank의 alias index를 참조 | voice의 원본 generation/clip ID 유지, 같은 backend에 새 bank staging. old loop/callback backing 포함한 유한 retired bank·payload 회계 |
+
+첫 하위 계약은 **에셋 변경만 허용하고 scene topology를 고정하는 경로**를 우선 검토한다. 같은 entity StableId·component/binding topology를 확인하고 authored transform 변경·entity 추가/제거·reparent는 명시적으로 거부한다. 현재 ECS pose/revision/handle과 authority camera binding을 보존한다. 일반 scene patch·구조적 reload는 후속 계약이며 이 제한된 경로로 P03.3 전체를 체크하지 않는다.
+
+제안한 순서는 bounded async 후보 준비 → topology-preserving stage/commit → consumer staging과 회수 → 반복 계측이다. 첫 trigger는 같은 session의 명시적 reload 요청이며 watcher/debounce는 그 요청의 adapter로 후속 추가한다. one-running/one-latest 대기, supersede/cancel·stale-drop·종료·정확한 수치 예산·공개 API와 파일 소유권은 상세 MD에서 구현 전에 고정한다. 기존 task pool의 blocking I/O·cache lease·join 한계를 조사하지 않고 새 작업 thread를 무조건 추가하지 않는다.
+
+CPU128MiB·audio Frame256MiB·GPU 단일 consumer 예산만 각각 통과했다고 여러 generation이 안전한 것은 아니다. active+candidate+in-flight+retired의 동시 상주와 변환 scratch를 합산한다. old looping voice가 여러 generation을 붙잡을 수 있고 Stopped/reaped만으로 CPAL의 마지막 Frame Arc 해제를 단정할 수 없다. narrow backing-owner 관찰이나 보수적 보유가 필요하며, 회수 확인이 안 되면 Busy/명시적 거부를 반환한다. callback join을 새로 보장했다고 쓰지 않는다.
+
+새 status는 CPU-prepared·actor-committed·render-ready/submitted·실제-presented를 구분한다. `latest_frame`은 actor snapshot이며 GPU present ACK가 아니다. 화면이 이전 ready generation을 쓰는 동안 새 generation을 이미 보였다고 보고하지 않는다. 실패·취소·예산 초과 때 기존 정상 세대의 source/packet/voice가 유지되는지 검사한다.
+
+native filesystem의 여러 파일을 차례로 읽은 결과는 하나의 immutable **captured byte graph**가 될 수 있으나 원본 디스크의 동일 순간 atomic snapshot은 아니다. content hash와 dependency validation은 입력의 identity를 설명하며 동시 파일 편집을 자동 transaction으로 만들지 않는다. byte-map 경로·명시적 source transaction과 native capture/recheck 정책을 후속 상세 계약에서 구분하고, watcher debounce/mtime을 원자성 증명으로 사용하지 않는다.
+
+worker/cache 후속 감사는 기존 `Engine.tasks()`에 독립 asset consumer를 추가하는 위험도 확인했다. TaskPool은 단일 completion receiver를 공유하고 LiveSession은 자신이 제출하지 않은 completion을 unexpected로 다루므로 서로의 결과를 소비할 수 있다. blocking source I/O도 simulation CPU slot과 혼합하지 않는다. project-scoped native asset worker 하나를 common service 옆에 두되 별도 Engine/권한 world를 만들지 않는 안을 상세 계약 후보로 선택한다. 기존 cancellation/latest-generation 의미와 importer API를 재사용한다.
+
+cache는 session worker 하나만 연다. `FileCookCache::open`의 `.owner.lock`은 catalog의 CachePin으로도 유지될 수 있어 candidate마다 다시 열면 Busy가 될 수 있다. 초기 load부터 같은 worker의 concrete FileCookCache를 사용하는 안을 우선하며, 기존 loader에서 시작할 경우 cache pins 해제·이전 cache drop 뒤 새 worker가 한 번 열어야 한다. 중간에 다른 process가 lock을 잡으면 explicit Busy/startup failure다. 조용히 memory cache로 바꾸지 않는다. host-neutral CpuCookCache trait에 불필요한 Send 요구를 추가하거나 임의 unsafe Send를 붙이지 않는다.
+
+worker 종료도 협력적이다. 취소를 무시하는 parser 또는 blocking read를 강제 중단하거나 hard deadline 안에 join한다고 보장하지 않는다. UI/tick에서 join하지 않고 owner/control 경로에서 stop 요청과 worker/cache 소유권을 유지하며 실제 종료를 관찰한다. 시간이 지나도 작업이 남으면 Stopping과 lock 보유를 사실대로 보고한다. 구체적인 deadline·retention·process 종료 정책은 구현 전 상세 계약에 남긴다.
 
 ## P03.1 착수 전 source 감사와 예산 후보
 

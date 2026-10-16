@@ -1,6 +1,6 @@
 # P03.3a 비동기 에셋 후보 준비 작업 기록
 
-상태: Rust298·Python61·strict Clippy·managed·Metal9·CLI CPU50/native60 통과, clean package/CI 대기 · 2026-10-16 · P03.3/D1 미통과
+상태: Rust298·Python61·strict Clippy·managed·Metal9·CLI/clean archive CPU50/native60 통과, CI/main 대기 · 2026-10-16 · P03.3/D1 미통과
 
 ## 이 기록을 만든 이유
 
@@ -178,3 +178,23 @@ root의 같은 `--assets --audio --asset-preparation` 실제 command는 **50개/
 audio 없는 `--asset-preparation` 실제 mode도30개/0.442016초에 통과했고 composition report는null이다(`p03-preparation-cli-preparation-only-root-01.json`). 위 두 실행의 wall time은 모드·입력이 달라 이전49개와 speedup 비교를 하지 않는다. native 조합·clean package·CI/main 인수는 아직 대기다.
 
 보완한 native 전체 조합도 **60개/18.555073초**에 통과했다(`p03-preparation-cli-native-root-02.json`, stderr 파일). preparation 실행 창 자체의 session1/tick0에서 offline PCM256frames·nonzero samples428·peak0.030517578과 Stop/reap320frames·active voice0을 확인했고, 이어 같은 authority의 tick1/sequence2·active generation1이 실제341frames 표시됐다. source는 앞선 native 입력과 동일하다. worker는 실제 `stopped`, 별도 실제 native backend voice도 Ended였다. offline PCM·native backend 완료·실제 window presentation을 각각 구분하며 speaker loopback이나 candidate activation을 주장하지 않는다. clean archive/CI/main 인수는 다음 실행으로 남긴다.
+
+## clean local archive와 실제 추출본
+
+smoke/CI/문서를 `28a68920490533abc74e02bf5c5bc555f390b78f`로 commit하고 tracked working tree가 빈 상태에서 기존 `python3 scripts/package_cli.py`를 실행했다. release build14.73초와 backend의 archive/hash/version·기존 CPU/offline-audio 검증이 통과했다. 로그는 ignored `p03-preparation-package-root-01.log`다. 별도 package backend나 public tag/Release를 만들지 않았다.
+
+| package identity | 실제 값 |
+| --- | --- |
+| exact commit / dirty | `28a68920490533abc74e02bf5c5bc555f390b78f` /false |
+| target / features | `aarch64-apple-darwin` / `native-audio,window` |
+| build ID | `20261016T131845Z-9f691c4e79e04b3cb250f06a6be9f56f` |
+| binary SHA-256 | `d02f1a6d27d9c4a9be84eac32288495df6c9d76377c2643803c28032eaf68fec` |
+| archive SHA-256 | `e7a1dc4d71f9f861238c5f41f11cfafb140c61e8ccc2c26ae0ebd2d63ab4fef4` |
+| dependency inventory |221개·missing license texts0; binary-symbol SBOM이나 전 플랫폼 인증 아님 |
+
+로컬 package directory는 ignored `dist/local/daedalus-0.1.0-aarch64-apple-darwin-28a689204905-clean-20261016T131845Z-9f691c4e79e04b3cb250f06a6be9f56f/`다. archive를 별도 `dist/project-evidence/p03-preparation-extracted-28a6892/`에 실제 추출하고 그 executable로 같은 helper를 실행했다.
+
+- `--assets --audio --asset-preparation`:50개/1.286179초 통과, raw `p03-preparation-extracted-cpu-root-01.json`.
+- `--assets --view --models --sprites --audio --audio-native --asset-preparation`:60개/18.835064초 통과, raw `p03-preparation-extracted-native-root-01.json`.
+
+두 report의 executable hash는 manifest와 같았다. 추출본의 같은 preparation view/actor에서 비영 PCM428samples·Stop/reap·실제 tick1/generation1/source present·worker Stopped를 확인했고 별도 native backend voice도 Ended였다. release/debug 단1회 시간은 성능 개선 비교가 아니다. 이 시점에는 로컬 archive만 인수했고 두 native CI package/새 combined step·최종 main tree는 아직 대기다.

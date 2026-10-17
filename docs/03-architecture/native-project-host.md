@@ -143,6 +143,8 @@ device disposition slot은 run_view보다 오래 사는 private host/CPU cleanup
 
 조사 근거는 [Rust 1.94.0 OnceLock 원본](https://raw.githubusercontent.com/rust-lang/rust/1.94.0/library/std/src/sync/once_lock.rs)이다(2026-10-17, S90). get은 대기하지 않지만 set은 다른 initializer와 경쟁하면 대기할 수 있다. 위 설계는 비공개 one-shot publisher로 그 경쟁을 배제하는 추론이며 OnceLock 자체나 host 전체가 형식적으로 wait-free라는 주장이 아니다. 실제 one-shot/반환/종료 시험은 별도로 남긴다.
 
+반환 publication과 worker의 실제 수신·drain 완료를 별도로 추적한다. worker가 slot을 빈 상태로 poll한 직후 UI가 owner를 설치해도, 뒤늦게 returned 신호만 보고 worker가 종료해서는 안 된다. expected owner는 worker가 실제로 take한 뒤 drain/drop한 경우에만 종료 조건을 충족한다. 이 순서를 결정적으로 재현하는 CPU 시험을 포함한다. facade Drop 후에는 소비자가 사라진 진단 결과 slot이 cleanup thread를 영구 유지하지 않게 하며, 살아 있는 facade에는 오류를 보존한다.
+
 CPU job의 catch는 CPU owner를 바깥에 보유한 범위에서 실행하며 job panic 뒤에도 owner가 device 반환 수신·drain/reclaim을 계속한다. run 결과는 UI가 surface/window를 해제한 뒤 그 slot에 이동한다. 실제 thread 자체가 backstop 밖에서 실패하면 Failed/Stopping과 retained disposition을 기록하고 정상 Drained/Stopped로 바꾸지 않는다. replacement reclaimer의 자동 복구는 첫 slice 범위 밖이며 테스트 없이 안전하다고 주장하지 않는다. host facade Drop 뒤에도 private cleanup 상태는 worker가 완료할 때까지 살아 있어야 한다. OOB control과 try_shutdown/status 경로는 blocking Mutex.lock으로 기다리지 않으며 metadata contention은 Busy/후속 갱신으로 남긴다.
 
 ## CLI에서 공통 library로 옮길 책임

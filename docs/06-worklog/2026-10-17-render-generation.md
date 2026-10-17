@@ -238,3 +238,22 @@ source 리뷰로 계약의 두 과도한 표현도 고쳤다. WindowGpuOwner가 
 후속 WIP 리뷰는 shared FIFO8/blocking result send가 stop/device drain을 막을 수 있는 초안을 거부하고 lane별 capacity1·관측까지 보유하는 결과 slot으로 고쳤다. 실제 saturation/stop 검증은 후속이다. 또 GPU owner 반환 try-lock 경합을 facade field/mem::forget으로 넘기는 초안 대신 단일 publisher의 one-shot 설치 slot을 계약에 명시했다. code가 이 계약을 만족하고 실제 종료 검사를 통과하기 전 host 인수는 열어둔다. renderer 오류 주입은 동일한 필드 대입마다 hook을 복제하기보다 서로 다른 소유권 전이·전체 고정 handle 보유를 검사하도록 표를 명시적으로 수정했으며 미실행 경계는 구분한다.
 
 S90은 pinned Rust1.94.0 source를 확인해 get 비대기와 set의 경쟁 초기화 시 대기 가능성을 분리했다. host의 private 단일 publisher 전제를 코드로 유지해야 하며 표준 type의 일반 wait-free 보장으로 바꾸지 않는다. 현재 온라인 rustdoc은1.99.1이고 versioned rustdoc 접근 실패도 출처 등록부에 남겼다.
+
+초안의 CPU worker 종료 조건에는 owner poll 이후 UI publication이 일어나면 returned flag만 보고 수신 전에 종료할 수 있는 경합도 있었다. 실제 take/drain 관측과 publication을 분리하도록 계약·Luna 작업을 수정했다. 아직 재현/수정 시험 통과로 기록하지 않는다. 같은 검토에서 facade Drop 뒤 오류 slot의 미관측 ACK가 cleanup을 영구 유지하지 않는지도 검사 항목으로 추가했다.
+
+## Owner/managed window 구현 중간 검증
+
+아래는 host/CLI 통합 전 WIP의 focused 결과다. 최종 source/전체 회귀 인수를 대신하지 않는다. Luna C가 단일 Cargo/GPU lease로 실행했고 root가 raw footer/hash를 대조했다. 실제 adapter는 Apple M3 Pro/Metal/IntegratedGpu다.
+
+| raw log | 실제 결과 | SHA-256 |
+| --- | --- | --- |
+| `p03-owner-gpu-owner-luna-attempt03.log` | request error·awaited request panic(모두 handle 없음), post-device/base partial, packet buffer/group partial, RendererReady validation error, 지정 worker의 ready owner drop의 7개 통과 | `85b629f226ca8590c66c28ec2f2c8110be4561d1610a1df83f1794ad7bf6af99` |
+| `p03-owner-gpu-lazy-luna-attempt02.log` | lazy layout/shader interruption 2개 통과 | `230b8d376b571f6ce17cbe863b533a9957cd79922346630d22815b1722b1ab17` |
+| `p03-owner-gpu-staged-all-luna-attempt02.log` | 기존 staged GPU와 새 paired-create 중단을 포함해 11개 통과 | `da5381eff1060aabba2042bd0208cafa5bd93b86a3f029247fd55c03591515b1` |
+| `p03-owner-clippy-luna-attempt04.log` | renderer no-default + test-fixtures strict Clippy exit0 | `50c1c57715dc9d31cbe32175c44ab2236f214940506fc3d8eff3bfaf32de6741` |
+
+오류 주입의 panic 출력은 catch와 owner 보존을 검사하는 예상 입력이며 전체 명령은 exit0이다. paired-create의 geometry vertex→index·texture→view·default texture→view 세 하위 경우는 한 테스트 안에 있고 위11개에 포함한다. 같은 owner subset·재실행을 합산해 unique 통과 수를 늘리지 않는다. 실제 surface 생성/표시·window 반환·host ACK/종료는 이 시험의 범위 밖이다.
+
+all-feature no-run 첫 시도는 A 소유 window의 import/borrow/privacy/derive 오류로 실패했다(`p03-owner-allfeatures-luna-attempt01.log`, `b6f0f09afd8cb930965a67a9995962342647b0f18af5f87557f22144bc0e32e7`). 수정 후 두 번째도 test fixture closure의 mutable borrow와 unused mut으로 실패했다(`p03-owner-allfeatures-luna-attempt02.log`, `1b849d5dd6fb5d41b82196d27313e6db04ecd90c96b54c9869b32b54a5cc879b`). A가 두 번째 수정을 마치고 파일을 재동결했다. 후속 성공은 별도 raw로 남긴다. 실패 기록을 덮어쓰지 않았다.
+
+one-shot disposition 계약의 문서 검사 `p03-host-disposition-contract-docs-root-attempt01.log`는 exit0·SHA-256 `d9beddccf1e755199accd39ccce1f77cbaa1cba3aefef1c0586774d87a591224`다. 이는 코드 기능 통과가 아니다.

@@ -1,6 +1,6 @@
 # Native 오디오 재생 진행·종료 진단 계약
 
-상태: 과거 Kira/CPAL 진행 진단 실패·A-042 뒤 같은 배포 CLI native-only 통과·clean package 통합 대기 · 2026-10-17 · P03 회귀/DEV06 · 제품 인수 미통과
+상태: 과거 Kira/CPAL 진행 진단 실패·A-042 뒤 native-only19/clean package combined72 통과·과거 실패 원인 미확정 · 2026-10-17 · P03 회귀/DEV06 · 제품 인수 미통과
 
 ## 이 문서의 목적
 

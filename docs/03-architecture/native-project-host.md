@@ -4,7 +4,7 @@
 
 ## 목적과 현재 사실
 
-CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별로 다시 구현하지 않도록 공통 engine library로 만든다. [staged renderer](staged-render-asset-generation.md)와 [headless CPU activation](headless-asset-generation.md)의 사이를 연결한다. CLI에만 있는 기능을 공개 엔진 SDK라고 보고하지 않는다. P03.3b.2/PR16은 과거 native 출력 회귀 뒤 A-042 재검증에서 native-only가 회복됐고 clean package 전체 인수가 남았다. 이 문서는 b.3 코드 착수나 제품 통과가 아니다.
+CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별로 다시 구현하지 않도록 공통 engine library로 만든다. [staged renderer](staged-render-asset-generation.md)와 [headless CPU activation](headless-asset-generation.md)의 사이를 연결한다. CLI에만 있는 기능을 공개 엔진 SDK라고 보고하지 않는다. P03.3b.2/PR16은 A-042 뒤 clean package combined72가 회복됐고 test-only wait 경계 수정 후 최종 CI/PR 인수가 남았다. 이 문서는 b.3 코드 착수나 제품 통과가 아니다.
 
 현재 `daedalus-cli/src/project_view.rs`가 binding 수집, bounded input/packet 전달, snapshot→packet, actor 호출과 종료를 조합한다. `project_view_control.rs`의 JSONL·wire ID·stdin/stdout worker는 transport adapter다. `daedalus-renderer/window.rs`는 OS event loop·surface·한 PacketRenderer/device를 소유한다. runtime은 renderer에 의존하지 않는다. 이 분리를 보존한다.
 

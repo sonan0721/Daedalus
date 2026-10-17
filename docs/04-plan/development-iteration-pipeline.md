@@ -14,10 +14,10 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1·model/sprite/audio·P03.3a persistent CPU 후보를 PR14까지 인수. warm decode/leaf cook0, read/parse는 남음. b.2 CPU 교체 구현·CPU/CI 검증, native 출력 인수 보류. render/audio 전환 후속 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1·model/sprite/audio·P03.3a persistent CPU 후보를 PR14까지 인수. warm decode/leaf cook0, read/parse는 남음. b.2 CPU 교체·combined72 검증, test-only wait 경계 수정 후 최종 인수 대기. render/audio 전환 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite·audio 실제 소비 인수. 실행 중 patch 후속 |
-| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 기존 helper의 assets/audio/preparation/activation CPU62와 양 package CI 검증. native 출력은 실제 실패로 인수 보류. 같은 binary의 native-only 분리 진단 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
+| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | assets/audio/preparation/activation CPU62·양 package CI 확인. A-042 뒤 native-only19/clean package combined72 회복. 새 CI의 test wait 가정 수정 후 최종 CI/PR 대기. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
 | DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh·model texture/sprite·native GPU cache·dirty instance/material 검증. 실행 중 세대 전환·skin 후속 |
 
@@ -34,6 +34,8 @@ source 감사 결과 project_view가 입력·snapshot 추출·window·actor의 �
 기존 Rust type의 설계 probe에서는 renderer를 공유 cache로 한 번 빌드하고 누락 assertion 보완은 같은 rlib에 rustc --test를 직접 적용했다. 새 cold workspace/Cargo rebuild 없이 실제3건을 다시 확인했다. [작업 기록](../06-worklog/2026-10-17-native-host-design.md)에 source/hash·실패 상태·근거 한계를 보존한다. 이 일회성 probe를 새 상시 smoke framework로 늘리지 않는다.
 
 A-042 사용자 가청 보고 뒤에는 보존 binary/hash를 유지한 native-only19건으로 먼저 회복을 확인했다. 전체 combined72는 최신 clean archive의 extracted binary에서 한 번 수행할 계획이다. 기존 binary의 전체 suite→문서 commit→새 package의 전체 suite라는 중복을 만들지 않는다. 이 선택은 검사 대상 source/artifact의 정확성을 유지하는 실행 순서 개선이며 아직 전체 장치 인수나 속도 개선율을 뜻하지 않는다.
+
+그 계획의 c9f5dee clean archive는 실제 combined72를 통과했다. 동시에 CI는 audio/world duplicate replay 테스트의 잘못된 대기 가정을 찾았다. AuthorityAccepted snapshot에 Terminal이 이미 있다고 가정하지 않고, 각 assertion이 요구하는 phase를 기존 bounded wait helper로 명시한다. production 상태 전이를 합쳐 테스트에 맞추거나 CI를 무조건 재시도하지 않는다. test-only 수정 뒤에는 runtime/workspace·정확한 source의 CI를 확인하고, native 검증 재사용은 production/helper/에셋 미변경과 새 clean package의 실행 bytes·notice/inventory hash 일치를 먼저 증명한 경우에만 검토한다. source 이름만 같거나 과거 성공했다는 이유로 다른 bytes의 인수를 생략하지 않는다.
 
 ## 이번 코드 감사에서 확인한 반복
 

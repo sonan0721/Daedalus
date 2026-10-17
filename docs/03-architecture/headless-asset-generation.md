@@ -1,6 +1,6 @@
 # P03.3b.2 동일 authority의 CPU 세대 commit
 
-상태: native headless 계약 동결·CPU/CI 통과·A-042 뒤 native-only 회복·clean package 전체 인수 대기 · 2026-10-17
+상태: native headless 계약 동결·A-042 뒤 clean package combined72 회복·test-only wait 수정 후 최종 CI/PR 인수 대기 · 2026-10-17
 
 ## 목적과 제한
 

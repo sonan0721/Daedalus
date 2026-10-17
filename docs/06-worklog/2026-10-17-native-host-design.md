@@ -2,6 +2,8 @@
 
 작성일: 2026-10-17 · 대상 source `30d910be0d5b1a64940b93165ba73c927b1da3ee` · A-039/A-041, DEV01/03/04/08
 
+최신 상태: A-042 뒤 c9f5dee clean archive의 combined72는 통과했다. 새 CI에서 발견한 test-only AuthorityAccepted/Terminal 가정을 수정해 로컬 workspace326/0을 확인했고 최종 source/package/CI·main 인수는 아래 순서대로 진행한다. 과거 native 실패 기록은 역사적 근거이며 현재 출력 실패가 계속된다고 해석하지 않는다.
+
 ## 목표와 이번 진행의 분류
 
 전체 목표는 D1 실제 AI-driven 엔진→D2 별도 3D 게임→D3 별도 2D 게임이다. 모두 미완료다. 현재 P03.3b.2/PR16의 로컬 native 출력 인수가 보류됐고 b.3 코드에는 착수하지 않았다. 직전 goal turn은 test-only native 진단·source 대조·commit/CI라는 **진행**, 이번 turn은 재사용 host/renderer 계약을 구체화하고 기존 Rust type에 대한 설계 probe를 실행한 **진행**이다. 실패가 유지된다는 이유로 인수 성공이나 전체 완료로 바꾸지 않는다.
@@ -64,3 +66,27 @@ Rust run38933842814/job117084243182는326passed/0failed/12ignored이며 실제 S
 source676f93f의 원격 CI도 최종 다섯 성공을 확인했다. Rust run38937185868/job117095527277의326passed/0failed/12ignored·실제 Stage 회귀/Clippy, 두 package의 CPU62/62·macOS4.708728초/Linux0.992508초, managed와 docs 성공, Publish skipped다. actual CI checkout `a70556d52b90b1a869391b0971bb130dd436d481`과676f93f의 tree는 `430e359e609ba206fd20987f516df39aef57ebaf`로 같았다. raw `p03-host-design-pr16-rust-root-attempt01.log` SHA-256은 `a3fcfa21c4042ec943c4ece7a759c8982a71896db6153fed41689d37dff2ab57`이다. main은 아직 변경하지 않았다.
 
 다음은 이 문서 묶음을 commit한 clean source로 새 local archive를 한 번 만들고 실제 extracted binary에 기존 combined72 helper를 실행하는 것이다. 이미 회복한 보존 binary에 전체72를 먼저 반복하지 않는다. 새 head의 다섯 CI·archive identity·실제 장치 통합·source review/main 동일 tree까지 확인한 뒤에만 b.2를 인수한다. 원인 미확정인 transient 출력 실패를 엔진 수정으로 해결했다고 보고하지 않는다.
+
+## c9f5dee clean package 통과와 새 CI 경계 실패
+
+clean source `c9f5dee5a333aba2ab6270c33c7ff4e2b8d77892`의 기존 package backend는 release compile11.27초 뒤 archive/manifest/CPU-offline 검증을 통과했다. build ID는 `20261016T235543Z-79626ee4f7674bdea0f1b60e42641fbb`, dirty=false, 실제 binary SHA-256은 이전과 같은 `b6ab0afc72d6c82a2eeab8116a9b877f9fcadd24e5fe381e7db5f7cc4f098596`다. archive SHA-256은 `878a261412ed0bb35747c48529481d77f7617b520f9b9277dc5760a536c321df`이며 실제 추출 경로는 `dist/project-evidence/p03-native-recovery-extracted-root-attempt01/daedalus`다.
+
+그 extracted CLI의 unchanged combined helper는 **72/72·19.730882초·stderr0**으로 통과했다. native view·model/sprite capture/presentation·CPU asset preparation/activation·offline/native audio를 지원 조합별 별도 sub-smoke로 확인했다. finite native voice는0.520009초 뒤 실제 Ended였고 window/audio 동시 서비스나 live GPU generation 교체 검증은 아니다. raw `p03-native-recovery-combined-root-attempt01.json` SHA-256은 `a364195127211a7de4b617867d2bfa44d5d006a511a76d5dff57203f6f9760e9`, package log는 `18be9dbf558922f22670bdeb92b52b0cd8a01fae0af69407fff084cce74aa22e`다. 이전 음향 실패 기록은 그대로 보존한다.
+
+최신 CI는 네 check 성공·Publish skipped지만 Rust run38983941813/job117250916341에서 실제 실패했다. `audio_cross_kind_duplicate_preserves_world_admission_and_cached_outcome`가 AuthorityAccepted를 기다린 snapshot의 terminal을 즉시 Some으로 기대해 None을 받았다. runtime 결과는102pass/1fail, workspace는 실패이며 Clippy까지 가지 않았다. raw `p03-native-recovery-ci-rust-root-attempt01.log` SHA-256은 `7b5a1ef455b39e52c37677133e5edb85e8f764a13580b7d56612e911840672dd`다. CI 재실행으로 덮지 않는다.
+
+source의 duplicate replay는 set_authority와 finish_cell을 별개로 게시하며 AuthorityAccepted wait는 Terminal 보장이 아니다. 수정 계약은 기존 cfg(test)에서 admission의 command/tick/cached-result 검사는 유지하되 terminal 비교는 기존 bounded wait_terminal helper의 실제 Terminal snapshot에 수행하는 것이다. 같은 잘못된 가정이 가까운 tests에 있는지도 확인한다. production 전이를 합치거나 timeout 증가·sleep·serial CI·무조건 retry로 바꾸지 않는다. Luna xhigh가 test-only 변경과 정확한 focused/runtime/workspace 검증을 담당하며 조정자가 source와 실제 실행 수를 대조한다. b.2/PR 인수는 이 실패가 해결될 때까지 열어둔다.
+
+Luna xhigh의 변경은 session_control.rs cfg(test)의 한 hunk뿐이다. admission replay/tick assertion을 그대로 보존하고 기존 wait_terminal snapshot을 별도로 읽는다. 가까운 world completed-duplicate test는 이미 같은 helper를 사용했고, audio-origin replay는 authority 없이 terminal로만 해당 wait를 만족해 같은 결함이 아니었다. 조정자가 set_authority·wait_for·finish_replayed_command와 diff를 대조했다. production/API/Cargo/CLI/helper는 변경하지 않았다.
+
+focused attempt01은 실제 test1건은 통과했지만 zsh wrapper가 read-only 변수 status에 대입해 뒤에서 exit1이었다. raw를 보존하고 attempt02는 rc로 고쳐 성공 exit를 확인했다. 이 wrapper 실패를 product/test 실패로 바꾸거나 원본을 덮어쓰지 않았다. attempt02 focused1, runtime all-feature103unit+2integration, strict all-target/all-feature runtime Clippy·scopedfmt/diff가 통과했다. root 승인 뒤 한 번의 workspace all-feature는 **326passed/0failed/13ignored**였다. macOS-only HAL ignored가 있어 Linux CI의12ignored와 다르다.
+
+| 실제 근거 | SHA-256 |
+| --- | --- |
+| session_control.rs 최종 test source | `b554629e0643d4639cf0af5edf697d31526f1ee726a4bb7a1dbcf5a169238d8d` |
+| `p03-replay-terminal-luna-attempt02-focused.log` | `7bb94e300a7ef0f56226a73f8be1995125405e836d4e4fb15d31655599c88d51` |
+| `p03-replay-terminal-luna-attempt01-runtime-allfeatures.log` | `3e6d933fa3a51b7d353934e942f5693de7f4194e2d86c5f0a46d9373c3a370bf` |
+| `p03-replay-terminal-luna-attempt01-clippy.log` | `edfdedfc41d98dc3fa3d4f0ffade5842941daf0c9e579dced46e292f432b3363` |
+| `p03-replay-terminal-luna-attempt01-workspace-allfeatures.log` | `57072b2c330cae9c0fe5a1953b03ed594388c813811a11a4c04726a70dd98fe3` |
+
+위 근거는 ignored dist/project-evidence 안의 고유 raw이며 root가 full hashes와 실제 test 수를 다시 대조했다. 이후 source freeze/새 clean manifest·binary/notice/inventory 동일성·새 head의 원격 다섯 check와 main 동일 tree까지 남아 있다. native 재생의 현재 회복을 이 test-only 수정의 효과라고 부르지 않는다.

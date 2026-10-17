@@ -4943,7 +4943,11 @@ mod tests {
                     Ok(SessionRequestResult::Command(command))
                         if result == &command.result)
         ));
-        assert_eq!(completed_admission.terminal(), Some(&world_result));
+        // Admission/replay metadata can be published before the duplicate's terminal snapshot.
+        // Keep the replay assertions above on the AuthorityAccepted observation, then wait for
+        // the terminal publication before comparing the cached outcome.
+        let completed_terminal = wait_terminal(&completed_audio_duplicate);
+        assert_eq!(completed_terminal.terminal(), Some(&world_result));
         completed_audio_duplicate.acknowledge().unwrap();
         let _ = service.shutdown();
     }

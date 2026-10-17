@@ -219,3 +219,11 @@ PR17에서는 runtime source만 선택 commit해 clean CI가 기존 renderer와 
 renderer source 리뷰에서는 미참조 legacy mesh의 불필요 stage 요청과 첫 frame의 expected bind group×draw 탐색을 찾았다. 실제 참조 집합과 private resource-set token으로 공통 CPU 검증을 재사용하는 계약을 먼저 수정했다. token은 작은 연결이며 GPU 초기화 완료 검증을 대신하지 않는다. source 구현·CPU/GPU 검사 전이므로 이를 이미 달성한 프레임 시간 개선으로 보고하지 않는다. 로그 wrapper의 zsh readonly 변수 실수는 AGENTS에 task-specific exit 변수·단일 exclusive descriptor 규칙으로 명시했다.
 
 device production과 실제 GPU 시나리오 테스트를 한 작업자에게 직렬로 몰지 않도록, 새 test module 파일만 별도 Luna가 작성하고 device 담당이 parent 선언/기존 helper의 최소 visibility를 소유하도록 분리했다. CPU 담당의 실제 PreparedProject/validated-frame 경계를 공유하며 forged FrameHandle이나 별도 smoke framework는 만들지 않는다. compile은 관련 source가 모두 동결된 뒤 단일 owner가 맡아 작성 병렬화와 불안정한 동시 빌드를 구분한다. 실제 검증/효과는 후속 기록 대상이다.
+
+### 검증 출력 보존의 공통 실행기
+
+서로 다른 작업에서 기존 로그 덮어쓰기·zsh readonly 종료 변수·빈 출력 파일이 반복됐다. 규칙만 다시 읽게 하는 대신 noninteractive 명령의 출력 보존만 담당하는 `scripts/run_logged.py`를 추가하는 작은 도구 작업을 채택했다. 테스트 선택·Cargo lease·timeout·재시도·성공 판정은 기존 caller의 책임이며 새 smoke/test framework를 만들지 않는다. 아래는 착수 전에 고정한 계약과 실제 검증 범위다.
+
+`python3 scripts/run_logged.py --log dist/project-evidence/<unique>.log -- <program> <args...>`는 파일을 exclusive로 먼저 열고, 이미 존재하거나 열 수 없으면 자식 명령을 시작하지 않는다. parent directory는 caller가 준비한다. shell 없이 argv를 실행하고 stdout/stderr를 같은 열린 파일로 연결하며 stdin은 DEVNULL이다. 시작 metadata와 정상 종료 시 실제 child exit code/elapsed footer를 남기고 닫은 뒤 raw SHA-256·경로·실행 여부·종료 상태를 작은 JSON으로 출력한다. child 실패는 성공으로 바꾸지 않으며 launch 자체 실패는 child 실행 실패와 구분한다. launcher/finalization/report 오류는125, POSIX child signal은 원래 음수 returncode와128+signal의 wrapper status를 구분한다. 환경변수/credential 목록을 덤프하지 않는다. 강제 process kill·디스크 오류 등으로 footer가 없으면 완료 검증 근거가 아니며 원본을 덮어쓰지 않는다.
+
+필수 회귀는 실제 자식 process의 stdout+stderr·비영 종료 보존, 기존 파일 거부 시 child 미실행·기존 bytes 불변, launch 실패의 명시적 상태와 hash 일치다. 자동 재빌드/재시도/병렬화는 없다. Luna xhigh가 두 Python 파일만 구현했고 조정자가 source를 리뷰했다. local focused5개와 실제 docs 명령의 출력/footer/독립 hash 대조가 통과해 noninteractive 검사에 도입한다. 세부 raw는 [작업 기록](../06-worklog/2026-10-17-render-generation.md)에 둔다. 이전 잃은 로그를 재구성하지 않으며 CI/시간 절감 배율·전체 엔진 인수는 이 결과에 포함되지 않는다.

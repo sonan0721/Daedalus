@@ -70,6 +70,10 @@ CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 �
 
 소유자별 최소 compile 수정 뒤 attempt03은 exit0이다. raw `p03-render-device-libcheck-luna-attempt03.log`의 SHA-256은 `fedcd7631152376d160bddb6b751e0f1a5f308b5483d264011611c88d591a3e9`이며 output/종료 footer가 보존됐다. in-progress API의 dead-code/unused 경고7개가 남아 strict 검사 통과는 아니다. 알려진 slot-map 기능 결함은 이 초기 type-check와 별도 수정 대상이고 아직 renderer CPU/GPU 테스트는 실행하지 않았다. Cargo lease를 반환한 뒤 canonical slot map의 CPU 준비와 GPU 소비를 다시 disjoint source-only 작업으로 배정했다.
 
+반복된 evidence wrapper 실수를 줄이려고 [개발 파이프라인](../04-plan/development-iteration-pipeline.md)의 작은 공통 실행기를 먼저 계약화하고 Luna xhigh가 `scripts/run_logged.py`·`scripts/test_run_logged.py`만 구현했다. root 리뷰에서 newline 없는 child 출력/footer 경계·JSON 보고 실패의 exit0·실제 launch 직후 상태 기록을 수정했다. focused 실제5개가0.074초에 통과했고 raw `p03-run-logged-unit-luna-attempt01.log` SHA-256은 `df6e8513686a0a2bbcfc63f3675147135c47e51830b176da181b58d47fc411df`다. 새 실행기를 쓰기 전 기존 exclusive wrapper로 그 첫 unit 결과를 보존했다.
+
+이후 새 실행기로 실제 docs 명령을 실행해 child/runner0·launched=true·0.1866초와 completion footer를 확인했다. raw `p03-run-logged-docs-luna-attempt01.log` SHA-256은 `7a3330b99fdd92d88a4e1bd6751627cae6c1ea3655ff6687a986b04b39256132`이며 root도 bytes/hash를 독립 대조했다. child17·SIGTERM·기존 binary bytes 불변/child 미실행·launch 오류·주입 hash 실패의 의미는 focused tests가 검사했다. 이 도구는 retry/build/lease를 자동화하지 않으며 과거 잃은 증거를 되살리거나 엔진 기능·GPU 동작을 인수하지 않는다.
+
 ## runtime source 최종 동결·로컬 검증
 
 마지막 fixture 리뷰에서 nonwaiting port의 정상 호출도 actor와 경합하면 합법적인 Busy를 반환할 수 있음을 확인했다. 테스트의 정상 성공/오류 판정만 기존 방식의 유한 Busy 재시도로 묶고, mutex를 의도적으로 잡고 Busy를 검사하는 assertion은 그대로 유지했다. production·deadline·임의 sleep을 바꾸지 않았다. 이 수정 뒤 runtime source 네 파일을 동결했다.

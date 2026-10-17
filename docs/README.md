@@ -58,10 +58,13 @@
 | [Native 오디오 진행 진단](03-architecture/native-audio-progress-diagnostics.md) | 실제 finite voice 종료 실패를 position/state·stream 오류로 좁히고 전체 회귀 반복을 줄이는 opt-in 진단 계약 |
 | [비동기 에셋 후보 준비](03-architecture/project-asset-preparation.md) | P03.3a의 동결한 단일 cache worker·최신 후보/취소·private payload·공통 제어·논리적 메모리 한도 계약 |
 | [에셋 세대 전환·회수](03-architecture/project-asset-activation.md) | P03.3b/c의 live state 보존·consumer staging·actor commit·실제 표시·old audio/GPU 회수를 동결하기 위한 상세 초안 |
+| [Renderer CPU generation](03-architecture/render-cpu-generation.md) | P03.3b.3.2a의 managed CPU owner·실제 leaf/별칭·frame 예약·검증·독립 논리 예산을 GPU 코드 전에 동결 |
+| [Renderer device generation](03-architecture/render-device-generation.md) | P03.3b.3.2b의 same-device stage+draw·partial completeness·upload/use serial·pin union·drain을 동결 |
 | [에셋 교체 authored 호환성](03-architecture/asset-replacement-compatibility.md) | P03.3b.1의 단일 content 비교기·허용 field/revision/order·유한 오류/임시 index를 먼저 동결해 consumer별 중복 판정을 방지 |
 | [Headless CPU 세대 commit](03-architecture/headless-asset-generation.md) | P03.3b.2의 동일 authority·Stage/Commit/replay·초기 source consume·worker 회수·frame identity를 장치 연결 전에 검증 |
 | [Render 세대 staged 준비·표시](03-architecture/staged-render-asset-generation.md) | P03.3b.3의 제한된 GPU 업로드·last-good pin·native lease/CPU 회수·실제 present ACK를 동결하기 위한 source 기반 상세 초안 |
 | [Native project host](03-architecture/native-project-host.md) | typed 실행·consumer port·publication·CPU backing/종료를 CLI 밖의 공개 엔진 조합 경계로 만드는 구체 설계안 |
+| [Project generation consumer](03-architecture/project-generation-consumer.md) | renderer 의존 없는 source lease·Queued/Applied·실제 publication token·present ACK/회수의 첫 runtime 구현 계약 |
 | [모델·텍스처 실행 계약](03-architecture/model-texture-runtime.md) | P03.2a의 실제 project binding·공통 창/capture·cache pin 해제·GPU 한도/색/수명·회귀 기준 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |
 | [물리·오디오 backend](03-architecture/physics-and-audio-runtime.md) | 실제 Jolt/Rapier·audio 통합의 소유권·제한·최소 실행 검증 계약 |
@@ -92,6 +95,7 @@
 | [ADR-0004](05-decisions/0004-start-engine-implementation.md) | 사용자 구현 착수 승인과 모듈별 설계·검증 진행 방식 |
 | [ADR-0005](05-decisions/0005-engine-product-and-game-validation.md) | 엔진 제품 인수·별도 3D/2D 게임 검증·완료 보고 기준 정정 |
 | [ADR-0006](05-decisions/0006-owned-session-control-results.md) | 공통 actor의 owned ticket·유한 replay/retention·Manual Step 포화 진행 계약 |
+| [ADR-0007](05-decisions/0007-reusable-native-host-and-generation-consumer.md) | CLI 밖의 재사용 host·runtime/renderer 의존 분리·CPU/device 소유권과 유한 세대 보고 결정 |
 | [R01 작업 기록](06-worklog/2026-10-15-r01.md) | 작성 문서별 목적·확인 범위·검증·후속 과제 기록 |
 | [R02 스크립팅 작업 기록](06-worklog/2026-10-15-r02-scripting.md) | 언어·모드 범위 변경, 새 문서별 목적과 남은 통합 조사 기록 |
 | [E01~E03 첫 구현 검증](06-worklog/2026-10-15-e01-foundation.md) | 실제 Rust·CLI·Metal 검증과 아직 완료하지 않은 기능의 경계 |
@@ -107,7 +111,8 @@
 | [Imported audio 작업 기록](06-worklog/2026-10-16-imported-audio-runtime.md) | P03.2c의 source/API 선택과 이후 PCM·native·패키지 실측을 구분 |
 | [비동기 후보 준비 작업 기록](06-worklog/2026-10-16-project-asset-preparation.md) | P03.3a의 memory 장부·단일 worker/cache 소유권·API 동결·실제 후속 검증을 구분 |
 | [에셋 세대 전환 작업 기록](06-worklog/2026-10-16-project-asset-activation.md) | P03.3a 인수 이후 b/c source/API 리뷰·Luna 분담·실제 후속 검증과 pipeline 개선 추적 |
-| [Native host 설계 작업 기록](06-worklog/2026-10-17-native-host-design.md) | CLI 밖의 실행 재사용·resource-only/combined upload 구체안·Rust 설계 probe와 native 인수 보류를 구분 |
+| [Native host 설계 작업 기록](06-worklog/2026-10-17-native-host-design.md) | CLI 밖 실행 재사용 설계·Rust probe·native 실패/회복과 test wait 수정의 실제 근거 |
+| [Render generation 작업 기록](06-worklog/2026-10-17-render-generation.md) | b.2 최종 인수·새 runtime consumer 계약/코드 소유권과 후속 실제 renderer/host 검증을 추적 |
 | [문서 템플릿](07-templates/specification-templates.md) | 조사·명세·goal·ADR의 재사용 형식 |
 
 공개 기여·PR·현재 실행 가능한 체크는 루트의 [기여 규칙](../CONTRIBUTING.md), [테스트 안내](../TESTING.md), [운영 원칙](../GOVERNANCE.md)에 둔다.

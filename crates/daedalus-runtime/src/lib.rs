@@ -6,6 +6,7 @@ pub mod project;
 mod project_activation;
 #[cfg(feature = "audio")]
 mod project_audio;
+mod project_generation_consumer;
 mod project_preparation;
 mod session_control;
 mod session_primitives;
@@ -61,6 +62,13 @@ pub use project_audio::{
     SessionAudioCommandResult, SessionAudioError, SessionAudioMutation, SessionAudioOperation,
     SessionAudioOptions, SessionAudioResult, SessionAudioStartError, SessionAudioStatus,
     SessionAudioVoiceId, SessionAudioVoiceInfo, SessionAudioVoicePage, SessionAudioVoiceState,
+};
+pub use project_generation_consumer::{
+    ProjectConsumerError, ProjectConsumerInitialState, ProjectConsumerReportProgress,
+    ProjectConsumerStageFailure, ProjectConsumerStageFailurePhase, ProjectConsumerStageOutcome,
+    ProjectConsumerStageProgress, ProjectConsumerStageStatus, ProjectGenerationConsumerPort,
+    ProjectGenerationConsumerStatus, ProjectPresentedFrame, ProjectPresentedView,
+    ProjectPublicationIdentity, ProjectSourceIdentity, ProjectSourceKind, ProjectSourceLease,
 };
 pub(crate) use project_preparation::MAX_PREPARATION_STATUS_RESULT_BYTES;
 pub use project_preparation::{

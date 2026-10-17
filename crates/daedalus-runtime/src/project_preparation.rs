@@ -22,6 +22,9 @@ use daedalus_core::{CommandId, SessionId, Tick};
 use thiserror::Error;
 
 use crate::project_activation::{AssetActivationMemoryStatus, AssetActivationState};
+use crate::project_generation_consumer::{
+    ProjectGenerationConsumerPort, ProjectGenerationConsumerShared,
+};
 use crate::session_control::{
     SessionControlConfig, SessionControlService, SessionControlStartError, SessionShutdownReport,
     SessionTermination,
@@ -176,7 +179,7 @@ impl NativeProjectPreparationService {
     fn start_native(
         options: NativeProjectPreparationOptions,
     ) -> Result<Self, NativeProjectPreparationStartError> {
-        let parts = start_native_worker(options, false)?;
+        let parts = start_native_worker(options, false, None)?;
         Ok(Self {
             shared: parts.shared,
             initial_project: parts.initial_project,
@@ -281,6 +284,7 @@ pub struct NativeProjectActivationService {
     worker_shared: Arc<Shared>,
     worker_join: Option<JoinHandle<()>>,
     shutdown_report: Option<SessionShutdownReport>,
+    generation_consumer: Option<ProjectGenerationConsumerShared>,
 }
 
 impl std::fmt::Debug for NativeProjectActivationService {
@@ -300,46 +304,97 @@ impl NativeProjectActivationService {
         options: NativeProjectPreparationOptions,
         config: SessionControlConfig,
     ) -> Result<Self, NativeProjectActivationStartError> {
+        Self::start_mode(options, config, None).map(|(service, _)| service)
+    }
+
+    /// Starts the same project authority and preparation worker with one runtime-neutral source
+    /// consumer. Initial loading occurs exactly once; the returned port receives that same source
+    /// allocation and later compatible staged candidates.
+    pub fn start_with_render_consumer(
+        options: NativeProjectPreparationOptions,
+        config: SessionControlConfig,
+    ) -> Result<(Self, ProjectGenerationConsumerPort), NativeProjectActivationStartError> {
+        let (service, port) = Self::start_mode(options, config, Some(()))?;
+        Ok((
+            service,
+            port.expect("render-consumer mode returns its registered port"),
+        ))
+    }
+
+    fn start_mode(
+        options: NativeProjectPreparationOptions,
+        config: SessionControlConfig,
+        render_consumer: Option<()>,
+    ) -> Result<(Self, Option<ProjectGenerationConsumerPort>), NativeProjectActivationStartError>
+    {
         options.validate()?;
         #[cfg(target_family = "wasm")]
         {
-            let _ = (options, config);
+            let _ = (options, config, render_consumer);
             Err(NativeProjectPreparationStartError::NativeUnavailable.into())
         }
         #[cfg(not(target_family = "wasm"))]
         {
-            let parts = start_native_worker(options, true)?;
+            let generation_consumer = render_consumer.map(|()| {
+                Arc::new(ProjectGenerationConsumerShared::new_pending(
+                    config.engine.session,
+                ))
+            });
+            let consumer_port = generation_consumer
+                .as_ref()
+                .map(|shared| ProjectGenerationConsumerPort::new(Arc::clone(shared)));
+            let parts = start_native_worker(options, true, generation_consumer.clone())?;
             let mut port_taken = false;
             let port = make_control_port(&parts.shared, &parts.initial_project, &mut port_taken);
             let port = match port {
                 Ok(port) => port,
                 Err(error) => {
                     parts.shared.request_stop();
+                    if let Some(consumer) = generation_consumer.as_ref() {
+                        consumer.request_stop();
+                    }
                     drop(parts.initial_project);
                     let _ = parts.join.join();
                     return Err(NativeProjectPreparationStartError::Port(error).into());
                 }
             };
-            let actor = match SessionControlService::start_shared_with_activation(
-                Arc::clone(&parts.initial_project),
-                config,
-                port,
-            ) {
+            let actor_result = if let Some(consumer) = generation_consumer.as_ref() {
+                SessionControlService::start_shared_with_render_consumer(
+                    Arc::clone(&parts.initial_project),
+                    config,
+                    port,
+                    consumer.as_ref().clone(),
+                )
+            } else {
+                SessionControlService::start_shared_with_activation(
+                    Arc::clone(&parts.initial_project),
+                    config,
+                    port,
+                )
+            };
+            let actor = match actor_result {
                 Ok(actor) => actor,
                 Err(error) => {
                     parts.shared.request_stop();
+                    if let Some(consumer) = generation_consumer.as_ref() {
+                        consumer.request_stop();
+                    }
                     drop(parts.initial_project);
                     let _ = parts.join.join();
                     return Err(error.into());
                 }
             };
             drop(parts.initial_project);
-            Ok(Self {
-                actor,
-                worker_shared: parts.shared,
-                worker_join: Some(parts.join),
-                shutdown_report: None,
-            })
+            Ok((
+                Self {
+                    actor,
+                    worker_shared: parts.shared,
+                    worker_join: Some(parts.join),
+                    shutdown_report: None,
+                    generation_consumer: generation_consumer.map(|shared| shared.as_ref().clone()),
+                },
+                consumer_port,
+            ))
         }
     }
 
@@ -402,6 +457,9 @@ impl NativeProjectActivationService {
     }
 
     pub fn request_stop(&self) {
+        if let Some(consumer) = self.generation_consumer.as_ref() {
+            consumer.request_stop();
+        }
         self.actor.request_stop();
         self.worker_shared.request_stop();
     }
@@ -509,10 +567,13 @@ struct WorkerStartupParts {
 fn start_native_worker(
     options: NativeProjectPreparationOptions,
     activation_enabled: bool,
+    generation_consumer: Option<Arc<ProjectGenerationConsumerShared>>,
 ) -> Result<WorkerStartupParts, NativeProjectPreparationStartError> {
     let shared = Arc::new(Shared::new(activation_enabled));
     let worker_shared = Arc::clone(&shared);
     let panic_shared = Arc::clone(&shared);
+    let worker_consumer = generation_consumer.clone();
+    let panic_consumer = generation_consumer.clone();
     let worker_options = options.clone();
     let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
     let join = thread::Builder::new()
@@ -525,15 +586,22 @@ fn start_native_worker(
                     worker_options,
                     startup_tx,
                     activation_enabled,
+                    generation_consumer,
                     &mut registry,
                 )
             }));
             if let Err(payload) = result {
                 // The outer registry survives worker_main's unwind. It remains a backstop
                 // until the actor releases its last source references on the worker thread.
+                if let Some(consumer) = panic_consumer.as_ref() {
+                    consumer.worker_stopping();
+                }
                 panic_shared.mark_panicked();
                 registry.reclaim_after_worker_failure();
                 std::panic::resume_unwind(payload);
+            }
+            if let Some(consumer) = worker_consumer.as_ref() {
+                consumer.worker_stopping();
             }
         })
         .map_err(|error| NativeProjectPreparationStartError::ThreadSpawn(error.to_string()))?;
@@ -954,6 +1022,15 @@ impl ProjectPreparationPort {
             TryLockError::WouldBlock => ProjectPreparationPortError::Busy,
             TryLockError::Poisoned(_) => ProjectPreparationPortError::Stopped,
         })?;
+        if state.activation_sequence == Some(sequence)
+            && state.ready_epoch == Some(epoch)
+            && matches!(
+                (staged, state.activation_state),
+                (true, AssetActivationState::Staged) | (false, AssetActivationState::Failed)
+            )
+        {
+            return Ok(());
+        }
         if state.activation_sequence != Some(sequence)
             || state.ready_epoch != Some(epoch)
             || state.activation_state != AssetActivationState::Staging
@@ -1947,6 +2024,7 @@ fn worker_main(
         Result<Arc<PreparedProject>, NativeProjectPreparationStartError>,
     >,
     activation_enabled: bool,
+    generation_consumer: Option<Arc<ProjectGenerationConsumerShared>>,
     registry: &mut ReclamationRegistry,
 ) {
     // Validate the project root before FileCookCache can create the default nested cache path.
@@ -1989,6 +2067,9 @@ fn worker_main(
         return;
     }
     let initial = Arc::new(initial.release_asset_cache_pins());
+    if let Some(consumer) = generation_consumer.as_ref() {
+        consumer.initialize_initial(Arc::clone(&initial));
+    }
     if activation_enabled {
         registry.active = Some(Arc::clone(&initial));
     }
@@ -2001,10 +2082,24 @@ fn worker_main(
     shared.changed.notify_all();
     if startup.send(Ok(initial)).is_err() {
         shared.request_stop();
-        worker_loop(shared, options, cache, activation_enabled, registry);
+        worker_loop(
+            shared,
+            options,
+            cache,
+            activation_enabled,
+            generation_consumer,
+            registry,
+        );
         return;
     }
-    worker_loop(shared, options, cache, activation_enabled, registry);
+    worker_loop(
+        shared,
+        options,
+        cache,
+        activation_enabled,
+        generation_consumer,
+        registry,
+    );
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -2025,6 +2120,7 @@ fn worker_loop(
     options: NativeProjectPreparationOptions,
     mut cache: FileCookCache,
     activation_enabled: bool,
+    generation_consumer: Option<Arc<ProjectGenerationConsumerShared>>,
     registry: &mut ReclamationRegistry,
 ) {
     // Candidate payloads live only on this thread; shared status holds bounded metadata only.
@@ -2122,6 +2218,9 @@ fn worker_loop(
         match action {
             WorkerAction::Stop => {
                 // Destruction of candidate buffers and cache ownership precedes Stopped.
+                if let Some(consumer) = generation_consumer.as_ref() {
+                    consumer.worker_stopping();
+                }
                 drop(ready.take());
                 if activation_enabled {
                     registry.reclaim_after_worker_failure();

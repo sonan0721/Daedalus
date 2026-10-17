@@ -1,5 +1,7 @@
 //! Native external-project viewer backed by the shared project control service.
 
+mod activation;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
@@ -58,7 +60,7 @@ pub(super) struct ProjectViewArgs {
     /// Enable the native bounded live asset-preparation worker (requires --stdio-control).
     #[arg(long)]
     pub asset_preparation: bool,
-    /// Reserved for native headless serve; project view does not yet attach the generation consumer.
+    /// Use the native project host and managed generation consumer for this view.
     #[arg(long)]
     pub asset_activation: bool,
     /// Stable entity ID controlled by the arrow-key diagnostic action.
@@ -117,6 +119,9 @@ enum InputTicket {
 
 pub(super) fn run(args: ProjectViewArgs) -> Result<(), Box<dyn Error>> {
     validate_args(&args)?;
+    if args.asset_activation {
+        return activation::run(args);
+    }
     let clock = args.clock.runtime();
     if args.audio.is_some() && !cfg!(feature = "audio") {
         return Err(
@@ -198,11 +203,11 @@ fn session_termination_error(termination: &SessionTermination) -> Option<String>
 }
 
 fn validate_args(args: &ProjectViewArgs) -> Result<(), Box<dyn Error>> {
-    if args.asset_activation {
-        return Err(
-            "--asset-activation is supported only by `project serve --protocol 2`; project view has no generation consumer"
-                .into(),
-        );
+    if args.asset_activation && !args.stdio_control {
+        return Err("--asset-activation requires --stdio-control for project view".into());
+    }
+    if args.asset_activation && args.audio.is_some() {
+        return Err("--asset-activation cannot be combined with --audio".into());
     }
     if args.asset_preparation && !args.stdio_control {
         return Err("--asset-preparation requires --stdio-control for project view".into());
@@ -919,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_activation_is_rejected_by_view_before_project_io() {
+    fn asset_activation_requires_stdio_control_before_project_io() {
         let args = ProjectViewArgs {
             directory: std::path::PathBuf::from("/definitely/not/a/project"),
             clock: crate::project::ProjectClockArg::Realtime,
@@ -935,7 +940,46 @@ mod tests {
             report: None,
         };
         let error = validate_args(&args).unwrap_err().to_string();
-        assert!(error.contains("project serve --protocol 2"));
+        assert!(error.contains("--stdio-control"));
+    }
+
+    #[test]
+    fn asset_activation_rejects_audio_before_project_io() {
+        let args = ProjectViewArgs {
+            directory: std::path::PathBuf::from("/definitely/not/a/project"),
+            clock: crate::project::ProjectClockArg::Realtime,
+            audio: Some(crate::project::ProjectAudioArg::Offline),
+            stdio_control: true,
+            asset_preparation: false,
+            asset_activation: true,
+            controlled_entity: None,
+            width: 1280,
+            height: 720,
+            seconds: None,
+            frames: None,
+            report: None,
+        };
+        let error = validate_args(&args).unwrap_err().to_string();
+        assert!(error.contains("cannot be combined with --audio"));
+    }
+
+    #[test]
+    fn asset_preparation_flag_is_allowed_with_activation() {
+        let args = ProjectViewArgs {
+            directory: std::path::PathBuf::from("/definitely/not/a/project"),
+            clock: crate::project::ProjectClockArg::Realtime,
+            audio: None,
+            stdio_control: true,
+            asset_preparation: true,
+            asset_activation: true,
+            controlled_entity: None,
+            width: 1280,
+            height: 720,
+            seconds: None,
+            frames: None,
+            report: None,
+        };
+        assert!(validate_args(&args).is_ok());
     }
 
     #[test]

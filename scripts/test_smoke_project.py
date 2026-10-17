@@ -25,6 +25,7 @@ from smoke_project import (
     _asset_activation_status,
     _asset_preparation_command,
     _asset_preparation_status,
+    _managed_view_status,
     _fill_stdout_pipe,
     _parse_args,
     _project_view_command,
@@ -33,13 +34,16 @@ from smoke_project import (
     _decode_glb,
     _write_asset_project,
     _write_asset_preparation_view_project,
+    _write_managed_activation_view_project,
     _write_audio_project,
     _write_model_view_project,
     _write_sprite_view_project,
     ENTITY_ID,
     _validate_native_view_report,
     _validate_native_liveness_report,
+    _validate_managed_view_status,
     _validate_timeout,
+    _wait_managed_view_status,
 )
 
 
@@ -320,6 +324,11 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         )
         self.assertTrue(combined_activation.asset_preparation)
         self.assertTrue(combined_activation.asset_activation)
+        managed_activation_view = _parse_args(
+            ["--cli", "/bin/true", "--view", "--asset-activation"]
+        )
+        self.assertTrue(managed_activation_view.view)
+        self.assertTrue(managed_activation_view.asset_activation)
         for value in ("0", "nan", "bad"):
             with self.subTest(value=value), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 _parse_args(["--cli", "/bin/true", "--timeout", value])
@@ -361,6 +370,157 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             ["--audio", "offline"],
         )
         self.assertEqual(prepared_audio[-1], "--asset-preparation")
+
+    def test_managed_activation_view_fixture_combines_model_sprite_and_orthographic_camera(self) -> None:
+        project = self.root / "managed-activation-view-fixture"
+        _write_managed_activation_view_project(project)
+        manifest = json.loads((project / "daedalus.project.json").read_text(encoding="utf-8"))
+        scene = json.loads((project / "scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "offline-managed-activation-view-smoke")
+        self.assertEqual(len(scene["assets"]), 6)
+        self.assertEqual(len(scene["entities"]), 3)
+        entities = {entity["id"]: entity for entity in scene["entities"]}
+        model_components = {
+            component["type_id"]: component
+            for component in entities[ENTITY_ID]["components"]
+        }
+        sprite_components = {
+            component["type_id"]: component
+            for component in entities["entity:smoke-sprite"]["components"]
+        }
+        camera_components = {
+            component["type_id"]: component
+            for component in entities["entity:managed-activation-camera"]["components"]
+        }
+        self.assertEqual(
+            model_components["daedalus.model_renderer"]["asset_refs"],
+            ["asset:model-external"],
+        )
+        self.assertEqual(
+            sprite_components["daedalus.sprite_renderer"]["data"]["atlas"],
+            "asset:sprite-atlas",
+        )
+        self.assertEqual(
+            camera_components["daedalus.camera_2d"]["data"],
+            {"vertical_size": 10.0, "near": 0.1, "far": 100.0},
+        )
+
+        legacy = _project_view_command(project, self.root / "legacy.json", seconds=3)
+        managed = _project_view_command(
+            project,
+            self.root / "managed.json",
+            seconds=3,
+            asset_activation=True,
+        )
+        self.assertNotIn("--asset-activation", legacy)
+        self.assertEqual(managed[-1], "--asset-activation")
+        self.assertIn("--stdio-control", managed)
+        self.assertNotIn("--audio", managed)
+
+    def test_managed_view_status_retries_only_bounded_busy_and_uses_direct_read(self) -> None:
+        digest = "sha256:" + ("a" * 64)
+        cpu_fields = {
+            "generation_slots_used",
+            "generation_slots_limit",
+            "frame_slots_used",
+            "frame_slots_limit",
+            "prepared_metadata_bytes",
+            "prepared_metadata_reserved_bytes",
+            "legacy_mesh_copy_bytes",
+            "legacy_mesh_copy_reserved_bytes",
+            "frame_bytes",
+            "frame_reserved_bytes",
+            "scratch_current_bytes",
+            "scratch_peak_bytes",
+        }
+        status = {
+            "lifecycle": "initializing",
+            "session": "17",
+            "view_started": False,
+            "view_closed": False,
+            "active_generation": "1",
+            "active_source_digest": digest,
+            "queued_publication": None,
+            "last_presented": None,
+            "cpu": {field: 0 for field in cpu_fields},
+            "failure": None,
+            "live_capture": False,
+        }
+        binary = self.create_server_stub(
+            "import json, sys\n"
+            "for attempt in range(2):\n"
+            "    request = json.loads(sys.stdin.readline())\n"
+            "    assert request['request'] == {'op':'view_status'}\n"
+            "    assert request['request_id'] == f'managed-status-{attempt}'\n"
+            "    if attempt == 0:\n"
+            "        response = {'ok':False,'error':{'code':'view_status_busy',"
+            "'message':'busy','retryable':True}}\n"
+            "    else:\n"
+            f"        response = {{'ok':True,'result':{{'kind':'view_status','data':{status!r}}}}}\n"
+            "    print(json.dumps({'protocol':2,'request_id':request['request_id'],**response}), flush=True)\n"
+        )
+        server = _JsonlProjectServer(
+            binary,
+            self.project,
+            cwd=self.root,
+            timeout=STUB_TIMEOUT_SECONDS,
+            protocol_version=2,
+            process_label="managed view status stub",
+        )
+        with server:
+            result = _wait_managed_view_status(
+                server,
+                "managed-status",
+                lambda current: current["lifecycle"] == "initializing",
+                timeout=STUB_TIMEOUT_SECONDS,
+                expected_session="17",
+            )
+            self.assertEqual(result, status)
+            self.assertEqual(result["active_source_digest"], digest)
+            self.assertIsNone(result["last_presented"])
+
+        presented_status = {
+            **status,
+            "lifecycle": "view_running",
+            "view_started": True,
+            "queued_publication": {
+                "session": "17",
+                "tick": "0",
+                "sequence": "2",
+                "authority_snapshot_sequence": "1",
+                "project_generation": "1",
+                "source_digest": digest,
+                "scene_revision": "3",
+            },
+            "last_presented": {
+                "session": "17",
+                "tick": "0",
+                "sequence": "2",
+                "authority_snapshot_sequence": "1",
+                "project_generation": "1",
+                "source_digest": digest,
+                "present_sequence": "5",
+                "physical_width": 320,
+                "physical_height": 180,
+                "render_view": None,
+                "view_projection": None,
+                "actual_view_available": False,
+            },
+        }
+        self.assertEqual(
+            _validate_managed_view_status(presented_status, expected_session="17"),
+            presented_status,
+        )
+
+        with self.assertRaisesRegex(SmokeError, "unexpected or missing field"):
+            _validate_managed_view_status({**status, "unexpected": True}, expected_session="17")
+        with self.assertRaisesRegex(SmokeError, "invalid session or active source identity"):
+            _validate_managed_view_status({**status, "session": 17}, expected_session="17")
+        with self.assertRaisesRegex(SmokeError, "invalid bounded failure metadata"):
+            _validate_managed_view_status(
+                {**status, "failure": {"code": "failure", "message": "x" * 2_049}},
+                expected_session="17",
+            )
 
     def test_asset_preparation_status_uses_bounded_ticket_parser(self) -> None:
         binary = self.create_server_stub(

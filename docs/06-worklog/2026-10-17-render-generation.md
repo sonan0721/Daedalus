@@ -62,6 +62,18 @@ CPU owner의 source는 실제 leaf registry·Weak를 포함한 독립 alias·첫
 
 CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 실제 tuple padding을 누락할 수 있었다. GeometryKey/MeshHandle 같은 실제 pair의 `size_of<(K,V)>`를 쓰고 HashSet은 key layout을 쓰도록 같은 estimator의 prepared/scratch/frame 경로를 수정했다. Weak가 남은 실제 mesh·부분 준비 후 취소·old frame을 보유한 active/candidate 전환 시험 source도 추가했다. 아직 이 renderer source의 Cargo 검증은 하지 않았다. GPU source에는 whole-buffer 대신 whole-record chunk, 후보별 최소 create quota, 추가 stage bookkeeping 예약과 managed slot 갱신의 계약 누락이 있어 수정 중이다.
 
+별도 read-only host 감사에서는 device 생성 후 dimensions/configure/consuming PacketRenderer 변환 실패와 Renderer 내부 post-request_device unwind를 확인했다. 기존 함수가 owner를 반환하지 않으므로 NoDeviceCreated라고 보고할 수 없다. [host 계약](../03-architecture/native-project-host.md)과 ADR-0007을 수정해 initialized/partial owner 반환·app 생존 범위의 unwind 처리·surface/window 선행 해제를 후속 구현의 선행 조건으로 명시했다. 부분 초기화 holder/API·실제 실패/panic 시험은 아직 열려 있으며 현재 renderer staging 작업에 무단으로 구현 범위를 합치지 않는다.
+
+첫 managed frame 사전 리뷰에서는 CPU validation이 있다는 이유로 active slot map의 재사용을 강제한 결함도 확인했다. 초기 map은 비어 있으므로 비어 있지 않은 첫 frame을 거부하고, 같은 authored entity라도 expanded model draw 변경을 막을 수 있었다. CPU에서 canonical dense draw slot map을 한 번 준비·장부/registry에 등록하고 candidate first draw에서 사용한 뒤 성공 submit에만 active Arc를 교체하는 계약을 먼저 추가했다. 이 수정의 source·compile·실제 initial/topology GPU 시험은 후속이며 source 발견을 통과로 세지 않는다.
+
+첫 renderer `cargo check -p daedalus-renderer --lib --all-features --locked`의 보존된 attempt02는 exit101이다. CPU backing Result 전파와 camera closure의 오류 type 추론이 남았고 unused import/mut 경고도 있었다. raw `p03-render-device-libcheck-luna-attempt02.log`의 SHA-256은 `6d37f55a17a3918755061f8c311860d7ca37d9da37242053acb7d40362d46046`이다. attempt01 파일은0byte(`e3b0c442…b855`)여서 진단 원본 근거로 쓸 수 없다. 작업자도 다른 원본을 보유하지 않았고 retained evidence로 원인을 확인할 수 없어 출력 유실/원인 불명으로 기록했다. 파일을 덮어쓰거나 과거 진단을 복원하지 않는다.
+
+소유자별 최소 compile 수정 뒤 attempt03은 exit0이다. raw `p03-render-device-libcheck-luna-attempt03.log`의 SHA-256은 `fedcd7631152376d160bddb6b751e0f1a5f308b5483d264011611c88d591a3e9`이며 output/종료 footer가 보존됐다. in-progress API의 dead-code/unused 경고7개가 남아 strict 검사 통과는 아니다. 알려진 slot-map 기능 결함은 이 초기 type-check와 별도 수정 대상이고 아직 renderer CPU/GPU 테스트는 실행하지 않았다. Cargo lease를 반환한 뒤 canonical slot map의 CPU 준비와 GPU 소비를 다시 disjoint source-only 작업으로 배정했다.
+
+반복된 evidence wrapper 실수를 줄이려고 [개발 파이프라인](../04-plan/development-iteration-pipeline.md)의 작은 공통 실행기를 먼저 계약화하고 Luna xhigh가 `scripts/run_logged.py`·`scripts/test_run_logged.py`만 구현했다. root 리뷰에서 newline 없는 child 출력/footer 경계·JSON 보고 실패의 exit0·실제 launch 직후 상태 기록을 수정했다. focused 실제5개가0.074초에 통과했고 raw `p03-run-logged-unit-luna-attempt01.log` SHA-256은 `df6e8513686a0a2bbcfc63f3675147135c47e51830b176da181b58d47fc411df`다. 새 실행기를 쓰기 전 기존 exclusive wrapper로 그 첫 unit 결과를 보존했다.
+
+이후 새 실행기로 실제 docs 명령을 실행해 child/runner0·launched=true·0.1866초와 completion footer를 확인했다. raw `p03-run-logged-docs-luna-attempt01.log` SHA-256은 `7a3330b99fdd92d88a4e1bd6751627cae6c1ea3655ff6687a986b04b39256132`이며 root도 bytes/hash를 독립 대조했다. child17·SIGTERM·기존 binary bytes 불변/child 미실행·launch 오류·주입 hash 실패의 의미는 focused tests가 검사했다. 이 도구는 retry/build/lease를 자동화하지 않으며 과거 잃은 증거를 되살리거나 엔진 기능·GPU 동작을 인수하지 않는다.
+
 ## runtime source 최종 동결·로컬 검증
 
 마지막 fixture 리뷰에서 nonwaiting port의 정상 호출도 actor와 경합하면 합법적인 Busy를 반환할 수 있음을 확인했다. 테스트의 정상 성공/오류 판정만 기존 방식의 유한 Busy 재시도로 묶고, mutex를 의도적으로 잡고 Busy를 검사하는 assertion은 그대로 유지했다. production·deadline·임의 sleep을 바꾸지 않았다. 이 수정 뒤 runtime source 네 파일을 동결했다.
@@ -75,3 +87,21 @@ CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 �
 위 raw는 `p03-consumer-busy-fixture-runtime-{default,allfeatures,clippy}-luna-attempt01.log`다. 마지막 scoped runtime rustfmt/diff check도0으로 끝났고 그 뒤 source 변경은 없다. focused `consumer_`는 실제9개가 통과했으나 wrapper가 zsh readonly 변수 `status`에 종료 코드를 대입해 footer 기록에 실패했다. 해당 raw `p03-consumer-busy-fixture-luna-attempt01.log`의 SHA-256은 `9af500cfa2e1cb6cc63d6c2dc8e46a3c90bda24062be9c8f59eb54f814c80a20`이며 Cargo 성공 summary와 wrapper 결함을 구분한다. 최종 전체 두 실행/Clippy에는 exit_code0 footer가 있다.
 
 문서 checker·문서 unit8도 통과했다. Luna raw `p03-consumer-docs-check-luna-attempt-HM0rI6`/`p03-consumer-docs-unittest-luna-attempt-oukBLT`의 SHA-256은 각각 `e9202009d391bd258dcf3f484424f260c9a0c3d079b1448d12bb8e2d0048696c`/`60bb849356ffbc091f601e17fc6ae0b2eb5e26d734d433da020c6e775efbf97f`다. source/로컬 통과와 clean PR의 workspace/managed/두 package 인수는 구분하며 후자는 아직 대기다. renderer WIP·실제 GPU/present·host/SDK/CLI 연결과 전체 b.3/P03/D1은 미완료다.
+
+## PR17의 runtime 하위 경계 인수
+
+[PR17](https://github.com/sonan0721/Daedalus/pull/17)은 exact head `7987d6810f96b15a73849e044b9dd24b9c1532fe`의 다섯 성공과 아래 실제 Mac package 회귀 뒤 ready/squash했다. main `3bc9274163c1a8374c6da7e20e72ea89b3192a09`, head, CI checkout `cbfce6bd738522217e297c757f54f3cf23fbc875`는 모두 tree `e142d43b4db4e10a5365eba837c99f277efe9938`다. 보호3개와 추가 두 package, Publish skipped를 확인했고 tag/공개 Release는 만들지 않았다.
+
+Rust run38990034865/job117270161752는 workspace337pass/0fail/ignored12, strict Clippy/locked check/fmt를 통과했다. docs38990034844/job117270161652와 실제 managed38990034837/job117270161596도 성공했다. release38990034894의 Mac117270162266/Linux117270162107은 각각 packaged CPU62/4.392261초와62/1.051191초로 성공했고 Linux ALSA linkage도 확인했다. binary SHA-256은 Mac `fbe7d138d7129b14df8ee2a6cf534f086175b9ef509477ce3e329968d1e2eff5`, Linux `b7864d6e4207c93354b8bfbcae971e5a9a9d05e4312deda4bfaa5bbc3f85a1b8`다.
+
+실제 CI Mac artifact12085135474를 내려받아 checksum/manifest를 검증했다. archive `daedalus-0.1.0-aarch64-apple-darwin-20261017T011520Z-def80b7d5c0d4e65a4d96f9bd881d5bf.tar.gz`의 SHA-256은 `2c74ee84dde4658a959d82ae333d005e4235794cc704add32543b04d46b1e301`이다. manifest는 exact CI checkout/dirty=false였고 실제 tar 추출 binary도 위 Mac SHA와 같다. local renderer WIP를 포함한 별도 Cargo/package rebuild를 하지 않았다.
+
+그 추출 binary에 기존 helper의 assets/view/models/sprites/audio/native-audio/preparation/activation 조합을 실행해 실제 Apple M3 Pro/Metal에서72/72·19.84801초·stderr0을 확인했다. native finite voice는0.521707초 기다린 뒤 Ended였다. 기존 화면/오디오 경로의 회귀이며 새 render consumer의 실제 GPU 세대 교체가 연결됐다는 뜻은 아니다. raw `p03-consumer-ci-macos-native-root-attempt01.json`의 SHA-256은 `10756a4e6778a40e3993ba998c6c28b077c6c675bbee7c5c12f17d2d02dfa96f`다.
+
+PR metadata raw `p03-consumer-ci-pr-root-attempt01.json`은 SHA-256 `8dda520170c0f9188bf97d698d3777680d0daeb6b7e6a86ddaf3c066229d0cec`, Rust/Mac/Linux job raw는 각각 `d6e9662bed32c69eb8f4fdabce1b65abafcc7a7e9a0b21d2179964ecc9aecadb`, `759717b041ef74ecd736d0a0240c1cbb456a350c7c9b410235e6d9ba79f6ab7b`, `655409756d95e56dacfb06ad20ce1c03cf11042c82714c8a57a4643924182247`이다. Rust의 첫 log 요청은 run 진행 중이라 사용할 수 없었고 빈 attempt01을 보존했다. 실제 완료 로그는 attempt02이며 이를 테스트 실패/재실행으로 세지 않는다.
+
+후속 renderer source 리뷰는 미참조 legacy mesh를 GPU stage 집합에 포함하는 중복과 첫 candidate draw의 expected bind group×draw 중첩 탐색을 확인했다. 실제 참조 binding에서만 stage 집합을 만들고, CPU 검증이 발급한 generation별 private token을 GPU admission/active에 공유하는 작은 계약을 추가했다. 같은 token/identity/limits를 O(1)로 대조하며 actual GPU completeness/serial 검증은 그대로 필요하다. token의 registry/실제 charge/alias 시험도 구현 범위다. 아직 renderer Cargo/실제 GPU 인수는 하지 않았다. 이 runtime slice 인수 후에도 전체 b.3·P03·D1/D2/D3는 계속 미완료다.
+
+병합 뒤 main3bc9274의 docs38990388159·managed38990388158·Rust38990388223·release38990388349도 모두 성공했다. main release의 Linux117271273655/Mac117271273740는 success, Publish117271547194는 skipped다. raw `p03-consumer-main-release-root-attempt01.json`의 SHA-256은 `b328eaad6a07987f6aed406b336bda7b5f6c31d56a87da10f3f0ba1191e14fb9`다. 새 main artifact의 장치 재검사를 수행한 것으로 부르지 않는다.
+
+renderer GPU scenario test source는 Luna A가 새 `packet_renderer/staged_gpu_tests.rs`만 소유하고, Luna C는 production device/staging·parent module 선언·기존 pure tests, Luna D는 CPU/packet/lib를 소유하도록 나눴다. A의 네 실제 GPU 시나리오는 큰 geometry record chunk/odd-width mip, cold/warm quota·inflight1/2, old pose/token/첫 draw, partial cancel/drain/pin이다. 각 source가 동결되기 전에는 Cargo/GPU를 실행하지 않고 한 lease로 집중 검증한다. 이 분담은 작성 중인 계획이며 테스트 통과 수가 아니다.

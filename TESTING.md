@@ -13,6 +13,14 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 
 The documentation checker verifies UTF-8 Markdown, local link targets, repository path boundaries, and use of an obsolete project label. Its unit tests cover link resolution, code masking, reference links, path traversal, and encoding/name errors. GitHub Actions runs these checks in the `docs` job on pull requests and pushes to `main`. It does not validate remote URLs, heading anchors, factual claims, or the whole CommonMark grammar; those need review or additional tools when relevant.
 
+For noninteractive commands, the optional evidence runner creates a new log before starting the child:
+
+```sh
+python3 scripts/run_logged.py --log /tmp/daedalus-docs-check-001.log -- python3 scripts/check_docs.py
+```
+
+Choose a fresh path for every attempt; its parent directory must exist. Existing logs are refused without running the command. The runner captures both output streams and reports the child status and completed log SHA-256 as JSON. Child failures remain failures; launcher or evidence errors use exit 125. Stdin is closed, so this is for checks/builds rather than interactive CLI sessions. A missing completion footer or failed finalization is incomplete evidence. The runner does not select tests, retry, build implicitly, or coordinate Cargo workers. Its focused regressions run with `python3 -m unittest discover -s scripts -p test_run_logged.py` and are included in normal Python discovery.
+
 ## Rust workspace checks
 
 The repository pins Rust 1.94.0, rustfmt, and Clippy in rust-toolchain.toml. Run:

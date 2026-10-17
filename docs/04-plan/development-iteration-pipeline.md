@@ -213,3 +213,17 @@ CLI adapter는 실제 네 capability 배열의 base7 반복을 base/extension co
 공통화 전 source 감사는 prepared model/sprite sidecar 두 map을 각각 전체 expanded instance 수로 예약하는 중복을 찾았다. 실제 각 binding 수로 예약·동일 estimator에 반영하는 작은 변경을 renderer CPU 작업에 포함한다. instance 최대16384와 metadata8MiB는 독립 한도이며 모든 조합이 들어간다는 보장이 아니다. wrapper가 아니라 실제 공유 leaf·validation normal map·capacity를 세고, 일시 pin 포화의 Busy와 개별 상한 초과의 영구 오류를 구분한다. 숫자를 줄였다는 이유만으로 제작 반복 시간이 개선됐다고 계산하지 않는다.
 
 runtime source 작성 중에도 별도 renderer/host의 read-only 리뷰를 진행하되 Cargo/장치 lease는 한 명에게만 둔다. 초기 코드 리뷰에서 consumer close와 try-lock 경합 때 currentness·untaken payload 정리가 늦어질 수 있는 경계를 찾았고, 컴파일 전에 독립 atomic 관측과 기존 preparation worker의 최종 cleanup으로 조정하도록 작업을 배정했다. 실제 재현 테스트·결과는 후속 worklog에 기록한다. public signature와 표준 erased pin을 먼저 고정하고 dependent source를 이어 붙여 서로 private 구현을 추측하는 재작업을 줄인다. 절감 시간/배율은 측정하지 않았다.
+
+PR17에서는 runtime source만 선택 commit해 clean CI가 기존 renderer와 전체 회귀를 검사하도록 했다. local renderer WIP는 보존했다. 실제 Mac 하드웨어 검증에는 CI가 만든 archive를 내려받아 exact checkout/dirty=false·checksum·binary hash를 확인하고 기존 helper를 그대로 썼다. 두 packaged CPU62와 downloaded binary의 native72를 확인했고 local release를 다시 컴파일하지 않았다. source가 다른 WIP 빌드로 검증 대상을 바꾸거나 새 smoke framework를 만드는 반복을 피한 절차이며 시간 절감 배율은 측정하지 않았다.
+
+renderer source 리뷰에서는 미참조 legacy mesh의 불필요 stage 요청과 첫 frame의 expected bind group×draw 탐색을 찾았다. 실제 참조 집합과 private resource-set token으로 공통 CPU 검증을 재사용하는 계약을 먼저 수정했다. token은 작은 연결이며 GPU 초기화 완료 검증을 대신하지 않는다. source 구현·CPU/GPU 검사 전이므로 이를 이미 달성한 프레임 시간 개선으로 보고하지 않는다. 로그 wrapper의 zsh readonly 변수 실수는 AGENTS에 task-specific exit 변수·단일 exclusive descriptor 규칙으로 명시했다.
+
+device production과 실제 GPU 시나리오 테스트를 한 작업자에게 직렬로 몰지 않도록, 새 test module 파일만 별도 Luna가 작성하고 device 담당이 parent 선언/기존 helper의 최소 visibility를 소유하도록 분리했다. CPU 담당의 실제 PreparedProject/validated-frame 경계를 공유하며 forged FrameHandle이나 별도 smoke framework는 만들지 않는다. compile은 관련 source가 모두 동결된 뒤 단일 owner가 맡아 작성 병렬화와 불안정한 동시 빌드를 구분한다. 실제 검증/효과는 후속 기록 대상이다.
+
+### 검증 출력 보존의 공통 실행기
+
+서로 다른 작업에서 기존 로그 덮어쓰기·zsh readonly 종료 변수·빈 출력 파일이 반복됐다. 규칙만 다시 읽게 하는 대신 noninteractive 명령의 출력 보존만 담당하는 `scripts/run_logged.py`를 추가하는 작은 도구 작업을 채택했다. 테스트 선택·Cargo lease·timeout·재시도·성공 판정은 기존 caller의 책임이며 새 smoke/test framework를 만들지 않는다. 아래는 착수 전에 고정한 계약과 실제 검증 범위다.
+
+`python3 scripts/run_logged.py --log dist/project-evidence/<unique>.log -- <program> <args...>`는 파일을 exclusive로 먼저 열고, 이미 존재하거나 열 수 없으면 자식 명령을 시작하지 않는다. parent directory는 caller가 준비한다. shell 없이 argv를 실행하고 stdout/stderr를 같은 열린 파일로 연결하며 stdin은 DEVNULL이다. 시작 metadata와 정상 종료 시 실제 child exit code/elapsed footer를 남기고 닫은 뒤 raw SHA-256·경로·실행 여부·종료 상태를 작은 JSON으로 출력한다. child 실패는 성공으로 바꾸지 않으며 launch 자체 실패는 child 실행 실패와 구분한다. launcher/finalization/report 오류는125, POSIX child signal은 원래 음수 returncode와128+signal의 wrapper status를 구분한다. 환경변수/credential 목록을 덤프하지 않는다. 강제 process kill·디스크 오류 등으로 footer가 없으면 완료 검증 근거가 아니며 원본을 덮어쓰지 않는다.
+
+필수 회귀는 실제 자식 process의 stdout+stderr·비영 종료 보존, 기존 파일 거부 시 child 미실행·기존 bytes 불변, launch 실패의 명시적 상태와 hash 일치다. 자동 재빌드/재시도/병렬화는 없다. Luna xhigh가 두 Python 파일만 구현했고 조정자가 source를 리뷰했다. local focused5개와 실제 docs 명령의 출력/footer/독립 hash 대조가 통과해 noninteractive 검사에 도입한다. 세부 raw는 [작업 기록](../06-worklog/2026-10-17-render-generation.md)에 둔다. 이전 잃은 로그를 재구성하지 않으며 CI/시간 절감 배율·전체 엔진 인수는 이 결과에 포함되지 않는다.

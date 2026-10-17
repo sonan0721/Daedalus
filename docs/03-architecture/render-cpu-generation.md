@@ -51,6 +51,12 @@ canonical registry는 handoff 전에 실제 공유될 Arc를 등록한다. Proje
 
 parent map/template/frame validation을 먼저 회수한 뒤 leaf를 회수한다. Sized Arc는 worker `try_unwrap`, unsized Arc slice는 worker `get_mut`로 strong alias와 Weak 부재를 확인한 뒤 drop한다. strong_count 관측만으로 마지막 free를 허용하지 않는다. partial prepare/extract 실패·취소에서도 canonical roots를 worker에서 회수한다. source pin은 해당 generation/frame의 실제 leaf 회수 뒤 반환한다. 다른 generation으로 GPU content key를 재사용하는 것과 CPU leaf를 공유하는 것은 별개다.
 
+managed generation은 crate-private의 opaque resource-set token을 한 번 발급한다. 같은 canonical token을 StageInput과 해당 generation에서 CPU 검증한 FrameHandle이 공유하며 caller가 생성하거나 바꿀 수 없다. token 자체는 resource map/source/backing을 소유하지 않는 작은 별도 Arc이고, GPU Ready 뒤에는 이를 보유해 첫 frame의 resource-set 동일성을 O(1)로 대조한다. session/generation/digest·정확한 limits 검증도 유지한다. 문자열 ID만 같거나 같은 source를 다른 CPU owner에서 준비했다는 이유로 token을 같게 취급하지 않는다.
+
+이 token은 UI에서 expected resource 집합과 draw를 다시 중첩 순회하는 일회성 비용을 없애기 위한 작은 연결이다. CPU owner가 한 번 준비한 immutable generation에서만 frame을 검증/발급한다는 private constructor 불변식으로 검증을 재사용한다. 실제 token Arc·registry slot·frame field 비용은 prepared/frame estimator에 반영하고 canonical root로 등록해 alias/Weak가 남으면 charge도 유지한다. 다른 token/owner의 frame 거부·같은 generation의 새 pose 통과·token retention/reclaim을 검사한다. compile/실제 GPU 검증 전 구현됐다고 보고하지 않는다.
+
+managed generation은 실제 binding과 model draw ordinal을 extraction 순서대로 순회해 dense `Arc<HashMap<RenderInstanceId, usize>>` slot assignment도 CPU에서 한 번 만든다. StageInput과 해당 generation의 frame/validation은 같은 canonical Arc를 공유한다. 초기 GPU에는 active slot이 없고 asset 변경으로 expanded draw 수/ID도 바뀔 수 있으므로 기존 active map을 후보의 첫 frame에 강제하지 않는다. map의 실제 capacity·Arc·registry 항목은 prepared metadata에 한 번 청구하고 frame에는 공유 필드 비용만 센다. generation leaf로 등록해 별칭/Weak가 남으면 준비 장부도 유지한다. public mutable map이나 caller 생성 경로를 열지 않는다. initial·expanded topology 변경·같은 generation pose·별칭 회수를 검증한다.
+
 ## 진행·취소와 slice 한계
 
 모든 무거운 준비/추출/validation은 host CPU owner에서 실행한다. coordinator/UI/authority actor에 옮기지 않는다. source/entity/geometry/texture 범위를 순회하는 취소 checkpoint를 두며 invalidated 작업은 새 frame/stage input을 handoff하지 않는다. owner의 partial root는 취소 뒤에도 회수 경계까지 남는다. stage 요청마다 thread를 만들지 않는다.

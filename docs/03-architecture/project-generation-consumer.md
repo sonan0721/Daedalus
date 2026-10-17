@@ -1,6 +1,6 @@
 # P03.3b.3.1 Runtime-neutral project generation consumer
 
-상태: runtime 경계 계약 동결·source 구현/검증 중·인수 전 · 2026-10-17 · 선행 b.2/PR16 인수
+상태: runtime 하위 경계 PR17/main3bc9274 인수·새 GPU/host 연결 미완료 · 2026-10-17
 
 ## 목적과 범위
 

@@ -220,3 +220,9 @@ main release raw `p03-render-main-release-root-attempt01.log` SHA-256은 `d77d13
 remote CI를 기다리는 동안 Luna D가 `/tmp`의 작은 Rust source만 작성해 기존 artifact에 rustc metadata probe를 실행했다. production/test/manifest/lock/dependency 변경이나 추가 Cargo build, runtime/GPU/audio 초기화는 없다. service Send+Sync·private Arc Send, PacketCpuOwner Send, CpuFrameHandle/PacketStageInput Send+Sync, PacketRenderer/Renderer Send가 해당 feature 조합에서 compile됐다. root도 probe source와 raw hash를 대조했다. 실제 host의 안전한 종료·device 마지막 drop·frame 선점은 여전히 별도 검증이다.
 
 source `/tmp/daedalus-host-traits-luna-attempt01.rs` SHA-256은 `757bba9247137ed946b31ac6552d285dea7176fcce25f9f7529d51f70dce6902`, raw `p03-host-traits-luna-attempt01.log`는 `670854115b876c9dd389e2f9530928149f5a211821e8f2d8fafa055c51cf824d`다. renderer default+test-fixtures+window artifact `libdaedalus_renderer-5638dc27dcc90085.rlib` SHA-256은 `84611d768570ed177e3403a951e7485e84ff97c2036505590682eb2423ef1aa3`, runtime audio+native-audio artifact `libdaedalus_runtime-bda12bd485c4cc76.rlib`는 `06d9d7b83b9bca96a797963076f98bd1e33eebe1624f3c11259f259f669a7c4f`다. 새 host crate 자체의 compile 결과로 보고하지 않는다.
+
+## 실제 host 연결 전의 owner 계약
+
+새 [native renderer owner 수명](../03-architecture/native-renderer-owner-lifecycle.md)은 초기화 중 실패를 완성 PacketRenderer/NoDevice 둘로 뭉개지 않기 위해 만들었다. source 감사와 Luna read-only 리뷰를 거쳐 DeviceRequest/RendererPartial/RendererReady/PacketPartial/PacketReady를 분리하고, 고정 base/lazy handle·stage paired create·app 내부 catch·항상 owner를 반환하는 managed 결과를 계약으로 정했다. 실제 구현·주입 오류/panic·장치 종료 시험은 아직 수행하지 않았다.
+
+첫 bounded 코드 task는 renderer owner와 stage partial pair이며 창/host 코드는 후속이다. 기존 CPU/GPU planner·legacy 생성자를 공통화해 코드 복제를 피하고 stage마다 새 thread/새 recovery framework를 만들지 않는다. 체크리스트 3.3a/b/c/d는 모두 열린 상태다. 같은 사용자 가청 답변을 새 테스트나 추가 확인으로 중복 계산하지 않는다.

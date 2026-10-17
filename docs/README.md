@@ -64,6 +64,7 @@
 | [Headless CPU 세대 commit](03-architecture/headless-asset-generation.md) | P03.3b.2의 동일 authority·Stage/Commit/replay·초기 source consume·worker 회수·frame identity를 장치 연결 전에 검증 |
 | [Render 세대 staged 준비·표시](03-architecture/staged-render-asset-generation.md) | P03.3b.3의 제한된 GPU 업로드·last-good pin·native lease/CPU 회수·실제 present ACK를 동결하기 위한 source 기반 상세 초안 |
 | [Native project host](03-architecture/native-project-host.md) | typed 실행·consumer port·publication·CPU backing/종료를 CLI 밖의 공개 엔진 조합 경계로 만드는 구체 설계안 |
+| [Native renderer owner 수명](03-architecture/native-renderer-owner-lifecycle.md) | device/packet 부분 초기화·paired create panic·managed 창 반환·worker final drop의 구현 전 소유권 계약 |
 | [Project generation consumer](03-architecture/project-generation-consumer.md) | renderer 의존 없는 source lease·Queued/Applied·실제 publication token·present ACK/회수의 첫 runtime 구현 계약 |
 | [모델·텍스처 실행 계약](03-architecture/model-texture-runtime.md) | P03.2a의 실제 project binding·공통 창/capture·cache pin 해제·GPU 한도/색/수명·회귀 기준 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |

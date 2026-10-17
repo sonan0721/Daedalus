@@ -1,6 +1,6 @@
 # P03.3b.3.2b 같은 device의 bounded generation staging
 
-상태: device API·진행 규칙 동결, 구현 전 · 2026-10-17
+상태: device 계약 동결·source 작성/통합 검증 중 · 2026-10-17
 
 ## 범위와 입력
 
@@ -48,6 +48,10 @@ window는 surface acquire를 먼저 한다. acquire 실패·0 dimensions·미지
 
 frame write의 현재 layout 상한은 checked `N × (128+48+16)+128+16`이며 N16384이면3,145,872byte다. 실제 size_of/layout로 검증하고 candidate chunk보다 frame reservation을 먼저 확보한다. staging와 upload scratch는 각각 기존128MiB, bookkeeping8MiB다. 전체를 무조건 pack하지 않고 whole vertex/index record 또는 texture mip/row 단위로 cursor를 진행한다. largest indivisible upload unit조차 한도에 안 맞는 후보/config는 영구 오류이며 영원히 Busy가 아니다.
 
+raw quota4MiB는 작업량의 상한이며 매번 그 크기를 할당해야 한다는 뜻이 아니다. 낮춘 scratch/staging 한도에서도 실제 whole-record 단위가 들어가면 진행하도록 effective chunk를 줄인다. geometry 변환의 실제 scratch·global staging·raw quota를 각각 적용하고 index/borrowed texture처럼 추가 복사가 없는 경로에 가상의 큰 scratch를 부과하지 않는다. texture는 raw row bytes와256byte 정렬 staging pitch를 별도로 계산한다. padded 최소 row/default texture조차 global cap에 안 들어가면 stage admission 전에 typed 영구 오류로 거부한다.
+
+combined chunk planner에는 frame/overlay의 실제 또는 검증된 보수적 reservation을 제외한 headroom을 전달한다. geometry는 vertex/index 단위로, texture는 raw quota와 padded staging에 들어가는 whole row 수로 내림한다. 현재 in-flight bytes/count 때문에 **개별로는 들어가는 요청**만 ResidencyBusy다. `next_staging > cap` 자체를 Busy로 표현하지 않는다. transient headroom 때문에 한 단위도 못 올리는 경우와 원래 cap에서 영원히 못 올리는 경우를 구분하고, preflight 실패에서 create/evict/write/cursor를 바꾸지 않는다. lowered cap을 지원하려고 기본 memory/queue/deadline 한도를 늘리지 않는다.
+
 GPU allocation은 buffer/texture 전체 크기이고 byte upload chunk와 다르다. create buffer/texture/view/sampler/bind group/shader/pipeline layout/render pipeline의 실제 호출을 quota로 센다. 현재 cold model/sprite는 공유 layout1회와 각 pipeline group3회로 최대7회다. atomic pipeline group은 남은 quota에 들어갈 때 시작하고 minimum group보다 작은 config를 효과 전 거부한다. driver 호출의 latency 상한을 약속하지 않는다.
 
 wgpu write는 다음 submit과 연결되므로 stage write만 enqueue한 채 다른 draw를 기다리지 않는다. 한 combined submit의 serial을 touched stage와 draw 자원에 모두 기록하고 그 뒤 cursor/progress를 확정한다. 성공 submit 뒤 metadata를 잃는 경로를 만들지 않는다. write 이후 예상 밖 fatal은 실제 pending charge를 보존하고 failure/drain으로 수렴한다. callback은 작은 serial/watermark만 게시하며 큰 CPU final free를 맡지 않는다.
@@ -63,3 +67,5 @@ UI의 Window/Surface를 먼저 같은 thread에서 해제하고 device owner를 
 Luna xhigh device 작업자는 `packet_renderer.rs`, 필요 시 그 private submodule, `renderer.rs`의 GPU 생성 helper와 해당 tests만 소유한다. packet/CPU/lib exports 소유자와 projection/export 목록을 먼저 공유한다. runtime/window/CLI/manifest/lock/CI는 수정하지 않는다. 한 Cargo/장치 lease를 유지한다.
 
 CPU planning/admission·union victim·partial coverage·checked serial/ledger·quota·cancel·foreign IDs·Ready/last-use 구분·max slots1/2의 회귀를 검사한다. 실제 GPU ignored tests는 old-ready pixels를 유지한 여러 pump→Ready→새 actual frame pixels·resource reuse·취소 partial의 cache 미승격·drain을 확인한다. ledger/completion 주입은 deterministic saturation 근거로만 기록하며 실제 stall 시간을 측정한 것으로 부르지 않는다. existing public model/sprite pixel tests도 보존한다. native host/SDK·package/CI/main과 전체 b.3 인수는 후속이다.
+
+2026-10-17 source 감사는 낮춘 scratch1MiB에서도 raw quota4MiB chunk를 그대로 예약해 streamable geometry를 거부하고, padded256byte texture를 staging cap128에 접수한 뒤 clear 경로에서 영구 Busy가 되는 결함을 확인했다. 위 effective/headroom 규칙은 이 결함의 수정 계약이며 아직 통과 증거가 아니다. 기본 quota 그대로의 lowered scratch/staging 진행, dirty active frame과 한 submit의 headroom 공유, padded 최소 단위의 효과 전 영구 거부·정직한 transient Busy 회귀를 추가한 뒤 인수한다.

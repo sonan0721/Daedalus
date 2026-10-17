@@ -1,6 +1,6 @@
 # P03.3b.3.2a Renderer CPU generation 계약
 
-상태: CPU API·논리 예산 동결, 구현 전 · 2026-10-17
+상태: CPU 계약 동결·source 작성/통합 검증 중 · 2026-10-17
 
 ## 범위
 

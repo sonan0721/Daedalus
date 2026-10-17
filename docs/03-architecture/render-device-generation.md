@@ -1,6 +1,6 @@
 # P03.3b.3.2b 같은 device의 bounded generation staging
 
-상태: device API·진행 규칙 동결, 구현 전 · 2026-10-17
+상태: device 계약 동결·source 작성/통합 검증 중 · 2026-10-17
 
 ## 범위와 입력
 
@@ -24,6 +24,8 @@ private `ResourceRequests<'a>`는 geometries·model_bindings·sprite_bindings의
 
 stage 상태는 Admitted/Uploading/AwaitingCompletion/Ready/Cancelling/Retiring/Cancelled/Failed를 구분하는 bounded 표현을 사용한다. 외부 status의 diagnostic은 최대64byte code·2048byte message이며 전체 논리 metadata는32KiB 이내다. 실제 used/remaining bytes·create calls·upload/completion serial을 보고한다. 예상 작업량과 완료 작업량을 섞지 않는다. 알려진 terminal status는 유한 마지막 슬롯만 보존하며 무제한 역사 map을 만들지 않는다.
 
+아직 create/upload가 없는 후보는 status poll만으로 Admitted에서 Uploading으로 바뀌지 않는다. victim 목록이 비어 있다는 사실은 작업 시작의 근거가 아니다. 실제 create/upload progress가 시작 상태를 구분하며, 완전히 준비된 cache-hit 후보는 별도 불필요한 upload 없이 Ready가 될 수 있다.
+
 CPU generation의 private canonical resource-set token을 stage admission 때 보존한다. Ready 뒤 큰 StageInput/plan을 반환해도 작은 token과 source pin은 필요한 실제 수명까지 유지한다. 첫 candidate frame은 기존 CPU 검증·같은 token·session/generation/digest·정확한 limits로 확인한다. UI에서 expected-set을 다시 할당하거나 expected bind group×draw의 중첩 탐색을 실행하지 않는다. token은 GPU completeness/serial 검증을 대신하지 않으며, 다른 CPU owner의 token은 같은 문자열 identity여도 거부한다.
 
 성공한 managed submission은 device-active token도 같은 transaction에서 갱신한다. 이후 같은 generation의 새 pose는 active token·identity·정확한 limits로 O(1) 확인하며 기존 CPU validation으로 slot writes를 만든다. Busy/실패 전에는 active token을 바꾸지 않는다. legacy activation이 실제 ready packet을 교체하면 managed token을 지워 stale 권한을 남기지 않는다. old in-flight의 정확한 CpuFrameHandle pin이 이전 token의 실제 수명을 보존하며 작은 token 비용도 bookkeeping에 포함한다.
@@ -38,6 +40,8 @@ renderer의 두 generation 슬롯은 active+candidate 또는 active+retiring이�
 
 GPU cache key 재사용은 기존 payload/layout·texture/sampler/pair 의미를 따른다. **range/mip 초기화 완료와 submission 완료는 별개**다. partial entry는 ordinary ready cache hit가 될 수 없다. cancel 후 fence가 완료됐다는 이유로 incomplete를 complete로 승격하지 않는다. 완전히 초기화되고 해당 upload serial이 완료된 뒤에만 Ready다. cache hit에도 이 조건이 필요하다.
 
+Ready status의 `initialization_serial`은 필요한 geometry/texture/default texture의 실제 초기화 serial 최댓값을 나타낸다. 이번 stage에서 새 upload가 없는 cache-hit도 기존 초기화 serial을 보고하며, upload 초기화 의존성이 없는 빈 집합만 None일 수 있다. 같은 자원을 다시 그려 증가한 last-use serial로 이 값을 덮어쓰지 않는다. 각 자원의 completion/completeness 검사와 별개로 status 요약의 의미도 보존한다.
+
 initialization에 필요한 serial과 마지막 draw/use serial은 구분한다. 계속 그리는 old-ready가 last-use serial을 갱신해도 이미 완료된 upload가 다시 미완료가 되지 않는다. candidate Ready를 unrelated 최신 draw의 완료까지 무한히 미루지 않는다. 반대로 eviction/drain은 실제 last-use serial을 기다린다. zero-new-upload/cache-hit·empty generation도 명시적 source identity/pin을 유지한다.
 
 generation pin 해제·cache residency·실제 eviction bytes는 별도 counter다. 사용이 끝난 complete entry는 bounded LRU에 남거나 다음 generation에서 재사용될 수 있다. pin 해제를 실제 VRAM eviction으로 보고하지 않는다. source CPU leaf 회수는 CPU owner registry의 실제 별칭 검사와 별도다.
@@ -47,6 +51,12 @@ generation pin 해제·cache residency·실제 eviction bytes는 별도 counter�
 window는 surface acquire를 먼저 한다. acquire 실패·0 dimensions·미지원 format에서는 write/cursor를 진행하지 않는다. renderer는 completion poll 뒤 frame writes·작은 chunk·actual create quota·scratch/staging·victim union·in-flight/ledger capacity·checked next serial을 전부 preflight한다. queue.write_* 이후 할당/ledger capacity 부족이 처음 드러나지 않도록 한다.
 
 frame write의 현재 layout 상한은 checked `N × (128+48+16)+128+16`이며 N16384이면3,145,872byte다. 실제 size_of/layout로 검증하고 candidate chunk보다 frame reservation을 먼저 확보한다. staging와 upload scratch는 각각 기존128MiB, bookkeeping8MiB다. 전체를 무조건 pack하지 않고 whole vertex/index record 또는 texture mip/row 단위로 cursor를 진행한다. largest indivisible upload unit조차 한도에 안 맞는 후보/config는 영구 오류이며 영원히 Busy가 아니다.
+
+raw quota4MiB는 작업량의 상한이며 매번 그 크기를 할당해야 한다는 뜻이 아니다. 낮춘 scratch/staging 한도에서도 실제 whole-record 단위가 들어가면 진행하도록 effective chunk를 줄인다. geometry 변환의 실제 scratch·global staging·raw quota를 각각 적용하고 index/borrowed texture처럼 추가 복사가 없는 경로에 가상의 큰 scratch를 부과하지 않는다. texture는 raw row bytes와256byte 정렬 staging pitch를 별도로 계산한다. padded 최소 row/default texture조차 global cap에 안 들어가면 stage admission 전에 typed 영구 오류로 거부한다.
+
+combined chunk planner에는 frame/overlay의 실제 또는 검증된 보수적 reservation을 제외한 headroom을 전달한다. geometry는 vertex/index 단위로, texture는 raw quota와 padded staging에 들어가는 whole row 수로 내림한다. 현재 in-flight bytes/count 때문에 **개별로는 들어가는 요청**만 ResidencyBusy다. `next_staging > cap` 자체를 Busy로 표현하지 않는다. transient headroom 때문에 한 단위도 못 올리는 경우와 원래 cap에서 영원히 못 올리는 경우를 구분하고, preflight 실패에서 create/evict/write/cursor를 바꾸지 않는다. lowered cap을 지원하려고 기본 memory/queue/deadline 한도를 늘리지 않는다.
+
+현재 dirty globals/instance/material write 때문에 한 stage 단위를 넣을 여유가 없으면 frame-only submit으로 최신 old-ready/clear를 유지하고 stage cursor를 진행하지 않는다. 다음 unchanged frame의 여유로 진행할 수 있는 후보를 영구 초과로 판정하지 않는다. 이 경우에도 frame 자체의 in-flight admission은 필요하다. 반면 요청한 loading overlay의16byte는 해당 호출 방식에서 매번 필요한 최소 비용이다. 단위+overlay 최소 비용조차 cap을 넘으면 그 호출의 typed 영구 budget/unit 오류를 반환해 zero-progress 성공을 무한 반복하지 않는다. overlay 없는 호출과 가변 dirty write의 일시 지연은 구분하며, 모든 프레임에서 계속 여유가 없는 입력에 무조건적인 stage 완료 시간을 약속하지 않는다.
 
 GPU allocation은 buffer/texture 전체 크기이고 byte upload chunk와 다르다. create buffer/texture/view/sampler/bind group/shader/pipeline layout/render pipeline의 실제 호출을 quota로 센다. 현재 cold model/sprite는 공유 layout1회와 각 pipeline group3회로 최대7회다. atomic pipeline group은 남은 quota에 들어갈 때 시작하고 minimum group보다 작은 config를 효과 전 거부한다. driver 호출의 latency 상한을 약속하지 않는다.
 
@@ -63,3 +73,5 @@ UI의 Window/Surface를 먼저 같은 thread에서 해제하고 device owner를 
 Luna xhigh device 작업자는 `packet_renderer.rs`, 필요 시 그 private submodule, `renderer.rs`의 GPU 생성 helper와 해당 tests만 소유한다. packet/CPU/lib exports 소유자와 projection/export 목록을 먼저 공유한다. runtime/window/CLI/manifest/lock/CI는 수정하지 않는다. 한 Cargo/장치 lease를 유지한다.
 
 CPU planning/admission·union victim·partial coverage·checked serial/ledger·quota·cancel·foreign IDs·Ready/last-use 구분·max slots1/2의 회귀를 검사한다. 실제 GPU ignored tests는 old-ready pixels를 유지한 여러 pump→Ready→새 actual frame pixels·resource reuse·취소 partial의 cache 미승격·drain을 확인한다. ledger/completion 주입은 deterministic saturation 근거로만 기록하며 실제 stall 시간을 측정한 것으로 부르지 않는다. existing public model/sprite pixel tests도 보존한다. native host/SDK·package/CI/main과 전체 b.3 인수는 후속이다.
+
+2026-10-17 source 감사는 낮춘 scratch1MiB에서도 raw quota4MiB chunk를 그대로 예약해 streamable geometry를 거부하고, padded256byte texture를 staging cap128에 접수한 뒤 clear 경로에서 영구 Busy가 되는 결함을 확인했다. 위 effective/headroom 규칙은 이 결함의 수정 계약이며 아직 통과 증거가 아니다. 기본 quota 그대로의 lowered scratch/staging 진행, dirty active frame과 한 submit의 headroom 공유, padded 최소 단위의 효과 전 영구 거부·정직한 transient Busy 회귀를 추가한 뒤 인수한다.

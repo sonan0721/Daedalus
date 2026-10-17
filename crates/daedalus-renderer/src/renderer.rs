@@ -463,6 +463,54 @@ impl Renderer {
         Ok(())
     }
 
+    /// Preflight the device constraints and exact synchronous create-call count
+    /// for one or both packet pipeline families. Staging uses this before it
+    /// starts a group so a capability error cannot leave half a pipeline family
+    /// installed.
+    pub(crate) fn packet_pipeline_create_calls(
+        &self,
+        model: bool,
+        sprite: bool,
+    ) -> Result<usize, PacketRenderError> {
+        let need_model = model && self.model_packet_mesh_pipeline.is_none();
+        let need_sprite = sprite && self.sprite_packet_pipeline.is_none();
+        if !need_model && !need_sprite {
+            return Ok(0);
+        }
+        let limits = self.device.limits();
+        if limits.max_bind_groups < 3
+            || limits.max_sampled_textures_per_shader_stage < 1
+            || limits.max_samplers_per_shader_stage < 1
+        {
+            return Err(PacketRenderError::DeviceLimit(
+                "textured packet draws require three bind groups, one sampled texture and one sampler".into(),
+            ));
+        }
+        if need_model
+            && (limits.max_vertex_attributes < 11
+                || limits.max_vertex_buffer_array_stride
+                    < std::mem::size_of::<GpuModelVertex>() as u32)
+        {
+            return Err(PacketRenderError::DeviceLimit(
+                "textured model packets require 11 vertex attributes and the imported-model vertex stride".into(),
+            ));
+        }
+        if need_sprite
+            && (limits.max_vertex_attributes < 11 || limits.max_vertex_buffer_array_stride < 128)
+        {
+            return Err(PacketRenderError::DeviceLimit(
+                "sprite packets require 11 vertex attributes and a 128-byte instance stride".into(),
+            ));
+        }
+        let pipelines = usize::from(need_model)
+            .checked_add(usize::from(need_sprite))
+            .and_then(|count| count.checked_mul(3))
+            .ok_or_else(|| PacketRenderError::InvalidPacket("pipeline count overflowed".into()))?;
+        pipelines
+            .checked_add(usize::from(self.model_textures_layout.is_none()))
+            .ok_or_else(|| PacketRenderError::InvalidPacket("pipeline count overflowed".into()))
+    }
+
     pub(crate) fn model_textures_layout(&self) -> Option<&wgpu::BindGroupLayout> {
         self.model_textures_layout.as_ref()
     }
@@ -1360,9 +1408,9 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), Re
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct GpuVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
+pub(crate) struct GpuVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
 }
 
 #[repr(C)]

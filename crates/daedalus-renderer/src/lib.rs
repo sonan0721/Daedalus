@@ -20,12 +20,16 @@ mod window;
 pub mod test_fixtures;
 
 pub use packet::{
-    MeshHandle, MeshResourceLimits, PREPARED_RENDER_METADATA_LIMIT_BYTES, PacketAssetLimits,
-    PacketRenderError, PacketRendererLimits, ProjectRenderResources, RenderInstance,
-    RenderInstanceId, RenderPacket, RenderProjection, RenderView,
+    CpuFrameHandle, CpuGenerationId, CpuReclaimStatus, MeshHandle, MeshResourceLimits,
+    PREPARED_RENDER_METADATA_LIMIT_BYTES, PacketAssetLimits, PacketCpuLimits, PacketCpuOwner,
+    PacketCpuStatus, PacketRenderError, PacketRendererLimits, PacketStageInput,
+    ProjectRenderResources, RenderInstance, RenderInstanceId, RenderPacket, RenderProjection,
+    RenderView, SourcePin,
 };
 pub use packet_renderer::{
-    PacketAssetResourceStats, PacketRenderer, PacketResourceStats, PacketViewSubmission,
+    PacketAssetResourceStats, PacketRenderer, PacketRendererDrainError, PacketRendererDrainStatus,
+    PacketResourceStats, PacketStageError, PacketStageFailure, PacketStageFrameSubmission,
+    PacketStageId, PacketStageLimits, PacketStageState, PacketStageStatus, PacketViewSubmission,
 };
 pub use project::{
     ProjectProjection, ProjectProjectionError, ProjectProjectionLimits, project_snapshot,

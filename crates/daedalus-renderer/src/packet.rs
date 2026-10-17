@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, atomic::AtomicBool},
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -18,6 +18,15 @@ use daedalus_core::{EntityHandle, RenderSnapshot, SessionId, Tick};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+#[path = "packet_cpu.rs"]
+mod packet_cpu;
+pub(crate) use packet_cpu::ManagedResourceSetToken;
+pub use packet_cpu::{
+    CpuFrameHandle, CpuGenerationId, CpuReclaimStatus, PacketCpuLimits, PacketCpuOwner,
+    PacketCpuStatus, PacketStageInput, SourcePin,
+};
+use packet_cpu::{GenerationBacking, GenerationRoots, ResourceRequests, StageRequestBacking};
 
 use crate::{Camera, DirectionalLight, Material, Mesh, RendererError, Vertex};
 
@@ -193,6 +202,28 @@ pub enum PacketRenderError {
         "packet asset limits must be positive, within hard ceilings, and leave a 2x transition reserve"
     )]
     InvalidAssetLimits,
+    #[error("packet CPU limits must be positive, within hard ceilings, and internally consistent")]
+    InvalidCpuLimits,
+    #[error("renderer CPU {resource} budget exceeded ({bytes} bytes > {limit} bytes)")]
+    CpuBudgetExceeded {
+        resource: &'static str,
+        bytes: usize,
+        limit: usize,
+    },
+    #[error("renderer CPU {resource} capacity exceeded ({count} entries > {limit} entries)")]
+    CpuLimitExceeded {
+        resource: &'static str,
+        count: usize,
+        limit: usize,
+    },
+    #[error("renderer CPU generation was cancelled")]
+    CpuCancelled,
+    #[error("renderer CPU generation identifier is foreign, stale, or exhausted")]
+    StaleCpuGeneration,
+    #[error("renderer CPU owner is temporarily pinned by retained packet aliases")]
+    CpuResidencyBusy,
+    #[error("renderer CPU allocation reservation failed")]
+    CpuAllocationFailed,
     #[error("invalid immutable mesh: {0}")]
     InvalidMesh(String),
     #[error("invalid render packet: {0}")]
@@ -337,6 +368,7 @@ struct MeshResource {
     layout_version: u32,
     backing: MeshBacking,
     gpu_bytes: usize,
+    source_pin: Option<SourcePin>,
 }
 
 #[derive(Debug)]
@@ -420,6 +452,7 @@ impl MeshHandle {
             layout_version: MESH_LAYOUT_VERSION,
             backing: MeshBacking::Legacy(mesh),
             gpu_bytes,
+            source_pin: None,
         })))
     }
 
@@ -448,6 +481,7 @@ impl MeshHandle {
             layout_version: MODEL_MESH_LAYOUT_VERSION,
             backing: MeshBacking::Imported(geometry),
             gpu_bytes,
+            source_pin: None,
         })))
     }
 
@@ -479,7 +513,14 @@ impl MeshHandle {
             layout_version: SPRITE_MESH_LAYOUT_VERSION,
             backing: MeshBacking::SpriteQuad(SpriteQuadGeometry { vertices, indices }),
             gpu_bytes: 88,
+            source_pin: None,
         }))
+    }
+
+    fn pin_source(&mut self, source_pin: Option<&SourcePin>) {
+        Arc::get_mut(&mut self.0)
+            .expect("fresh mesh handles are uniquely owned while pinned")
+            .source_pin = source_pin.cloned();
     }
 
     pub fn asset_id(&self) -> &StableId {
@@ -539,6 +580,33 @@ impl MeshHandle {
     }
     pub fn gpu_bytes(&self) -> usize {
         self.0.gpu_bytes
+    }
+
+    fn legacy_copy_bytes(&self) -> Result<usize, PacketRenderError> {
+        match &self.0.backing {
+            MeshBacking::Legacy(mesh) => {
+                let vertices = mesh
+                    .vertices
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Vertex>())
+                    .ok_or_else(|| {
+                        PacketRenderError::InvalidPacket(
+                            "legacy vertex copy size overflowed".into(),
+                        )
+                    })?;
+                let indices = mesh
+                    .indices
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .ok_or_else(|| {
+                        PacketRenderError::InvalidPacket("legacy index copy size overflowed".into())
+                    })?;
+                vertices.checked_add(indices).ok_or_else(|| {
+                    PacketRenderError::InvalidPacket("legacy mesh copy size overflowed".into())
+                })
+            }
+            MeshBacking::Imported(_) | MeshBacking::SpriteQuad(_) => Ok(0),
+        }
     }
     pub(crate) fn key(&self) -> GeometryKey {
         GeometryKey {
@@ -622,6 +690,7 @@ pub(crate) struct ModelTextureUpload {
     pub key: TextureKey,
     pub image: Arc<ImageAsset>,
     pub byte_len: usize,
+    pub _source_pin: Option<SourcePin>,
 }
 
 #[derive(Clone, Debug)]
@@ -702,8 +771,9 @@ impl PartialEq for ModelDrawBinding {
 
 impl Eq for ModelDrawBinding {}
 
-pub(crate) fn texture_upload(
+fn texture_upload_with_pin(
     image: Arc<ImageAsset>,
+    source_pin: Option<&SourcePin>,
 ) -> Result<Arc<ModelTextureUpload>, PacketRenderError> {
     let mut hasher = Sha256::new();
     hasher.update(MODEL_TEXTURE_HASH_DOMAIN);
@@ -749,6 +819,7 @@ pub(crate) fn texture_upload(
         key: TextureKey { hash, format: 1 },
         image,
         byte_len,
+        _source_pin: source_pin.cloned(),
     }))
 }
 
@@ -788,6 +859,9 @@ pub struct RenderInstanceId {
     pub primitive: u32,
 }
 
+/// Dense per-generation draw slots shared by CPU frames and staged GPU input.
+pub(crate) type ManagedSlotAssignments = Arc<HashMap<RenderInstanceId, usize>>;
+
 /// One compact draw instance. Geometry remains shared through `MeshHandle`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderInstance {
@@ -803,6 +877,7 @@ pub struct RenderPacket {
     session: SessionId,
     tick: Tick,
     sequence: u64,
+    authority_snapshot_sequence: Option<u64>,
     project_generation: u64,
     source_digest: String,
     view: RenderView,
@@ -815,6 +890,7 @@ pub struct RenderPacket {
     pub(crate) sprite_order: Arc<[RenderInstanceId]>,
     pub(crate) sprite_geometry: Option<GeometryKey>,
     validated_normals: Arc<OnceLock<HashMap<RenderInstanceId, CachedNormal>>>,
+    source_pin: Option<SourcePin>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -828,6 +904,7 @@ impl PartialEq for RenderPacket {
         self.session == other.session
             && self.tick == other.tick
             && self.sequence == other.sequence
+            && self.authority_snapshot_sequence == other.authority_snapshot_sequence
             && self.project_generation == other.project_generation
             && self.source_digest == other.source_digest
             && self.view == other.view
@@ -860,6 +937,7 @@ impl RenderPacket {
             session,
             tick,
             sequence,
+            authority_snapshot_sequence: None,
             project_generation,
             source_digest: source_digest.into(),
             view: RenderView::perspective(camera),
@@ -872,6 +950,7 @@ impl RenderPacket {
             sprite_order: Arc::from([]),
             sprite_geometry: None,
             validated_normals: Arc::new(OnceLock::new()),
+            source_pin: None,
         }
     }
 
@@ -883,6 +962,9 @@ impl RenderPacket {
     }
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+    pub fn authority_snapshot_sequence(&self) -> Option<u64> {
+        self.authority_snapshot_sequence
     }
     pub fn project_generation(&self) -> u64 {
         self.project_generation
@@ -976,6 +1058,35 @@ impl RenderPacket {
         limits: PacketRendererLimits,
         previous: Option<&RenderPacket>,
     ) -> Result<PacketValidation, PacketRenderError> {
+        self.validate_reusing_with_cancel(limits, previous, &AtomicBool::new(false))
+    }
+
+    pub(crate) fn validate_reusing_with_cancel(
+        &self,
+        limits: PacketRendererLimits,
+        previous: Option<&RenderPacket>,
+        cancelled: &AtomicBool,
+    ) -> Result<PacketValidation, PacketRenderError> {
+        self.validate_reusing_with_slots(limits, previous, None, cancelled)
+    }
+
+    pub(crate) fn validate_managed_reusing_with_cancel(
+        &self,
+        limits: PacketRendererLimits,
+        previous: Option<&RenderPacket>,
+        slot_assignments: &ManagedSlotAssignments,
+        cancelled: &AtomicBool,
+    ) -> Result<PacketValidation, PacketRenderError> {
+        self.validate_reusing_with_slots(limits, previous, Some(slot_assignments), cancelled)
+    }
+
+    fn validate_reusing_with_slots(
+        &self,
+        limits: PacketRendererLimits,
+        previous: Option<&RenderPacket>,
+        slot_assignments: Option<&ManagedSlotAssignments>,
+        cancelled: &AtomicBool,
+    ) -> Result<PacketValidation, PacketRenderError> {
         limits.validate()?;
         self.view.validate()?;
         self.directional_light
@@ -997,6 +1108,11 @@ impl RenderPacket {
                 "instance limit exceeded".into(),
             ));
         }
+        if slot_assignments.is_some_and(|assignments| assignments.len() != self.instances.len()) {
+            return Err(PacketRenderError::InvalidPacket(
+                "managed slot assignment count does not match packet draws".into(),
+            ));
+        }
         let mut ids = HashSet::with_capacity(self.instances.len());
         let mut geometries = HashMap::new();
         let mut normal_matrices = HashMap::with_capacity(self.instances.len());
@@ -1005,10 +1121,18 @@ impl RenderPacket {
         let previous_normals = previous.and_then(|packet| packet.validated_normals.get());
         let mut expanded_vertices = 0usize;
         let mut expanded_indices = 0usize;
-        for instance in self.instances.iter() {
+        for (slot, instance) in self.instances.iter().enumerate() {
+            packet_cpu::check_cancelled(cancelled)?;
             if instance.id.entity.session != self.session || !ids.insert(instance.id) {
                 return Err(PacketRenderError::InvalidPacket(
                     "instance session mismatch or duplicate instance ID".into(),
+                ));
+            }
+            if slot_assignments
+                .is_some_and(|assignments| assignments.get(&instance.id) != Some(&slot))
+            {
+                return Err(PacketRenderError::InvalidPacket(
+                    "managed slot assignments do not match packet draw order".into(),
                 ));
             }
             if !instance.transform.is_finite()
@@ -1151,6 +1275,7 @@ impl RenderPacket {
             normal_matrices,
             model_bindings: Arc::clone(&self.model_bindings),
             sprite_bindings: Arc::clone(&self.sprite_bindings),
+            slot_assignments: slot_assignments.cloned(),
         })
     }
 }
@@ -1186,6 +1311,21 @@ pub(crate) struct PacketValidation {
     pub normal_matrices: HashMap<RenderInstanceId, Mat3>,
     pub model_bindings: Arc<HashMap<RenderInstanceId, ModelDrawBinding>>,
     pub sprite_bindings: Arc<HashMap<RenderInstanceId, SpriteDrawBinding>>,
+    slot_assignments: Option<ManagedSlotAssignments>,
+}
+
+impl PacketValidation {
+    pub(crate) fn resource_requests(&self) -> ResourceRequests<'_> {
+        ResourceRequests {
+            geometries: &self.geometries,
+            model_bindings: &self.model_bindings,
+            sprite_bindings: &self.sprite_bindings,
+        }
+    }
+
+    pub(crate) fn slot_assignments(&self) -> Option<&ManagedSlotAssignments> {
+        self.slot_assignments.as_ref()
+    }
 }
 
 /// Source project resources prepared once, then paired with each authoritative snapshot.
@@ -1198,6 +1338,7 @@ pub struct ProjectRenderResources {
     model_bindings: Arc<HashMap<RenderInstanceId, ModelDrawBinding>>,
     sprite_bindings: Arc<HashMap<RenderInstanceId, SpriteDrawBinding>>,
     sprite_order: Arc<[RenderInstanceId]>,
+    managed_slot_assignments: Option<ManagedSlotAssignments>,
     sprite_geometry: Option<GeometryKey>,
     directional_light: DirectionalLight,
     ambient_color: [f32; 3],
@@ -1205,8 +1346,16 @@ pub struct ProjectRenderResources {
     bindings: Vec<(EntityHandle, ProjectBinding)>,
     geometry_bytes: usize,
     prepared_metadata_bytes: usize,
+    legacy_mesh_copy_bytes: usize,
     expanded_instance_count: usize,
     limits: PacketRendererLimits,
+    source_pin: Option<SourcePin>,
+    stage_requests: Option<Arc<StageRequestBacking>>,
+    managed_resource_set_token: Option<Arc<ManagedResourceSetToken>>,
+    cpu_root_parent_capacity: usize,
+    cpu_root_mesh_capacity: usize,
+    cpu_root_texture_capacity: usize,
+    cpu_root_leaf_capacity: usize,
 }
 
 struct ProjectBinding {
@@ -1238,6 +1387,71 @@ struct PreparedSpriteDraw {
     order_in_layer: i32,
 }
 
+fn build_managed_slot_assignments(
+    bindings: &[(EntityHandle, ProjectBinding)],
+    expected_draw_count: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Result<ManagedSlotAssignments, PacketRenderError> {
+    let mut assignments = HashMap::with_capacity(expected_draw_count);
+    for (entity, binding) in bindings {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
+        if binding.mesh.is_some() {
+            insert_managed_slot(
+                &mut assignments,
+                RenderInstanceId {
+                    entity: *entity,
+                    primitive: 0,
+                },
+            )?;
+        }
+        if let Some(draws) = &binding.model_draws {
+            for draw in draws.iter() {
+                if let Some(cancelled) = cancelled {
+                    packet_cpu::check_cancelled(cancelled)?;
+                }
+                insert_managed_slot(
+                    &mut assignments,
+                    RenderInstanceId {
+                        entity: *entity,
+                        primitive: draw.ordinal,
+                    },
+                )?;
+            }
+        }
+        if binding.sprite_draw.is_some() {
+            insert_managed_slot(
+                &mut assignments,
+                RenderInstanceId {
+                    entity: *entity,
+                    primitive: 0,
+                },
+            )?;
+        }
+    }
+    if assignments.len() != expected_draw_count {
+        return Err(PacketRenderError::InvalidPacket(
+            "managed slot assignment count disagrees with prepared draws".into(),
+        ));
+    }
+    Ok(Arc::new(assignments))
+}
+
+fn insert_managed_slot(
+    assignments: &mut HashMap<RenderInstanceId, usize>,
+    id: RenderInstanceId,
+) -> Result<(), PacketRenderError> {
+    if assignments.contains_key(&id) {
+        return Err(PacketRenderError::InvalidPacket(
+            "prepared draws contain a duplicate render instance ID".into(),
+        ));
+    }
+    let slot = assignments.len();
+    assignments.insert(id, slot);
+    Ok(())
+}
+
 #[derive(Clone)]
 struct PreparedCamera2dState {
     entity: StableId,
@@ -1245,6 +1459,26 @@ struct PreparedCamera2dState {
     vertical_size: f32,
     near: f32,
     far: f32,
+}
+
+fn push_mesh_root(
+    mesh: &MeshHandle,
+    seen: &mut HashSet<usize>,
+    roots: &mut Vec<Option<GenerationBacking>>,
+) {
+    if seen.insert(Arc::as_ptr(&mesh.0) as usize) {
+        roots.push(Some(GenerationBacking::Mesh(Arc::clone(&mesh.0))));
+    }
+}
+
+fn push_texture_root(
+    texture: &Arc<ModelTextureUpload>,
+    seen: &mut HashSet<usize>,
+    roots: &mut Vec<Option<GenerationBacking>>,
+) {
+    if seen.insert(Arc::as_ptr(texture) as usize) {
+        roots.push(Some(GenerationBacking::Texture(Arc::clone(texture))));
+    }
 }
 
 impl ProjectRenderResources {
@@ -1273,7 +1507,71 @@ impl ProjectRenderResources {
         limits: PacketRendererLimits,
         metadata_limit: usize,
     ) -> Result<Self, PacketRenderError> {
+        Self::prepare_with_options(
+            project,
+            project_generation,
+            expected_session,
+            authored_handles,
+            limits,
+            metadata_limit,
+            usize::MAX,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    // Keep generation identity, validation limits, source retention, and byte
+    // budgets explicit; they are separately checked ownership inputs.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_managed(
+        project: &PreparedProject,
+        project_generation: u64,
+        expected_session: SessionId,
+        authored_handles: &BTreeMap<StableId, EntityHandle>,
+        limits: PacketRendererLimits,
+        asset_limits: PacketAssetLimits,
+        source_pin: &SourcePin,
+        resource_set_token: Arc<ManagedResourceSetToken>,
+        cancelled: &AtomicBool,
+        metadata_limit: usize,
+        legacy_copy_limit: usize,
+    ) -> Result<Self, PacketRenderError> {
+        asset_limits.validate()?;
+        Self::prepare_with_options(
+            project,
+            project_generation,
+            expected_session,
+            authored_handles,
+            limits,
+            metadata_limit,
+            legacy_copy_limit,
+            Some(source_pin),
+            Some(asset_limits),
+            Some(cancelled),
+            Some(resource_set_token),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_options(
+        project: &PreparedProject,
+        project_generation: u64,
+        expected_session: SessionId,
+        authored_handles: &BTreeMap<StableId, EntityHandle>,
+        limits: PacketRendererLimits,
+        metadata_limit: usize,
+        legacy_copy_limit: usize,
+        source_pin: Option<&SourcePin>,
+        asset_limits: Option<PacketAssetLimits>,
+        cancelled: Option<&AtomicBool>,
+        managed_resource_set_token: Option<Arc<ManagedResourceSetToken>>,
+    ) -> Result<Self, PacketRenderError> {
         limits.validate()?;
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
         if authored_handles.len() != project.entities().len() {
             return Err(PacketRenderError::InvalidPacket(
                 "authored binding count does not match prepared entities".into(),
@@ -1281,6 +1579,9 @@ impl ProjectRenderResources {
         }
         let mut used_handles = HashSet::with_capacity(authored_handles.len());
         for entity in project.entities() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             let handle = authored_handles.get(&entity.id).ok_or_else(|| {
                 PacketRenderError::InvalidPacket(format!(
                     "missing runtime binding for {}",
@@ -1309,6 +1610,9 @@ impl ProjectRenderResources {
             );
         if let Some(catalog) = asset_catalog {
             for binding in project.model_renderers().values() {
+                if let Some(cancelled) = cancelled {
+                    packet_cpu::check_cancelled(cancelled)?;
+                }
                 let model_id = binding.model_asset_id();
                 if selected_models.contains_key(model_id) {
                     continue;
@@ -1318,15 +1622,27 @@ impl ProjectRenderResources {
                         "model renderer references missing or non-model asset {model_id}"
                     )));
                 };
-                let stats = model_expansion_stats(model, limits)?;
+                let stats = model_expansion_stats(model, limits, cancelled)?;
                 selected_models.insert(model_id, (model, stats));
             }
         }
         let mut expanded_instance_count = 0usize;
         let mut expanded_vertices = 0usize;
         let mut expanded_indices = 0usize;
+        let mut model_binding_count = 0usize;
+        let mut legacy_geometry_reference_count = 0usize;
         for entity in project.entities() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             if let Some(mesh_id) = &entity.mesh {
+                legacy_geometry_reference_count = legacy_geometry_reference_count
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        PacketRenderError::InvalidPacket(
+                            "legacy geometry reference count overflowed".into(),
+                        )
+                    })?;
                 let mesh = project.meshes().get(mesh_id).ok_or_else(|| {
                     PacketRenderError::InvalidPacket(format!(
                         "entity {} references a missing mesh",
@@ -1368,6 +1684,14 @@ impl ProjectRenderResources {
                     limits.max_instances,
                     "prepared model draw count",
                 )?;
+                model_binding_count =
+                    model_binding_count
+                        .checked_add(stats.draws)
+                        .ok_or_else(|| {
+                            PacketRenderError::InvalidPacket(
+                                "model binding count overflowed".into(),
+                            )
+                        })?;
                 expanded_vertices = checked_add_limit(
                     expanded_vertices,
                     stats.vertices,
@@ -1402,9 +1726,46 @@ impl ProjectRenderResources {
                 )?;
             }
         }
-
-        let prepared_metadata_bytes =
-            prepared_render_metadata_bytes(project, &selected_models, expanded_instance_count)?;
+        let sprite_binding_count = project.sprite_renderers().len();
+        let legacy_mesh_copy_bytes = packet_cpu::legacy_copy_bytes(project, cancelled)?;
+        if legacy_mesh_copy_bytes > legacy_copy_limit {
+            return Err(PacketRenderError::CpuBudgetExceeded {
+                resource: "legacy mesh copy",
+                bytes: legacy_mesh_copy_bytes,
+                limit: legacy_copy_limit,
+            });
+        }
+        let mut selected_geometry_count = 0usize;
+        for (_, stats) in selected_models.values() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
+            selected_geometry_count = selected_geometry_count
+                .checked_add(stats.geometry_keys.len())
+                .ok_or_else(|| {
+                    PacketRenderError::InvalidPacket("geometry count estimate overflowed".into())
+                })?;
+        }
+        let estimated_geometry_count = legacy_geometry_reference_count
+            .checked_add(selected_geometry_count)
+            .and_then(|count| count.checked_add(usize::from(sprite_binding_count > 0)))
+            .ok_or_else(|| {
+                PacketRenderError::InvalidPacket("geometry count estimate overflowed".into())
+            })?;
+        let prepared_metadata_bytes = prepared_render_metadata_bytes(
+            project,
+            &selected_models,
+            model_binding_count,
+            sprite_binding_count,
+            estimated_geometry_count,
+            if managed_resource_set_token.is_some() {
+                expanded_instance_count
+            } else {
+                0
+            },
+            source_pin.is_some(),
+            cancelled,
+        )?;
         if prepared_metadata_bytes > metadata_limit {
             return Err(PacketRenderError::AssetByteBudgetExceeded {
                 resource: "prepared CPU metadata",
@@ -1416,6 +1777,9 @@ impl ProjectRenderResources {
         let mut mesh_handles = HashMap::with_capacity(project.meshes().len());
         let mesh_limits = MeshResourceLimits::default();
         for (asset_id, source) in project.meshes() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             let mesh = Mesh::new(
                 source
                     .vertices
@@ -1424,11 +1788,13 @@ impl ProjectRenderResources {
                     .collect(),
                 source.indices.clone(),
             );
-            let handle = MeshHandle::new(asset_id.clone(), project_generation, mesh, mesh_limits)?;
+            let mut handle =
+                MeshHandle::new(asset_id.clone(), project_generation, mesh, mesh_limits)?;
+            handle.pin_source(source_pin);
             mesh_handles.insert(asset_id.clone(), handle);
         }
 
-        let sprite_quad = if project.sprite_renderers().is_empty() {
+        let mut sprite_quad = if project.sprite_renderers().is_empty() {
             None
         } else {
             Some(MeshHandle::sprite_quad(
@@ -1437,6 +1803,9 @@ impl ProjectRenderResources {
                 project_generation,
             ))
         };
+        if let Some(mesh) = &mut sprite_quad {
+            mesh.pin_source(source_pin);
+        }
 
         // Count every selected-scene occurrence for every owning entity before
         // constructing draw templates or hashing any texture payload.
@@ -1444,6 +1813,9 @@ impl ProjectRenderResources {
         let mut texture_uploads = HashMap::<LeafCookKey, Arc<ModelTextureUpload>>::new();
         let mut model_templates = HashMap::<StableId, Arc<[PreparedModelDraw]>>::new();
         for (model_id, (model, stats)) in &selected_models {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             let draws = expand_model_draws(
                 model_id,
                 model,
@@ -1451,6 +1823,8 @@ impl ProjectRenderResources {
                 &mut imported_geometries,
                 &mut texture_uploads,
                 stats.draws,
+                source_pin,
+                cancelled,
             )?;
             model_templates.insert((*model_id).clone(), draws.into());
         }
@@ -1462,6 +1836,9 @@ impl ProjectRenderResources {
                 )
             })?;
             for (entity_id, sprite_binding) in project.sprite_renderers() {
+                if let Some(cancelled) = cancelled {
+                    packet_cpu::check_cancelled(cancelled)?;
+                }
                 let Some(ImportedAsset::Atlas(atlas)) =
                     catalog.asset(sprite_binding.atlas_asset_id())
                 else {
@@ -1470,10 +1847,7 @@ impl ProjectRenderResources {
                         sprite_binding.atlas_asset_id()
                     )));
                 };
-                let region = atlas
-                    .regions()
-                    .iter()
-                    .find(|region| region.id() == sprite_binding.region_id())
+                let region = find_sprite_region(atlas, sprite_binding.region_id(), cancelled)?
                     .ok_or_else(|| {
                         PacketRenderError::InvalidPacket(format!(
                             "sprite renderer {} references missing atlas region {}",
@@ -1492,7 +1866,7 @@ impl ProjectRenderResources {
                 let texture = if let Some(upload) = texture_uploads.get(&image_key) {
                     Arc::clone(upload)
                 } else {
-                    let upload = texture_upload(Arc::clone(image))?;
+                    let upload = texture_upload_with_pin(Arc::clone(image), source_pin)?;
                     texture_uploads.insert(image_key, Arc::clone(&upload));
                     upload
                 };
@@ -1538,11 +1912,33 @@ impl ProjectRenderResources {
         }
         let mut all_geometry_keys = HashSet::new();
         let mut geometry_bytes = 0usize;
-        for handle in mesh_handles
-            .values()
-            .chain(imported_geometries.values())
-            .chain(sprite_quad.iter())
-        {
+        for entity in project.entities() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
+            if let Some(mesh_id) = &entity.mesh {
+                let handle = mesh_handles.get(mesh_id).ok_or_else(|| {
+                    PacketRenderError::InvalidPacket(format!(
+                        "entity {} references a missing mesh",
+                        entity.id
+                    ))
+                })?;
+                if all_geometry_keys.insert(handle.key()) {
+                    geometry_bytes =
+                        geometry_bytes
+                            .checked_add(handle.gpu_bytes())
+                            .ok_or_else(|| {
+                                PacketRenderError::InvalidPacket(
+                                    "project geometry bytes overflowed".into(),
+                                )
+                            })?;
+                }
+            }
+        }
+        for handle in imported_geometries.values().chain(sprite_quad.iter()) {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             if all_geometry_keys.insert(handle.key()) {
                 geometry_bytes =
                     geometry_bytes
@@ -1575,43 +1971,51 @@ impl ProjectRenderResources {
             });
         let camera_2d = project
             .camera_2d()
-            .map(|binding| {
-                let Some(entity) = project
-                    .entities()
-                    .iter()
-                    .find(|entity| entity.id == *binding.entity_id())
-                else {
-                    return Err(PacketRenderError::InvalidPacket(format!(
-                        "2D camera entity {} is missing",
-                        binding.entity_id()
-                    )));
-                };
-                let handle = authored_handles[binding.entity_id()];
-                let camera = camera_from_transform(
-                    entity.transform.translation,
-                    entity.transform.rotation,
-                    entity.transform.scale,
-                    binding.near(),
-                    binding.far(),
-                )?;
-                let view = RenderView::new(
-                    camera,
-                    RenderProjection::Orthographic {
-                        vertical_size: binding.vertical_size(),
-                    },
-                );
-                view.validate()?;
-                Ok((
-                    view,
-                    PreparedCamera2dState {
-                        entity: binding.entity_id().clone(),
-                        handle,
-                        vertical_size: binding.vertical_size(),
-                        near: binding.near(),
-                        far: binding.far(),
-                    },
-                ))
-            })
+            .map(
+                |binding| -> Result<(RenderView, PreparedCamera2dState), PacketRenderError> {
+                    let mut camera_entity = None;
+                    for entity in project.entities() {
+                        if let Some(cancelled) = cancelled {
+                            packet_cpu::check_cancelled(cancelled)?;
+                        }
+                        if entity.id == *binding.entity_id() {
+                            camera_entity = Some(entity);
+                            break;
+                        }
+                    }
+                    let entity = camera_entity.ok_or_else(|| {
+                        PacketRenderError::InvalidPacket(format!(
+                            "2D camera entity {} is missing",
+                            binding.entity_id()
+                        ))
+                    })?;
+                    let handle = authored_handles[binding.entity_id()];
+                    let camera = camera_from_transform(
+                        entity.transform.translation,
+                        entity.transform.rotation,
+                        entity.transform.scale,
+                        binding.near(),
+                        binding.far(),
+                    )?;
+                    let view = RenderView::new(
+                        camera,
+                        RenderProjection::Orthographic {
+                            vertical_size: binding.vertical_size(),
+                        },
+                    );
+                    view.validate()?;
+                    Ok((
+                        view,
+                        PreparedCamera2dState {
+                            entity: binding.entity_id().clone(),
+                            handle,
+                            vertical_size: binding.vertical_size(),
+                            near: binding.near(),
+                            far: binding.far(),
+                        },
+                    ))
+                },
+            )
             .transpose()?;
         let (view, camera_2d) = camera_2d.map_or_else(
             || (RenderView::perspective(camera.clone()), None),
@@ -1640,9 +2044,12 @@ impl ProjectRenderResources {
         let mut prepared_draws = 0usize;
         let mut prepared_vertices = 0usize;
         let mut prepared_indices = 0usize;
-        let mut prepared_model_bindings = HashMap::with_capacity(expanded_instance_count);
-        let mut prepared_sprite_bindings = HashMap::with_capacity(expanded_instance_count);
+        let mut prepared_model_bindings = HashMap::with_capacity(model_binding_count);
+        let mut prepared_sprite_bindings = HashMap::with_capacity(sprite_binding_count);
         for entity in project.entities() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             let handle = authored_handles[&entity.id];
             let mesh = entity
                 .mesh
@@ -1823,25 +2230,161 @@ impl ProjectRenderResources {
                 })
                 .then_with(|| left_binding.stable_id.cmp(&right_binding.stable_id))
         });
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
         let sprite_geometry = sprite_quad.as_ref().map(MeshHandle::key);
+        let model_bindings = Arc::new(prepared_model_bindings);
+        let sprite_bindings = Arc::new(prepared_sprite_bindings);
+        let sprite_order: Arc<[RenderInstanceId]> = sprite_order.into();
+        let managed_slot_assignments = managed_resource_set_token
+            .as_ref()
+            .map(|_| build_managed_slot_assignments(&bindings, expanded_instance_count, cancelled))
+            .transpose()?;
+        let stage_requests =
+            if let (Some(source_pin), Some(asset_limits), Some(resource_set_token)) = (
+                source_pin,
+                asset_limits,
+                managed_resource_set_token.as_ref(),
+            ) {
+                let mut geometries = HashMap::with_capacity(estimated_geometry_count);
+                for (_, binding) in &bindings {
+                    if let Some(cancelled) = cancelled {
+                        packet_cpu::check_cancelled(cancelled)?;
+                    }
+                    if let Some(mesh) = &binding.mesh {
+                        geometries.entry(mesh.key()).or_insert_with(|| mesh.clone());
+                    }
+                    if let Some(draws) = &binding.model_draws {
+                        for draw in draws.iter() {
+                            if let Some(cancelled) = cancelled {
+                                packet_cpu::check_cancelled(cancelled)?;
+                            }
+                            geometries
+                                .entry(draw.mesh.key())
+                                .or_insert_with(|| draw.mesh.clone());
+                        }
+                    }
+                    if let Some((mesh, _, _)) = &binding.sprite_draw {
+                        geometries.entry(mesh.key()).or_insert_with(|| mesh.clone());
+                    }
+                }
+                let mut texture_keys = HashSet::with_capacity(texture_uploads.len());
+                for texture in texture_uploads.values() {
+                    if let Some(cancelled) = cancelled {
+                        packet_cpu::check_cancelled(cancelled)?;
+                    }
+                    texture_keys.insert(texture.key);
+                }
+                Some(Arc::new(StageRequestBacking {
+                    session: expected_session,
+                    project_generation,
+                    source_digest: project.digest().to_owned(),
+                    geometry_count: geometries.len(),
+                    texture_count: texture_keys.len(),
+                    draw_count: expanded_instance_count,
+                    model_draw_count: model_binding_count,
+                    sprite_draw_count: sprite_binding_count,
+                    expanded_vertex_count: expanded_vertices,
+                    expanded_index_count: expanded_indices,
+                    packet_limits: limits,
+                    asset_limits,
+                    source_pin: source_pin.clone(),
+                    geometries: Arc::new(geometries),
+                    model_bindings: Arc::clone(&model_bindings),
+                    sprite_bindings: Arc::clone(&sprite_bindings),
+                    slot_assignments: Arc::clone(managed_slot_assignments.as_ref().ok_or_else(
+                        || {
+                            PacketRenderError::InvalidPacket(
+                                "managed stage request is missing slot assignments".into(),
+                            )
+                        },
+                    )?),
+                    resource_set_token: Arc::clone(resource_set_token),
+                }))
+            } else {
+                None
+            };
+        let actual_metadata_bytes = prepared_render_metadata_bytes(
+            project,
+            &selected_models,
+            model_bindings.capacity(),
+            sprite_bindings.capacity(),
+            stage_requests
+                .as_ref()
+                .map_or(0, |requests| requests.geometries.capacity()),
+            managed_slot_assignments
+                .as_ref()
+                .map_or(0, |assignments| assignments.capacity()),
+            stage_requests.is_some(),
+            cancelled,
+        )?;
+        if actual_metadata_bytes > metadata_limit {
+            return Err(PacketRenderError::AssetByteBudgetExceeded {
+                resource: "prepared CPU metadata",
+                bytes: actual_metadata_bytes,
+                limit: metadata_limit,
+            });
+        }
+        let actual_legacy_mesh_copy_bytes =
+            mesh_handles.values().try_fold(0usize, |sum, mesh| {
+                sum.checked_add(mesh.legacy_copy_bytes()?).ok_or_else(|| {
+                    PacketRenderError::InvalidPacket("legacy mesh copy size overflowed".into())
+                })
+            })?;
+        if actual_legacy_mesh_copy_bytes > legacy_copy_limit {
+            return Err(PacketRenderError::CpuBudgetExceeded {
+                resource: "legacy mesh copy",
+                bytes: actual_legacy_mesh_copy_bytes,
+                limit: legacy_copy_limit,
+            });
+        }
+        let cpu_root_parent_capacity =
+            5usize.checked_add(selected_models.len()).ok_or_else(|| {
+                PacketRenderError::InvalidPacket("prepared root count overflowed".into())
+            })?;
+        let cpu_root_mesh_capacity = legacy_geometry_reference_count
+            .checked_add(selected_geometry_count)
+            .and_then(|count| count.checked_add(usize::from(sprite_quad.is_some())))
+            .ok_or_else(|| {
+                PacketRenderError::InvalidPacket("prepared root count overflowed".into())
+            })?;
+        let cpu_root_texture_capacity = texture_uploads.len();
+        let cpu_root_leaf_capacity = cpu_root_mesh_capacity
+            .checked_add(cpu_root_texture_capacity)
+            .and_then(|count| {
+                count.checked_add(usize::from(managed_resource_set_token.is_some()) * 2)
+            })
+            .ok_or_else(|| {
+                PacketRenderError::InvalidPacket("prepared root count overflowed".into())
+            })?;
         Ok(Self {
             expected_session,
             project_generation,
             source_digest: project.digest().to_owned(),
             view,
             camera_2d,
-            model_bindings: Arc::new(prepared_model_bindings),
-            sprite_bindings: Arc::new(prepared_sprite_bindings),
-            sprite_order: sprite_order.into(),
+            model_bindings,
+            sprite_bindings,
+            sprite_order,
+            managed_slot_assignments,
             sprite_geometry,
             directional_light,
             ambient_color,
             clear_color,
             bindings,
             geometry_bytes,
-            prepared_metadata_bytes,
+            prepared_metadata_bytes: actual_metadata_bytes,
+            legacy_mesh_copy_bytes: actual_legacy_mesh_copy_bytes,
             expanded_instance_count,
             limits,
+            source_pin: source_pin.cloned(),
+            stage_requests,
+            managed_resource_set_token,
+            cpu_root_parent_capacity,
+            cpu_root_mesh_capacity,
+            cpu_root_texture_capacity,
+            cpu_root_leaf_capacity,
         })
     }
 
@@ -1851,6 +2394,97 @@ impl ProjectRenderResources {
 
     pub fn prepared_metadata_bytes(&self) -> usize {
         self.prepared_metadata_bytes
+    }
+
+    fn legacy_mesh_copy_bytes(&self) -> usize {
+        self.legacy_mesh_copy_bytes
+    }
+
+    fn stage_requests(&self) -> Result<Arc<StageRequestBacking>, PacketRenderError> {
+        self.stage_requests.as_ref().map(Arc::clone).ok_or_else(|| {
+            PacketRenderError::InvalidPacket(
+                "CPU generation has no managed stage request backing".into(),
+            )
+        })
+    }
+
+    fn cpu_roots(&self, cancelled: &AtomicBool) -> Result<GenerationRoots, PacketRenderError> {
+        let stage = self
+            .stage_requests
+            .as_ref()
+            .expect("managed CPU resources always have a stage projection");
+        let mut parents = Vec::with_capacity(self.cpu_root_parent_capacity);
+        parents.extend([
+            Some(GenerationBacking::Stage(Arc::clone(stage))),
+            Some(GenerationBacking::Geometries(Arc::clone(&stage.geometries))),
+            Some(GenerationBacking::ModelBindings(Arc::clone(
+                &self.model_bindings,
+            ))),
+            Some(GenerationBacking::SpriteBindings(Arc::clone(
+                &self.sprite_bindings,
+            ))),
+            Some(GenerationBacking::SpriteOrder(Arc::clone(
+                &self.sprite_order,
+            ))),
+        ]);
+        let mut parent_ids = HashSet::with_capacity(self.cpu_root_parent_capacity);
+        parent_ids.insert(Arc::as_ptr(stage) as usize);
+        parent_ids.insert(Arc::as_ptr(&stage.geometries) as usize);
+        parent_ids.insert(Arc::as_ptr(&self.model_bindings) as usize);
+        parent_ids.insert(Arc::as_ptr(&self.sprite_bindings) as usize);
+        parent_ids.insert(Arc::as_ptr(&self.sprite_order) as *const () as usize);
+        let mut leaves = Vec::with_capacity(self.cpu_root_leaf_capacity);
+        let mut mesh_ids = HashSet::with_capacity(self.cpu_root_mesh_capacity);
+        let mut texture_ids = HashSet::with_capacity(self.cpu_root_texture_capacity);
+        for mesh in stage.geometries.values() {
+            packet_cpu::check_cancelled(cancelled)?;
+            push_mesh_root(mesh, &mut mesh_ids, &mut leaves);
+        }
+        for binding in self.model_bindings.values() {
+            packet_cpu::check_cancelled(cancelled)?;
+            if let Some(texture) = &binding.texture {
+                push_texture_root(texture, &mut texture_ids, &mut leaves);
+            }
+        }
+        for binding in self.sprite_bindings.values() {
+            packet_cpu::check_cancelled(cancelled)?;
+            push_texture_root(&binding.texture, &mut texture_ids, &mut leaves);
+        }
+        for (_, binding) in &self.bindings {
+            packet_cpu::check_cancelled(cancelled)?;
+            if let Some(mesh) = &binding.mesh {
+                push_mesh_root(mesh, &mut mesh_ids, &mut leaves);
+            }
+            if let Some(draws) = &binding.model_draws {
+                let id = Arc::as_ptr(draws) as *const () as usize;
+                if parent_ids.insert(id) {
+                    parents.push(Some(GenerationBacking::ModelTemplate(Arc::clone(draws))));
+                }
+                for draw in draws.iter() {
+                    push_mesh_root(&draw.mesh, &mut mesh_ids, &mut leaves);
+                    if let Some(texture) = &draw.texture {
+                        push_texture_root(texture, &mut texture_ids, &mut leaves);
+                    }
+                }
+            }
+            if let Some((mesh, _, sprite)) = &binding.sprite_draw {
+                push_mesh_root(mesh, &mut mesh_ids, &mut leaves);
+                push_texture_root(&sprite.texture, &mut texture_ids, &mut leaves);
+            }
+        }
+        if let Some(token) = &self.managed_resource_set_token {
+            packet_cpu::check_cancelled(cancelled)?;
+            leaves.push(Some(GenerationBacking::ResourceSetToken(Arc::clone(token))));
+            let assignments = self.managed_slot_assignments.as_ref().ok_or_else(|| {
+                PacketRenderError::InvalidPacket(
+                    "managed CPU resources are missing slot assignments".into(),
+                )
+            })?;
+            leaves.push(Some(GenerationBacking::SlotAssignments(Arc::clone(
+                assignments,
+            ))));
+        }
+        Ok(GenerationRoots::new(parents, leaves))
     }
 
     pub fn source_digest(&self) -> &str {
@@ -1871,6 +2505,46 @@ impl ProjectRenderResources {
         snapshot: &RenderSnapshot,
         view_override: Option<&RenderView>,
     ) -> Result<RenderPacket, PacketRenderError> {
+        self.extract_with_identity(
+            snapshot,
+            snapshot.sequence,
+            None,
+            view_override,
+            self.source_pin.as_ref(),
+            None,
+        )
+    }
+
+    fn extract_managed(
+        &self,
+        snapshot: &RenderSnapshot,
+        publication_sequence: u64,
+        view_override: Option<&RenderView>,
+        source_pin: &SourcePin,
+        cancelled: &AtomicBool,
+    ) -> Result<RenderPacket, PacketRenderError> {
+        self.extract_with_identity(
+            snapshot,
+            publication_sequence,
+            Some(snapshot.sequence),
+            view_override,
+            Some(source_pin),
+            Some(cancelled),
+        )
+    }
+
+    fn extract_with_identity(
+        &self,
+        snapshot: &RenderSnapshot,
+        publication_sequence: u64,
+        authority_snapshot_sequence: Option<u64>,
+        view_override: Option<&RenderView>,
+        source_pin: Option<&SourcePin>,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<RenderPacket, PacketRenderError> {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
         if snapshot.entities.len() > self.limits.max_instances {
             return Err(PacketRenderError::InvalidPacket(
                 "snapshot entity count exceeds packet limit".into(),
@@ -1878,6 +2552,9 @@ impl ProjectRenderResources {
         }
         let mut snapshot_by_handle = HashMap::with_capacity(snapshot.entities.len());
         for entry in snapshot.entities.iter() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             if entry.entity.session != self.expected_session
                 || snapshot_by_handle
                     .insert(entry.entity, entry.transform)
@@ -1892,6 +2569,9 @@ impl ProjectRenderResources {
         let mut expanded_vertices = 0usize;
         let mut expanded_indices = 0usize;
         for (handle, binding) in &self.bindings {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             let transform_data = snapshot_by_handle.get(handle).ok_or_else(|| {
                 PacketRenderError::InvalidPacket(format!(
                     "snapshot is missing authored entity {}",
@@ -1945,6 +2625,9 @@ impl ProjectRenderResources {
             }
             if let Some(draws) = &binding.model_draws {
                 for draw in draws.iter() {
+                    if let Some(cancelled) = cancelled {
+                        packet_cpu::check_cancelled(cancelled)?;
+                    }
                     let draw_transform = transform * draw.node_global;
                     if !is_affine_matrix(draw_transform) {
                         return Err(PacketRenderError::InvalidPacket(format!(
@@ -2045,10 +2728,10 @@ impl ProjectRenderResources {
             self.view.clone()
         };
         view.validate()?;
-        Ok(RenderPacket::new(
+        let mut packet = RenderPacket::new(
             self.expected_session,
             snapshot.tick,
-            snapshot.sequence,
+            publication_sequence,
             self.project_generation,
             self.source_digest.clone(),
             view.camera().clone(),
@@ -2056,14 +2739,17 @@ impl ProjectRenderResources {
             self.ambient_color,
             self.clear_color,
             instances,
-        )
-        .with_shared_model_bindings(Arc::clone(&self.model_bindings))
-        .with_shared_sprite_bindings(
-            Arc::clone(&self.sprite_bindings),
-            Arc::clone(&self.sprite_order),
-            self.sprite_geometry,
-        )
-        .with_view(view))
+        );
+        packet.authority_snapshot_sequence = authority_snapshot_sequence;
+        packet.source_pin = source_pin.cloned();
+        Ok(packet
+            .with_shared_model_bindings(Arc::clone(&self.model_bindings))
+            .with_shared_sprite_bindings(
+                Arc::clone(&self.sprite_bindings),
+                Arc::clone(&self.sprite_order),
+                self.sprite_geometry,
+            )
+            .with_view(view))
     }
 }
 
@@ -2133,10 +2819,18 @@ fn checked_add_limit(
     Ok(value)
 }
 
+// Each capacity is a distinct retained allocation used by the shared preflight
+// and reconciliation estimator; keep the accounting dimensions explicit.
+#[allow(clippy::too_many_arguments)]
 fn prepared_render_metadata_bytes(
     project: &PreparedProject,
     selected_models: &HashMap<&StableId, (&Arc<StaticModel>, ModelExpansionStats)>,
-    table_capacity: usize,
+    model_table_capacity: usize,
+    sprite_table_capacity: usize,
+    geometry_table_capacity: usize,
+    slot_assignment_capacity: usize,
+    managed: bool,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<usize, PacketRenderError> {
     let mut bytes = std::mem::size_of::<ProjectRenderResources>();
     let mut add = |amount: usize| -> Result<(), PacketRenderError> {
@@ -2184,32 +2878,45 @@ fn prepared_render_metadata_bytes(
     )?)?;
     add(aligned_string(project.digest())?)?;
     for entity in project.entities() {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
         add(aligned_string(entity.id.as_str())?)?;
     }
 
-    let mut referenced_legacy_meshes = HashSet::new();
-    for entity in project.entities() {
-        if let Some(mesh_id) = &entity.mesh
-            && referenced_legacy_meshes.insert(mesh_id)
-        {
-            add(aligned_string(mesh_id.as_str())?)?;
+    for mesh_id in project.meshes().keys() {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
         }
+        add(aligned_string(mesh_id.as_str())?)?;
     }
 
     let mut imported_geometry_ids = HashMap::<LeafCookKey, usize>::new();
     let mut image_keys = HashSet::<LeafCookKey>::new();
     let mut template_draws = 0usize;
     for (model_id, (_, stats)) in selected_models {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
+        add(aligned_string(model_id.as_str())?)?;
         template_draws = template_draws.checked_add(stats.draws).ok_or_else(|| {
             PacketRenderError::InvalidPacket("prepared model template count overflowed".into())
         })?;
         for key in &stats.geometry_keys {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             imported_geometry_ids
                 .entry(*key)
                 .and_modify(|length| *length = (*length).max(model_id.as_str().len()))
                 .or_insert(model_id.as_str().len());
         }
-        image_keys.extend(stats.image_keys.iter().copied());
+        for key in &stats.image_keys {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
+            image_keys.insert(*key);
+        }
     }
     let unique_models = selected_models.len();
     if unique_models > 0 {
@@ -2228,17 +2935,16 @@ fn prepared_render_metadata_bytes(
             )
         })?;
         for (entity_id, binding) in project.sprite_renderers() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             let Some(ImportedAsset::Atlas(atlas)) = catalog.asset(binding.atlas_asset_id()) else {
                 return Err(PacketRenderError::InvalidPacket(format!(
                     "sprite renderer references missing or non-atlas asset {}",
                     binding.atlas_asset_id()
                 )));
             };
-            if !atlas
-                .regions()
-                .iter()
-                .any(|region| region.id() == binding.region_id())
-            {
+            if find_sprite_region(atlas, binding.region_id(), cancelled)?.is_none() {
                 return Err(PacketRenderError::InvalidPacket(format!(
                     "sprite renderer {} references missing atlas region {}",
                     binding.component_id(),
@@ -2270,12 +2976,8 @@ fn prepared_render_metadata_bytes(
         std::mem::size_of::<HashMap<RenderInstanceId, ModelDrawBinding>>()
             .checked_add(arc_header_bytes)
             .and_then(|header| {
-                hash_map_storage_bytes(
-                    table_capacity,
-                    std::mem::size_of::<RenderInstanceId>(),
-                    std::mem::size_of::<ModelDrawBinding>(),
-                )
-                .and_then(|buckets| header.checked_add(buckets))
+                hash_map_storage_bytes::<RenderInstanceId, ModelDrawBinding>(model_table_capacity)
+                    .and_then(|buckets| header.checked_add(buckets))
             })
             .ok_or_else(|| {
                 PacketRenderError::InvalidPacket(
@@ -2287,12 +2989,8 @@ fn prepared_render_metadata_bytes(
         std::mem::size_of::<HashMap<RenderInstanceId, SpriteDrawBinding>>()
             .checked_add(arc_header_bytes)
             .and_then(|header| {
-                hash_map_storage_bytes(
-                    table_capacity,
-                    std::mem::size_of::<RenderInstanceId>(),
-                    std::mem::size_of::<SpriteDrawBinding>(),
-                )
-                .and_then(|buckets| header.checked_add(buckets))
+                hash_map_storage_bytes::<RenderInstanceId, SpriteDrawBinding>(sprite_table_capacity)
+                    .and_then(|buckets| header.checked_add(buckets))
             })
             .ok_or_else(|| {
                 PacketRenderError::InvalidPacket(
@@ -2311,7 +3009,8 @@ fn prepared_render_metadata_bytes(
 
     let texture_wrapper_bytes = std::mem::size_of::<ModelTextureUpload>() + arc_header_bytes;
     add(scaled(image_keys.len(), texture_wrapper_bytes)?)?;
-    let geometry_wrapper_count = referenced_legacy_meshes
+    let geometry_wrapper_count = project
+        .meshes()
         .len()
         .checked_add(imported_geometry_ids.len())
         .and_then(|count| count.checked_add(usize::from(sprite_count > 0)))
@@ -2325,29 +3024,94 @@ fn prepared_render_metadata_bytes(
     for id_length in imported_geometry_ids.values() {
         add(aligned_string_length(*id_length)?)?;
     }
+    if managed {
+        let parent_roots = 5usize.checked_add(unique_models).ok_or_else(|| {
+            PacketRenderError::InvalidPacket("prepared root count overflowed".into())
+        })?;
+        let leaf_roots = geometry_wrapper_count
+            .checked_add(image_keys.len())
+            .and_then(|count| count.checked_add(2))
+            .ok_or_else(|| {
+                PacketRenderError::InvalidPacket("prepared root count overflowed".into())
+            })?;
+        add(std::mem::size_of::<packet_cpu::GenerationRecord>())?;
+        add(std::mem::size_of::<GenerationRoots>())?;
+        add(scaled(
+            parent_roots,
+            std::mem::size_of::<Option<GenerationBacking>>(),
+        )?)?;
+        add(scaled(
+            leaf_roots,
+            std::mem::size_of::<Option<GenerationBacking>>(),
+        )?)?;
+        add(std::mem::size_of::<StageRequestBacking>()
+            .checked_add(arc_header_bytes)
+            .and_then(|value| value.checked_add(aligned_string(project.digest()).ok()?))
+            .and_then(|value| {
+                value.checked_add(std::mem::size_of::<HashMap<GeometryKey, MeshHandle>>())
+            })
+            .and_then(|value| value.checked_add(arc_header_bytes))
+            .and_then(|value| {
+                hash_map_storage_bytes::<GeometryKey, MeshHandle>(geometry_table_capacity)
+                    .and_then(|map_bytes| value.checked_add(map_bytes))
+            })
+            .ok_or_else(|| {
+                PacketRenderError::InvalidPacket(
+                    "stage request metadata estimate overflowed".into(),
+                )
+            })?)?;
+        add(std::mem::size_of::<ManagedResourceSetToken>()
+            .checked_add(arc_header_bytes)
+            .ok_or_else(|| {
+                PacketRenderError::InvalidPacket("resource-set token estimate overflowed".into())
+            })?)?;
+        add(std::mem::size_of::<HashMap<RenderInstanceId, usize>>()
+            .checked_add(arc_header_bytes)
+            .and_then(|header| {
+                hash_map_storage_bytes::<RenderInstanceId, usize>(slot_assignment_capacity)
+                    .and_then(|buckets| header.checked_add(buckets))
+            })
+            .ok_or_else(|| {
+                PacketRenderError::InvalidPacket(
+                    "managed slot assignment metadata estimate overflowed".into(),
+                )
+            })?)?;
+    }
     Ok(bytes)
 }
 
-fn hash_map_storage_bytes(entries: usize, key_bytes: usize, value_bytes: usize) -> Option<usize> {
+pub(super) fn hash_map_storage_bytes<K, V>(entries: usize) -> Option<usize> {
+    hash_table_storage_bytes::<(K, V)>(entries)
+}
+
+pub(super) fn hash_set_storage_bytes<K>(entries: usize) -> Option<usize> {
+    hash_table_storage_bytes::<K>(entries)
+}
+
+fn hash_table_storage_bytes<T>(entries: usize) -> Option<usize> {
     if entries == 0 {
         return Some(0);
     }
-    // HashMap uses a power-of-two bucket allocation and reserves at most a
-    // 7/8 load factor. Include one control byte per bucket plus group and
-    // alignment slack in the logical prepared-metadata charge.
+    // Hash tables use power-of-two buckets and reserve at most a 7/8 load
+    // factor. `T` is the complete `(K, V)` tuple for maps or `K` for sets, so
+    // per-bucket field padding is included before control/alignment slack.
     let desired_buckets = entries.checked_mul(8)?.checked_add(6)?.checked_div(7)?;
     let bucket_count = desired_buckets.max(4).checked_next_power_of_two()?;
     bucket_count
-        .checked_mul(key_bytes.checked_add(value_bytes)?.checked_add(1)?)?
+        .checked_mul(std::mem::size_of::<T>().checked_add(1)?)?
         .checked_add(16 + 15)
 }
 
 fn model_expansion_stats(
     model: &StaticModel,
     limits: PacketRendererLimits,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<ModelExpansionStats, PacketRenderError> {
     let mut children = vec![Vec::<u32>::new(); model.nodes().len()];
     for (child_index, node) in model.nodes().iter().enumerate() {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
         if let Some(parent) = node.parent() {
             let siblings = children.get_mut(parent as usize).ok_or_else(|| {
                 PacketRenderError::InvalidPacket("model node parent is out of range".into())
@@ -2365,6 +3129,9 @@ fn model_expansion_stats(
     for root in model.selected_scene_roots() {
         stack.push((*root, None));
         while let Some((index, parent_global)) = stack.pop() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             if !visited.insert(index) {
                 return Err(PacketRenderError::InvalidPacket(
                     "selected model scene repeats or cycles a node".into(),
@@ -2386,6 +3153,9 @@ fn model_expansion_stats(
                 ));
             }
             for primitive_index in node.primitive_indices() {
+                if let Some(cancelled) = cancelled {
+                    packet_cpu::check_cancelled(cancelled)?;
+                }
                 let primitive = model
                     .primitives()
                     .get(*primitive_index as usize)
@@ -2437,6 +3207,9 @@ fn model_expansion_stats(
                 }
             }
             for child in children[index as usize].iter().rev() {
+                if let Some(cancelled) = cancelled {
+                    packet_cpu::check_cancelled(cancelled)?;
+                }
                 stack.push((*child, Some(global)));
             }
         }
@@ -2444,6 +3217,9 @@ fn model_expansion_stats(
     Ok(stats)
 }
 
+// Model interning maps, expected preflight count, source pin, and cancellation
+// are independent inputs to this one model-expansion pass.
+#[allow(clippy::too_many_arguments)]
 fn expand_model_draws(
     model_id: &StableId,
     model: &StaticModel,
@@ -2451,9 +3227,14 @@ fn expand_model_draws(
     geometry_handles: &mut HashMap<LeafCookKey, MeshHandle>,
     texture_uploads: &mut HashMap<LeafCookKey, Arc<ModelTextureUpload>>,
     expected_draw_count: usize,
+    source_pin: Option<&SourcePin>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<Vec<PreparedModelDraw>, PacketRenderError> {
     let mut children = vec![Vec::<u32>::new(); model.nodes().len()];
     for (child_index, node) in model.nodes().iter().enumerate() {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
         if let Some(parent) = node.parent() {
             let children = children.get_mut(parent as usize).ok_or_else(|| {
                 PacketRenderError::InvalidPacket(format!(
@@ -2472,6 +3253,9 @@ fn expand_model_draws(
     for root in model.selected_scene_roots() {
         stack.push((*root, None));
         while let Some((index, parent_global)) = stack.pop() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             if !visited.insert(index) {
                 return Err(PacketRenderError::InvalidPacket(format!(
                     "model {model_id} selected scene repeats or cycles a node"
@@ -2497,6 +3281,9 @@ fn expand_model_draws(
             occurrences.push((index, global));
             let child_nodes = &children[index as usize];
             for child in child_nodes.iter().rev() {
+                if let Some(cancelled) = cancelled {
+                    packet_cpu::check_cancelled(cancelled)?;
+                }
                 stack.push((*child, Some(global)));
             }
         }
@@ -2504,8 +3291,14 @@ fn expand_model_draws(
 
     let mut draws = Vec::with_capacity(expected_draw_count);
     for (node_index, node_global) in occurrences {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
         let node = &model.nodes()[node_index as usize];
         for primitive_index in node.primitive_indices() {
+            if let Some(cancelled) = cancelled {
+                packet_cpu::check_cancelled(cancelled)?;
+            }
             let primitive = model
                 .primitives()
                 .get(*primitive_index as usize)
@@ -2518,7 +3311,9 @@ fn expand_model_draws(
             let mesh = if let Some(mesh) = geometry_handles.get(&geometry.key()).cloned() {
                 mesh
             } else {
-                let mesh = MeshHandle::imported(model_id.clone(), project_generation, geometry)?;
+                let mut mesh =
+                    MeshHandle::imported(model_id.clone(), project_generation, geometry)?;
+                mesh.pin_source(source_pin);
                 geometry_handles.insert(primitive.geometry().key(), mesh.clone());
                 mesh
             };
@@ -2565,7 +3360,7 @@ fn expand_model_draws(
                 let upload = if let Some(upload) = texture_uploads.get(&image_key) {
                     Arc::clone(upload)
                 } else {
-                    let upload = texture_upload(Arc::clone(owned.asset()))?;
+                    let upload = texture_upload_with_pin(Arc::clone(owned.asset()), source_pin)?;
                     texture_uploads.insert(image_key, Arc::clone(&upload));
                     upload
                 };
@@ -2597,6 +3392,22 @@ fn geometry_has_no_uv(mesh: &MeshHandle) -> bool {
         .is_none_or(|geometry| geometry.uv0().is_none())
 }
 
+fn find_sprite_region<'a>(
+    atlas: &'a daedalus_content::assets::SpriteAtlas,
+    region_id: &StableId,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Option<&'a daedalus_content::assets::AtlasRegion>, PacketRenderError> {
+    for region in atlas.regions() {
+        if let Some(cancelled) = cancelled {
+            packet_cpu::check_cancelled(cancelled)?;
+        }
+        if region.id() == region_id {
+            return Ok(Some(region));
+        }
+    }
+    Ok(None)
+}
+
 fn is_affine_matrix(matrix: Mat4) -> bool {
     if !matrix.is_finite() {
         return false;
@@ -2620,7 +3431,11 @@ mod sprite_packet_tests;
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
-        sync::Arc,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread::{self, ThreadId},
     };
 
     use daedalus_content::scene::StableId;
@@ -2638,9 +3453,9 @@ mod tests {
     use crate::{Mesh, PacketAssetLimits, Vertex};
 
     use super::{
-        MeshHandle, MeshResourceLimits, PacketRendererLimits, PreparedModelDraw,
-        ProjectRenderResources, RenderInstance, RenderInstanceId, RenderPacket,
-        hash_map_storage_bytes,
+        GeometryKey, MeshHandle, MeshResourceLimits, PacketCpuLimits, PacketCpuOwner,
+        PacketRendererLimits, PreparedModelDraw, ProjectRenderResources, RenderInstance,
+        RenderInstanceId, RenderPacket, SourcePin, hash_map_storage_bytes,
     };
 
     fn triangle() -> Mesh {
@@ -2666,6 +3481,162 @@ mod tests {
             scene,
             &BTreeMap::from([("triangle.json".to_owned(), mesh.to_vec())]),
             ProjectLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn prepared_two_instances_with_unused_legacy_mesh() -> PreparedProject {
+        let scene = br#"{"schema_version":1,"revision":1,"entities":[
+            {"id":"entity:a","components":[{"id":"component:mesh:a","type_id":"daedalus.mesh_renderer","asset_refs":["asset:triangle"],"data":{"mesh":"asset:triangle"}}]},
+            {"id":"entity:b","components":[{"id":"component:mesh:b","type_id":"daedalus.mesh_renderer","asset_refs":["asset:triangle"],"data":{"mesh":"asset:triangle"}}]}
+        ],"assets":[
+            {"id":"asset:triangle","kind":"daedalus.mesh","uri":"triangle.json","metadata":{}},
+            {"id":"asset:unused","kind":"daedalus.mesh","uri":"unused.json","metadata":{}}
+        ]}"#;
+        let manifest =
+            br#"{"schema_version":1,"name":"packet test with unused mesh","scene":"scene.json"}"#;
+        let mesh = br#"{"schema_version":1,"vertices":[{"position":[0.0,0.0,0.0],"normal":[0.0,0.0,1.0]},{"position":[1.0,0.0,0.0],"normal":[0.0,0.0,1.0]},{"position":[0.0,1.0,0.0],"normal":[0.0,0.0,1.0]}],"indices":[0,1,2]}"#;
+        prepare_project_from_bytes(
+            manifest,
+            scene,
+            &BTreeMap::from([
+                ("triangle.json".to_owned(), mesh.to_vec()),
+                ("unused.json".to_owned(), mesh.to_vec()),
+            ]),
+            ProjectLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn prepared_empty_project() -> PreparedProject {
+        prepare_project_from_bytes(
+            br#"{"schema_version":1,"name":"empty packet test","scene":"scene.json"}"#,
+            br#"{"schema_version":1,"revision":1,"entities":[],"assets":[]}"#,
+            &BTreeMap::new(),
+            ProjectLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn prepared_sprite_instances() -> PreparedProject {
+        let mut entities = ["entity:sprite-a", "entity:sprite-b"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, entity_id)| {
+                json!({
+                    "id": entity_id,
+                    "components": [
+                        {
+                            "id": format!("component:transform:{index}"),
+                            "type_id": "daedalus.transform",
+                            "asset_refs": [],
+                            "data": {
+                                "translation": [0.0, 0.0, 0.0],
+                                "rotation": [0.0, 0.0, 0.0, 1.0],
+                                "scale": [1.0, 1.0, 1.0]
+                            }
+                        },
+                        {
+                            "id": format!("component:sprite:{index}"),
+                            "type_id": "daedalus.sprite_renderer",
+                            "asset_refs": ["asset:atlas"],
+                            "data": {
+                                "atlas": "asset:atlas",
+                                "region": "region:unit",
+                                "tint": [1.0, 1.0, 1.0, 1.0],
+                                "sorting_layer": 0,
+                                "order_in_layer": index
+                            }
+                        }
+                    ]
+                })
+            })
+            .collect::<Vec<_>>();
+        entities.push(json!({
+            "id": "entity:camera",
+            "components": [
+                {
+                    "id": "component:transform:camera",
+                    "type_id": "daedalus.transform",
+                    "asset_refs": [],
+                    "data": {
+                        "translation": [0.0, 0.0, 10.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0]
+                    }
+                },
+                {
+                    "id": "component:camera2d",
+                    "type_id": "daedalus.camera_2d",
+                    "asset_refs": [],
+                    "data": {"vertical_size": 8.0, "near": 0.1, "far": 100.0}
+                }
+            ]
+        }));
+        let scene = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "revision": 1,
+            "entities": entities,
+            "assets": [
+                {
+                    "id": "asset:image",
+                    "kind": "daedalus.image",
+                    "uri": "sprites/sheet.png",
+                    "metadata": {
+                        "schema_version": 1,
+                        "role": "sprite_atlas_srgb",
+                        "mip_policy": "none",
+                        "sampler": {
+                            "min_filter": "nearest",
+                            "mag_filter": "nearest",
+                            "mipmap_filter": "none",
+                            "wrap_u": "clamp_to_edge",
+                            "wrap_v": "clamp_to_edge"
+                        }
+                    }
+                },
+                {
+                    "id": "asset:atlas",
+                    "kind": "daedalus.sprite_atlas",
+                    "uri": "sprites/atlas.json",
+                    "metadata": {"schema_version": 1}
+                }
+            ]
+        }))
+        .unwrap();
+        let atlas = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "image_asset": "asset:image",
+            "filter_policy": "nearest_no_mip_v1",
+            "regions": [{
+                "id": "region:unit",
+                "rect": [0, 0, 1, 1],
+                "pivot": [0.5, 0.5],
+                "pixels_per_unit": 1.0
+            }]
+        }))
+        .unwrap();
+        let mut image = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut image, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[255, 255, 255, 255]).unwrap();
+        }
+        let mut resolver = ByteMapSourceResolver::from_bytes(BTreeMap::from([
+            ("sprites/sheet.png".to_owned(), image),
+            ("sprites/atlas.json".to_owned(), atlas),
+        ]))
+        .unwrap();
+        let mut cache = MemoryCookCache::default();
+        prepare_project_with_assets(
+            br#"{"schema_version":1,"name":"managed sprite test","scene":"scene.json"}"#,
+            &scene,
+            &mut resolver,
+            &mut cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
         )
         .unwrap()
     }
@@ -2965,8 +3936,12 @@ mod tests {
             PacketRendererLimits::default(),
         )
         .unwrap();
-        let unique_template_delta =
-            std::mem::size_of::<PreparedModelDraw>() + 2 * std::mem::size_of::<usize>();
+        // The second unique model adds one retained model-ID string in addition
+        // to its draw template and template-table entry.
+        let additional_model_id_bytes = ("asset:model-b".len() + 15) & !15;
+        let unique_template_delta = std::mem::size_of::<PreparedModelDraw>()
+            + 2 * std::mem::size_of::<usize>()
+            + additional_model_id_bytes;
         assert_eq!(
             distinct.prepared_metadata_bytes() - reserved,
             unique_template_delta
@@ -2975,23 +3950,17 @@ mod tests {
 
     #[test]
     fn prepared_metadata_accounts_for_hashmap_power_of_two_capacity_jump() {
-        let entry_bytes = std::mem::size_of::<RenderInstanceId>()
-            + std::mem::size_of::<super::SpriteDrawBinding>()
-            + 1;
-        let below = hash_map_storage_bytes(
-            56,
-            std::mem::size_of::<RenderInstanceId>(),
-            std::mem::size_of::<super::SpriteDrawBinding>(),
-        )
-        .unwrap();
-        let above = hash_map_storage_bytes(
-            57,
-            std::mem::size_of::<RenderInstanceId>(),
-            std::mem::size_of::<super::SpriteDrawBinding>(),
-        )
-        .unwrap();
-        assert_eq!(below, 64 * entry_bytes + 31);
-        assert_eq!(above, 128 * entry_bytes + 31);
+        type GeometrySlot = (GeometryKey, MeshHandle);
+        let slot_bytes = std::mem::size_of::<GeometrySlot>() + 1;
+        assert!(
+            std::mem::size_of::<GeometrySlot>()
+                > std::mem::size_of::<GeometryKey>() + std::mem::size_of::<MeshHandle>(),
+            "geometry hash slot must include tuple alignment padding"
+        );
+        let below = hash_map_storage_bytes::<GeometryKey, MeshHandle>(56).unwrap();
+        let above = hash_map_storage_bytes::<GeometryKey, MeshHandle>(57).unwrap();
+        assert_eq!(below, 64 * slot_bytes + 31);
+        assert_eq!(above, 128 * slot_bytes + 31);
     }
 
     #[test]
@@ -3197,6 +4166,1087 @@ mod tests {
         assert!(matches!(
             packet.validate(limits),
             Err(super::PacketRenderError::WorkingSetExceeded { .. })
+        ));
+    }
+
+    struct SourceDropThread(Arc<Mutex<Option<ThreadId>>>);
+
+    impl Drop for SourceDropThread {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap() = Some(thread::current().id());
+        }
+    }
+
+    #[test]
+    fn managed_cpu_generation_retains_real_frame_aliases_and_reclaims_on_owner_thread() {
+        let project = prepared_two_instances();
+        let session = SessionId::from_raw(701);
+        let bindings = project_bindings(&project, session);
+        let drop_thread = Arc::new(Mutex::new(None));
+        let source = Arc::new(SourceDropThread(Arc::clone(&drop_thread)));
+        let source_weak = Arc::downgrade(&source);
+        let source_erased: Arc<dyn Send + Sync> = source.clone();
+        drop(source);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                41,
+                session,
+                &bindings,
+                SourcePin::new(source_erased),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        assert_eq!(stage.session(), session);
+        assert_eq!(stage.project_generation(), 41);
+        assert_eq!(stage.source_digest(), project.digest());
+        assert_eq!(stage.geometry_count(), 1);
+        assert_eq!(stage.draw_count(), 2);
+        assert_eq!(stage.model_draw_count(), 0);
+        assert_eq!(stage.sprite_draw_count(), 0);
+        assert_eq!(stage.texture_count(), 0);
+        assert_eq!(stage.expanded_vertex_count(), 6);
+        assert_eq!(stage.expanded_index_count(), 6);
+        assert_eq!(owner.status().scratch_current_bytes, 0);
+        assert!(owner.status().scratch_peak_bytes > 0);
+        assert_eq!(owner.status().frame_reserved_bytes, 16 * 1024 * 1024);
+
+        let snapshot = project_snapshot(&bindings, &[Transform::IDENTITY; 2]);
+        let frame = owner
+            .extract_validated(generation, &snapshot, 900, None, &cancelled)
+            .unwrap();
+        let frame_alias = Arc::clone(&frame);
+        let packet_alias = frame.packet().clone();
+        assert_eq!(frame.publication_sequence(), 900);
+        assert_eq!(frame.authority_snapshot_sequence(), Some(snapshot.sequence));
+        assert_eq!(frame.tick(), snapshot.tick);
+        assert_eq!(frame.packet().instances().len(), 2);
+        assert_eq!(frame.packet_limits(), PacketRendererLimits::default());
+        assert_eq!(frame.asset_limits(), PacketAssetLimits::default());
+        assert!(owner.status().frame_bytes > 0);
+        assert_eq!(owner.status().frame_reserved_bytes, 0);
+
+        owner.retire_generation(generation).unwrap();
+        let pinned = owner.try_reclaim();
+        assert_eq!(pinned.pending_frames, 1);
+        assert_eq!(pinned.pending_generations, 1);
+        assert!(source_weak.upgrade().is_some());
+        drop(stage);
+        drop(frame_alias);
+        drop(frame);
+        let packet_pinned = owner.try_reclaim();
+        assert_eq!(packet_pinned.pending_frames, 1);
+        assert_eq!(packet_pinned.pending_generations, 1);
+        assert!(owner.status().frame_bytes > 0);
+        drop(packet_alias);
+        let reclaimed = owner.try_reclaim();
+        assert_eq!(reclaimed.reclaimed_frames, 1);
+        assert_eq!(reclaimed.reclaimed_generations, 1);
+        assert_eq!(owner.status().frame_bytes, 0);
+        assert_eq!(owner.status().prepared_metadata_bytes, 0);
+        assert!(source_weak.upgrade().is_none());
+        assert_eq!(*drop_thread.lock().unwrap(), Some(thread::current().id()));
+    }
+
+    #[test]
+    fn managed_cpu_projection_preserves_imported_model_aliases_and_validated_draws() {
+        let project = prepared_model_instances(&["asset:model-a", "asset:model-a"]);
+        let session = SessionId::from_raw(706);
+        let bindings = project_bindings(&project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                8,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        assert_eq!(stage.geometry_count(), 1);
+        assert_eq!(stage.texture_count(), 0);
+        assert_eq!(stage.draw_count(), 2);
+        assert_eq!(stage.model_draw_count(), 2);
+        assert_eq!(stage.sprite_draw_count(), 0);
+        assert_eq!(stage.resource_requests().model_bindings.len(), 2);
+        assert_eq!(stage.slot_assignments().len(), 2);
+        assert_eq!(
+            stage
+                .slot_assignments()
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1])
+        );
+
+        let snapshot = project_snapshot(&bindings, &vec![Transform::IDENTITY; bindings.len()]);
+        let frame = owner
+            .extract_validated(generation, &snapshot, 801, None, &cancelled)
+            .unwrap();
+        assert_eq!(frame.packet().instances().len(), 2);
+        assert!(Arc::ptr_eq(
+            stage.slot_assignments(),
+            frame.slot_assignments().unwrap()
+        ));
+        for (slot, instance) in frame.packet().instances().iter().enumerate() {
+            assert_eq!(stage.slot_assignments().get(&instance.id), Some(&slot));
+        }
+        assert!(Arc::ptr_eq(
+            &frame.packet().instances()[0].mesh.0,
+            &frame.packet().instances()[1].mesh.0
+        ));
+        assert_eq!(frame.validation().resource_requests().geometries.len(), 1);
+
+        owner.retire_generation(generation).unwrap();
+        drop(stage);
+        drop(frame);
+        assert_eq!(owner.try_reclaim().reclaimed_generations, 1);
+        assert_eq!(owner.status().prepared_metadata_bytes, 0);
+        assert_eq!(owner.status().frame_bytes, 0);
+    }
+
+    #[test]
+    fn managed_slot_assignments_follow_expanded_topology_and_share_across_pose_frames() {
+        let one_draw_project = prepared_model_instances(&["asset:model-a"]);
+        let two_draw_project = prepared_model_instances(&["asset:model-a", "asset:model-a"]);
+        let session = SessionId::from_raw(714);
+        let one_draw_bindings = project_bindings(&one_draw_project, session);
+        let two_draw_bindings = project_bindings(&two_draw_project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        let first_generation = owner
+            .prepare_generation(
+                &one_draw_project,
+                30,
+                session,
+                &one_draw_bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let first_stage = owner.stage_input(first_generation).unwrap();
+        assert_eq!(first_stage.draw_count(), 1);
+        assert_eq!(first_stage.slot_assignments().len(), 1);
+        assert_eq!(first_stage.slot_assignments().values().next(), Some(&0));
+        let first_frame = owner
+            .extract_validated(
+                first_generation,
+                &project_snapshot(&one_draw_bindings, &[Transform::IDENTITY]),
+                910,
+                None,
+                &cancelled,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            first_stage.slot_assignments(),
+            first_frame.slot_assignments().unwrap()
+        ));
+
+        let second_generation = owner
+            .prepare_generation(
+                &two_draw_project,
+                31,
+                session,
+                &two_draw_bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let second_stage = owner.stage_input(second_generation).unwrap();
+        assert_eq!(second_stage.draw_count(), 2);
+        assert_eq!(second_stage.slot_assignments().len(), 2);
+        assert_eq!(
+            second_stage
+                .slot_assignments()
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1])
+        );
+        assert!(!Arc::ptr_eq(
+            first_stage.slot_assignments(),
+            second_stage.slot_assignments()
+        ));
+        let second_snapshot = project_snapshot(&two_draw_bindings, &[Transform::IDENTITY; 2]);
+        let second_frame = owner
+            .extract_validated(second_generation, &second_snapshot, 911, None, &cancelled)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            second_stage.slot_assignments(),
+            second_frame.slot_assignments().unwrap()
+        ));
+        for (slot, instance) in second_frame.packet().instances().iter().enumerate() {
+            assert_eq!(
+                second_stage.slot_assignments().get(&instance.id),
+                Some(&slot)
+            );
+        }
+
+        let moved_snapshot = RenderSnapshot {
+            sequence: second_snapshot.sequence + 1,
+            tick: Tick(second_snapshot.tick.0 + 1),
+            entities: two_draw_bindings
+                .values()
+                .enumerate()
+                .map(|(index, entity)| RenderEntitySnapshot {
+                    entity: *entity,
+                    transform: Transform {
+                        translation: [index as f32 + 0.25, 0.0, 0.0],
+                        ..Transform::IDENTITY
+                    },
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let moved_frame = owner
+            .extract_validated(second_generation, &moved_snapshot, 912, None, &cancelled)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            second_frame.slot_assignments().unwrap(),
+            moved_frame.slot_assignments().unwrap()
+        ));
+
+        owner.retire_generation(first_generation).unwrap();
+        drop(first_stage);
+        drop(first_frame);
+        assert_eq!(owner.try_reclaim().reclaimed_generations, 1);
+        owner.retire_generation(second_generation).unwrap();
+        drop(second_stage);
+        drop(second_frame);
+        drop(moved_frame);
+        let reclaimed = owner.try_reclaim();
+        assert_eq!(reclaimed.reclaimed_generations, 1);
+        assert_eq!(reclaimed.reclaimed_frames, 2);
+        assert_eq!(owner.status().prepared_metadata_bytes, 0);
+        assert_eq!(owner.status().frame_bytes, 0);
+    }
+
+    #[test]
+    fn managed_cpu_projection_shares_real_sprite_texture_and_quad_across_entities() {
+        let project = prepared_sprite_instances();
+        let session = SessionId::from_raw(707);
+        let bindings = project_bindings(&project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                9,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        let requests = stage.resource_requests();
+        assert_eq!(stage.geometry_count(), 1);
+        assert_eq!(stage.texture_count(), 1);
+        assert_eq!(stage.draw_count(), 2);
+        assert_eq!(stage.model_draw_count(), 0);
+        assert_eq!(stage.sprite_draw_count(), 2);
+        assert_eq!(requests.sprite_bindings.len(), 2);
+        let mut sprite_bindings = requests.sprite_bindings.values();
+        let first = sprite_bindings.next().unwrap();
+        let second = sprite_bindings.next().unwrap();
+        assert!(Arc::ptr_eq(&first.texture, &second.texture));
+        assert!(requests.geometries.values().all(MeshHandle::is_sprite_quad));
+
+        let snapshot = project_snapshot(&bindings, &vec![Transform::IDENTITY; bindings.len()]);
+        let frame = owner
+            .extract_validated(generation, &snapshot, 802, None, &cancelled)
+            .unwrap();
+        assert_eq!(frame.packet().instances().len(), 2);
+        assert_eq!(frame.validation().resource_requests().geometries.len(), 1);
+        assert_eq!(
+            frame.validation().resource_requests().sprite_bindings.len(),
+            2
+        );
+
+        owner.retire_generation(generation).unwrap();
+        drop(stage);
+        drop(frame);
+        assert_eq!(owner.try_reclaim().reclaimed_generations, 1);
+        assert_eq!(owner.status().prepared_metadata_bytes, 0);
+        assert_eq!(owner.status().frame_bytes, 0);
+    }
+
+    #[test]
+    fn managed_stage_omits_unreferenced_legacy_mesh_but_keeps_conservative_copy_charge() {
+        let project = prepared_two_instances_with_unused_legacy_mesh();
+        let source_digest = project.digest().to_owned();
+        assert_eq!(project.meshes().len(), 2);
+        let conservative_legacy_copy =
+            super::packet_cpu::legacy_copy_bytes(&project, None).unwrap();
+        assert!(conservative_legacy_copy > 0);
+
+        let session = SessionId::from_raw(709);
+        let bindings = project_bindings(&project, session);
+        let copied_resources = ProjectRenderResources::prepare(
+            &project,
+            18,
+            session,
+            &bindings,
+            PacketRendererLimits::default(),
+        )
+        .unwrap();
+        let copied_legacy_bytes = copied_resources.legacy_mesh_copy_bytes();
+
+        let referenced_project = prepared_two_instances();
+        let referenced_bindings = project_bindings(&referenced_project, SessionId::from_raw(719));
+        let referenced_resources = ProjectRenderResources::prepare(
+            &referenced_project,
+            18,
+            SessionId::from_raw(719),
+            &referenced_bindings,
+            PacketRendererLimits::default(),
+        )
+        .unwrap();
+        assert!(copied_legacy_bytes > referenced_resources.legacy_mesh_copy_bytes());
+        assert!(conservative_legacy_copy >= copied_legacy_bytes);
+
+        // The preflight charges source capacities for every declared legacy
+        // mesh before conversion, including the unused mesh omitted from the
+        // GPU stage projection.
+        let tight_legacy_limit = conservative_legacy_copy - 1;
+        let tight_limits = PacketCpuLimits {
+            legacy_mesh_copy_bytes_per_generation: tight_legacy_limit,
+            legacy_mesh_copy_bytes_total: tight_legacy_limit * 2,
+            ..PacketCpuLimits::default()
+        };
+        let mut rejecting_owner = PacketCpuOwner::new(
+            tight_limits,
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        assert!(matches!(
+            rejecting_owner.prepare_generation(
+                &project,
+                18,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            ),
+            Err(crate::PacketRenderError::CpuBudgetExceeded {
+                resource: "legacy mesh copy",
+                bytes,
+                limit,
+            }) if bytes == conservative_legacy_copy && limit == tight_legacy_limit
+        ));
+
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let generation = owner
+            .prepare_generation(
+                &project,
+                18,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        assert_eq!(stage.source_digest(), source_digest.as_str());
+        assert_eq!(project.digest(), source_digest);
+        assert_eq!(stage.geometry_count(), 1);
+        assert_eq!(stage.draw_count(), 2);
+        assert_eq!(stage.expanded_vertex_count(), 6);
+        assert_eq!(stage.expanded_index_count(), 6);
+        let requests = stage.resource_requests();
+        assert_eq!(requests.geometries.len(), 1);
+        assert_eq!(requests.model_bindings.len(), 0);
+        assert_eq!(requests.sprite_bindings.len(), 0);
+        assert_eq!(
+            requests.geometries.values().next().unwrap().asset_id(),
+            &StableId::new("asset:triangle").unwrap()
+        );
+        assert_eq!(owner.status().legacy_mesh_copy_bytes, copied_legacy_bytes);
+        assert!(owner.status().legacy_mesh_copy_bytes > 0);
+
+        let snapshot = project_snapshot(&bindings, &[Transform::IDENTITY; 2]);
+        let frame = owner
+            .extract_validated(generation, &snapshot, 901, None, &cancelled)
+            .unwrap();
+        assert_eq!(frame.packet().instances().len(), 2);
+        assert_eq!(frame.validation().resource_requests().geometries.len(), 1);
+        assert_eq!(
+            frame.packet().instances()[0].mesh.asset_id(),
+            &StableId::new("asset:triangle").unwrap()
+        );
+        assert_eq!(project.digest(), source_digest);
+
+        owner.retire_generation(generation).unwrap();
+        drop(stage);
+        drop(frame);
+        assert_eq!(owner.try_reclaim().reclaimed_generations, 1);
+        assert_eq!(owner.status().prepared_metadata_bytes, 0);
+    }
+
+    #[test]
+    fn managed_resource_set_tokens_are_generation_scoped_and_frame_reclamation_is_independent() {
+        let project = prepared_two_instances();
+        let digest = project.digest().to_owned();
+        let session = SessionId::from_raw(710);
+        let bindings = project_bindings(&project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let mut foreign_owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                19,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let foreign_generation = foreign_owner
+            .prepare_generation(
+                &project,
+                19,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        let foreign_stage = foreign_owner.stage_input(foreign_generation).unwrap();
+        assert_eq!(stage.session(), foreign_stage.session());
+        assert_eq!(
+            stage.project_generation(),
+            foreign_stage.project_generation()
+        );
+        assert_eq!(stage.source_digest(), foreign_stage.source_digest());
+        assert!(!Arc::ptr_eq(
+            stage.resource_set_token(),
+            foreign_stage.resource_set_token()
+        ));
+
+        let first_snapshot = project_snapshot(&bindings, &[Transform::IDENTITY; 2]);
+        let first = owner
+            .extract_validated(generation, &first_snapshot, 902, None, &cancelled)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            stage.resource_set_token(),
+            first.resource_set_token()
+        ));
+        assert!(Arc::ptr_eq(
+            stage.slot_assignments(),
+            first.slot_assignments().unwrap()
+        ));
+        assert_eq!(
+            stage
+                .slot_assignments()
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1])
+        );
+        assert_eq!(first.source_digest(), digest.as_str());
+
+        let moved_snapshot = RenderSnapshot {
+            sequence: first_snapshot.sequence + 1,
+            tick: Tick(15),
+            entities: bindings
+                .values()
+                .zip([
+                    Transform::IDENTITY,
+                    Transform {
+                        translation: [0.25, 0.0, 0.0],
+                        ..Transform::IDENTITY
+                    },
+                ])
+                .map(|(entity, transform)| RenderEntitySnapshot {
+                    entity: *entity,
+                    transform,
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let second = owner
+            .extract_validated(generation, &moved_snapshot, 903, None, &cancelled)
+            .unwrap();
+        assert_eq!(second.tick(), moved_snapshot.tick);
+        assert!(Arc::ptr_eq(
+            stage.resource_set_token(),
+            second.resource_set_token()
+        ));
+        assert!(Arc::ptr_eq(
+            first.resource_set_token(),
+            second.resource_set_token()
+        ));
+        assert!(Arc::ptr_eq(
+            first.slot_assignments().unwrap(),
+            second.slot_assignments().unwrap()
+        ));
+
+        drop(first);
+        assert_eq!(
+            owner.try_reclaim().reclaimed_frames,
+            1,
+            "an old frame must reclaim while its generation token stays active"
+        );
+        let mut previous = second;
+        for offset in 0..3 {
+            let snapshot_sequence = moved_snapshot.sequence + offset + 1;
+            let snapshot = RenderSnapshot {
+                sequence: snapshot_sequence,
+                tick: Tick(16 + offset),
+                entities: bindings
+                    .values()
+                    .zip([
+                        Transform::IDENTITY,
+                        Transform {
+                            translation: [0.5 + offset as f32 * 0.1, 0.0, 0.0],
+                            ..Transform::IDENTITY
+                        },
+                    ])
+                    .map(|(entity, transform)| RenderEntitySnapshot {
+                        entity: *entity,
+                        transform,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            };
+            let next = owner
+                .extract_validated(generation, &snapshot, 904 + offset, None, &cancelled)
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                stage.resource_set_token(),
+                next.resource_set_token()
+            ));
+            drop(previous);
+            assert_eq!(
+                owner.try_reclaim().reclaimed_frames,
+                1,
+                "repeated pose frames must reclaim without retiring their generation"
+            );
+            previous = next;
+        }
+
+        let retained_weak = Arc::downgrade(stage.resource_set_token());
+        owner.retire_generation(generation).unwrap();
+        drop(stage);
+        drop(previous);
+        let waiting_on_weak = owner.try_reclaim();
+        assert_eq!(waiting_on_weak.reclaimed_frames, 1);
+        assert_eq!(waiting_on_weak.pending_generations, 1);
+        assert!(owner.status().prepared_metadata_bytes > 0);
+        assert!(retained_weak.upgrade().is_some());
+        drop(retained_weak);
+        assert_eq!(owner.try_reclaim().reclaimed_generations, 1);
+
+        foreign_owner.retire_generation(foreign_generation).unwrap();
+        drop(foreign_stage);
+        assert_eq!(foreign_owner.try_reclaim().reclaimed_generations, 1);
+    }
+
+    #[test]
+    fn managed_cpu_generation_rejects_foreign_ids_and_reuses_lowered_limits_after_reclaim() {
+        let project = prepared_two_instances();
+        let session = SessionId::from_raw(702);
+        let bindings = project_bindings(&project, session);
+        let limits = PacketCpuLimits {
+            prepared_metadata_bytes_per_generation: 1024 * 1024,
+            prepared_metadata_bytes_total: 2 * 1024 * 1024,
+            legacy_mesh_copy_bytes_per_generation: 1024 * 1024,
+            legacy_mesh_copy_bytes_total: 2 * 1024 * 1024,
+            frame_bytes_per_frame: 1024 * 1024,
+            frame_bytes_total: 2 * 1024 * 1024,
+            ..PacketCpuLimits::default()
+        };
+        assert!(limits.validate().is_ok());
+        let mut owner = PacketCpuOwner::new(
+            limits,
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let foreign_owner = PacketCpuOwner::new(
+            limits,
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                3,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        assert!(matches!(
+            foreign_owner.stage_input(generation),
+            Err(super::PacketRenderError::StaleCpuGeneration)
+        ));
+        let snapshot = project_snapshot(&bindings, &[Transform::IDENTITY; 2]);
+        let frame = owner
+            .extract_validated(generation, &snapshot, 1, None, &cancelled)
+            .unwrap();
+        let next = owner
+            .prepare_generation(
+                &project,
+                4,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        assert_ne!(generation, next);
+        assert_eq!(owner.status().generation_slots_used, 2);
+        assert_eq!(owner.status().frame_slots_used, 2);
+        assert_eq!(
+            owner.status().frame_reserved_bytes,
+            limits.frame_bytes_per_frame
+        );
+        let next_frame = owner
+            .extract_validated(next, &snapshot, 2, None, &cancelled)
+            .unwrap();
+        assert_eq!(owner.status().frame_slots_used, 2);
+        assert_eq!(owner.status().frame_reserved_bytes, 0);
+        assert!(owner.status().frame_bytes <= limits.frame_bytes_total);
+
+        owner.retire_generation(generation).unwrap();
+        assert_eq!(
+            owner.try_reclaim().pending_frames,
+            1,
+            "the retained old-ready frame must keep its slot and bytes"
+        );
+        drop(frame);
+        let old_reclaimed = owner.try_reclaim();
+        assert_eq!(old_reclaimed.reclaimed_frames, 1);
+        assert_eq!(old_reclaimed.reclaimed_generations, 1);
+        assert!(matches!(
+            owner.stage_input(generation),
+            Err(super::PacketRenderError::StaleCpuGeneration)
+        ));
+        assert_eq!(owner.stage_input(next).unwrap().project_generation(), 4);
+
+        owner.retire_generation(next).unwrap();
+        drop(next_frame);
+        let new_reclaimed = owner.try_reclaim();
+        assert_eq!(new_reclaimed.reclaimed_frames, 1);
+        assert_eq!(new_reclaimed.reclaimed_generations, 1);
+        assert_eq!(owner.status().generation_slots_used, 0);
+        assert_eq!(owner.status().frame_slots_used, 0);
+    }
+
+    #[test]
+    fn managed_cpu_reclamation_waits_for_a_weak_mesh_leaf_alias() {
+        let project = prepared_model_instances(&["asset:model-a"]);
+        let session = SessionId::from_raw(708);
+        let bindings = project_bindings(&project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                10,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        let mesh = stage
+            .resource_requests()
+            .geometries
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let weak_mesh = Arc::downgrade(&mesh.0);
+        drop(mesh);
+        drop(stage);
+
+        owner.retire_generation(generation).unwrap();
+        let held = owner.try_reclaim();
+        assert_eq!(held.pending_generations, 1);
+        assert!(owner.status().prepared_metadata_bytes > 0);
+        assert!(weak_mesh.upgrade().is_some());
+
+        drop(weak_mesh);
+        let reclaimed = owner.try_reclaim();
+        assert_eq!(reclaimed.reclaimed_generations, 1);
+        assert_eq!(owner.status().prepared_metadata_bytes, 0);
+    }
+
+    #[test]
+    fn managed_cpu_reclamation_waits_for_a_weak_slot_assignment_alias() {
+        let project = prepared_two_instances();
+        let session = SessionId::from_raw(715);
+        let bindings = project_bindings(&project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                32,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        let weak_assignments = Arc::downgrade(stage.slot_assignments());
+        let frame = owner
+            .extract_validated(
+                generation,
+                &project_snapshot(&bindings, &[Transform::IDENTITY; 2]),
+                913,
+                None,
+                &cancelled,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            stage.slot_assignments(),
+            frame.slot_assignments().unwrap()
+        ));
+
+        owner.retire_generation(generation).unwrap();
+        drop(stage);
+        drop(frame);
+        let held = owner.try_reclaim();
+        assert_eq!(held.pending_generations, 1);
+        assert!(owner.status().prepared_metadata_bytes > 0);
+        assert!(weak_assignments.upgrade().is_some());
+
+        drop(weak_assignments);
+        assert_eq!(owner.try_reclaim().reclaimed_generations, 1);
+        assert_eq!(owner.status().prepared_metadata_bytes, 0);
+        assert_eq!(owner.status().frame_bytes, 0);
+    }
+
+    #[test]
+    fn managed_cpu_frames_obey_three_slot_backpressure_and_reclaim_releases_a_slot() {
+        let project = prepared_two_instances();
+        let session = SessionId::from_raw(705);
+        let bindings = project_bindings(&project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                5,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            )
+            .unwrap();
+        let mut snapshot = project_snapshot(&bindings, &[Transform::IDENTITY; 2]);
+        let frame_one = owner
+            .extract_validated(generation, &snapshot, 100, None, &cancelled)
+            .unwrap();
+        snapshot.sequence += 1;
+        snapshot.tick = Tick(snapshot.tick.0 + 1);
+        let frame_two = owner
+            .extract_validated(generation, &snapshot, 101, None, &cancelled)
+            .unwrap();
+        snapshot.sequence += 1;
+        snapshot.tick = Tick(snapshot.tick.0 + 1);
+        let frame_three = owner
+            .extract_validated(generation, &snapshot, 102, None, &cancelled)
+            .unwrap();
+        assert_eq!(owner.status().frame_slots_used, 3);
+        assert!(matches!(
+            owner.extract_validated(generation, &snapshot, 103, None, &cancelled),
+            Err(super::PacketRenderError::CpuResidencyBusy)
+        ));
+
+        drop(frame_one);
+        assert_eq!(owner.try_reclaim().reclaimed_frames, 1);
+        let frame_four = owner
+            .extract_validated(generation, &snapshot, 103, None, &cancelled)
+            .unwrap();
+        assert_eq!(frame_four.publication_sequence(), 103);
+        assert_eq!(owner.status().frame_slots_used, 3);
+        drop(frame_two);
+        drop(frame_three);
+        drop(frame_four);
+        owner.retire_generation(generation).unwrap();
+        let reclaimed = owner.try_reclaim();
+        assert_eq!(reclaimed.reclaimed_frames, 3);
+        assert_eq!(reclaimed.reclaimed_generations, 1);
+        assert_eq!(owner.status().frame_slots_used, 0);
+        assert_eq!(owner.status().frame_bytes, 0);
+    }
+
+    #[test]
+    fn managed_cpu_generation_preflights_first_frame_and_does_not_record_rejected_scratch_peak() {
+        let project = prepared_two_instances();
+        let session = SessionId::from_raw(703);
+        let bindings = project_bindings(&project, session);
+        let mut limits = PacketCpuLimits {
+            frame_bytes_per_frame: 256,
+            frame_bytes_total: 512,
+            ..PacketCpuLimits::default()
+        };
+        assert!(limits.validate().is_ok());
+        let mut owner = PacketCpuOwner::new(
+            limits,
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        assert!(matches!(
+            owner.prepare_generation(
+                &project,
+                1,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            ),
+            Err(super::PacketRenderError::CpuBudgetExceeded {
+                resource: "frame backing",
+                limit: 256,
+                ..
+            })
+        ));
+        assert_eq!(owner.status().generation_slots_used, 0);
+        assert_eq!(owner.status().frame_reserved_bytes, 0);
+        assert_eq!(owner.status().scratch_current_bytes, 0);
+
+        limits.scratch_bytes = 1;
+        let mut scratch_limited = PacketCpuOwner::new(
+            limits,
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            scratch_limited.prepare_generation(
+                &project,
+                1,
+                session,
+                &bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            ),
+            Err(super::PacketRenderError::CpuBudgetExceeded {
+                resource: "scratch",
+                limit: 1,
+                ..
+            })
+        ));
+        assert_eq!(scratch_limited.status().scratch_current_bytes, 0);
+        assert_eq!(scratch_limited.status().scratch_peak_bytes, 0);
+    }
+
+    #[test]
+    fn managed_cpu_prepare_releases_scratch_and_reservations_on_error_or_cancellation() {
+        let project = prepared_two_instances();
+        let session = SessionId::from_raw(709);
+        let valid_bindings = project_bindings(&project, session);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let not_cancelled = AtomicBool::new(false);
+        assert!(matches!(
+            owner.prepare_generation(
+                &project,
+                11,
+                session,
+                &BTreeMap::new(),
+                SourcePin::new(Arc::new(())),
+                &not_cancelled,
+            ),
+            Err(super::PacketRenderError::InvalidPacket(_))
+        ));
+        let after_error = owner.status();
+        assert!(after_error.scratch_peak_bytes > 0);
+        assert_eq!(after_error.scratch_current_bytes, 0);
+        assert_eq!(after_error.prepared_metadata_reserved_bytes, 0);
+        assert_eq!(after_error.legacy_mesh_copy_reserved_bytes, 0);
+        assert_eq!(after_error.frame_reserved_bytes, 0);
+        assert_eq!(after_error.generation_slots_used, 0);
+
+        let cancelled_after_resources = AtomicBool::new(false);
+        assert!(matches!(
+            owner.prepare_generation_cancel_after_resources(
+                &project,
+                11,
+                session,
+                &valid_bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled_after_resources,
+            ),
+            Err(super::PacketRenderError::CpuCancelled)
+        ));
+        assert!(cancelled_after_resources.load(Ordering::Relaxed));
+        let after_work_cancel = owner.status();
+        assert_eq!(after_work_cancel.scratch_current_bytes, 0);
+        assert_eq!(after_work_cancel.prepared_metadata_reserved_bytes, 0);
+        assert_eq!(after_work_cancel.legacy_mesh_copy_reserved_bytes, 0);
+        assert_eq!(after_work_cancel.frame_reserved_bytes, 0);
+        assert_eq!(after_work_cancel.generation_slots_used, 0);
+
+        let cancelled = AtomicBool::new(true);
+        assert!(matches!(
+            owner.prepare_generation(
+                &project,
+                11,
+                session,
+                &valid_bindings,
+                SourcePin::new(Arc::new(())),
+                &cancelled,
+            ),
+            Err(super::PacketRenderError::CpuCancelled)
+        ));
+        let after_cancel = owner.status();
+        assert_eq!(
+            after_cancel.scratch_peak_bytes,
+            after_work_cancel.scratch_peak_bytes
+        );
+        assert_eq!(after_cancel.scratch_current_bytes, 0);
+        assert_eq!(after_cancel.prepared_metadata_reserved_bytes, 0);
+        assert_eq!(after_cancel.legacy_mesh_copy_reserved_bytes, 0);
+        assert_eq!(after_cancel.frame_reserved_bytes, 0);
+        assert_eq!(after_cancel.generation_slots_used, 0);
+    }
+
+    #[test]
+    fn empty_managed_generation_keeps_source_pin_until_stage_and_frame_roots_are_released() {
+        let project = prepared_empty_project();
+        let session = SessionId::from_raw(704);
+        let bindings = project_bindings(&project, session);
+        let drop_thread = Arc::new(Mutex::new(None));
+        let source = Arc::new(SourceDropThread(Arc::clone(&drop_thread)));
+        let weak = Arc::downgrade(&source);
+        let source_erased: Arc<dyn Send + Sync> = source.clone();
+        drop(source);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let generation = owner
+            .prepare_generation(
+                &project,
+                1,
+                session,
+                &bindings,
+                SourcePin::new(source_erased),
+                &cancelled,
+            )
+            .unwrap();
+        let stage = owner.stage_input(generation).unwrap();
+        assert_eq!(stage.geometry_count(), 0);
+        assert_eq!(stage.draw_count(), 0);
+        assert_eq!(stage.texture_count(), 0);
+        let snapshot = project_snapshot(&bindings, &[]);
+        let frame = owner
+            .extract_validated(generation, &snapshot, 2, None, &cancelled)
+            .unwrap();
+        assert_eq!(frame.packet().instances().len(), 0);
+        owner.retire_generation(generation).unwrap();
+        drop(frame);
+        assert_eq!(owner.try_reclaim().pending_generations, 1);
+        assert!(weak.upgrade().is_some());
+        drop(stage);
+        assert_eq!(owner.try_reclaim().reclaimed_generations, 1);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(*drop_thread.lock().unwrap(), Some(thread::current().id()));
+    }
+
+    #[test]
+    fn cpu_limits_reject_a_per_generation_reservation_that_cannot_transition() {
+        let mut limits = PacketCpuLimits::default();
+        limits.prepared_metadata_bytes_total = limits.prepared_metadata_bytes_per_generation;
+        assert!(matches!(
+            PacketCpuOwner::new(
+                limits,
+                PacketRendererLimits::default(),
+                PacketAssetLimits::default()
+            ),
+            Err(super::PacketRenderError::InvalidCpuLimits)
+        ));
+
+        limits = PacketCpuLimits::default();
+        limits.frame_bytes_total = limits.frame_bytes_per_frame * 2 - 1;
+        assert!(matches!(
+            PacketCpuOwner::new(
+                limits,
+                PacketRendererLimits::default(),
+                PacketAssetLimits::default()
+            ),
+            Err(super::PacketRenderError::InvalidCpuLimits)
         ));
     }
 }

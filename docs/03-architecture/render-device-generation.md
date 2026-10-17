@@ -52,6 +52,8 @@ raw quota4MiB는 작업량의 상한이며 매번 그 크기를 할당해야 한
 
 combined chunk planner에는 frame/overlay의 실제 또는 검증된 보수적 reservation을 제외한 headroom을 전달한다. geometry는 vertex/index 단위로, texture는 raw quota와 padded staging에 들어가는 whole row 수로 내림한다. 현재 in-flight bytes/count 때문에 **개별로는 들어가는 요청**만 ResidencyBusy다. `next_staging > cap` 자체를 Busy로 표현하지 않는다. transient headroom 때문에 한 단위도 못 올리는 경우와 원래 cap에서 영원히 못 올리는 경우를 구분하고, preflight 실패에서 create/evict/write/cursor를 바꾸지 않는다. lowered cap을 지원하려고 기본 memory/queue/deadline 한도를 늘리지 않는다.
 
+현재 dirty globals/instance/material write 때문에 한 stage 단위를 넣을 여유가 없으면 frame-only submit으로 최신 old-ready/clear를 유지하고 stage cursor를 진행하지 않는다. 다음 unchanged frame의 여유로 진행할 수 있는 후보를 영구 초과로 판정하지 않는다. 이 경우에도 frame 자체의 in-flight admission은 필요하다. 반면 요청한 loading overlay의16byte는 해당 호출 방식에서 매번 필요한 최소 비용이다. 단위+overlay 최소 비용조차 cap을 넘으면 그 호출의 typed 영구 budget/unit 오류를 반환해 zero-progress 성공을 무한 반복하지 않는다. overlay 없는 호출과 가변 dirty write의 일시 지연은 구분하며, 모든 프레임에서 계속 여유가 없는 입력에 무조건적인 stage 완료 시간을 약속하지 않는다.
+
 GPU allocation은 buffer/texture 전체 크기이고 byte upload chunk와 다르다. create buffer/texture/view/sampler/bind group/shader/pipeline layout/render pipeline의 실제 호출을 quota로 센다. 현재 cold model/sprite는 공유 layout1회와 각 pipeline group3회로 최대7회다. atomic pipeline group은 남은 quota에 들어갈 때 시작하고 minimum group보다 작은 config를 효과 전 거부한다. driver 호출의 latency 상한을 약속하지 않는다.
 
 wgpu write는 다음 submit과 연결되므로 stage write만 enqueue한 채 다른 draw를 기다리지 않는다. 한 combined submit의 serial을 touched stage와 draw 자원에 모두 기록하고 그 뒤 cursor/progress를 확정한다. 성공 submit 뒤 metadata를 잃는 경로를 만들지 않는다. write 이후 예상 밖 fatal은 실제 pending charge를 보존하고 failure/drain으로 수렴한다. callback은 작은 serial/watermark만 게시하며 큰 CPU final free를 맡지 않는다.

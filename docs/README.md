@@ -59,6 +59,7 @@
 | [비동기 에셋 후보 준비](03-architecture/project-asset-preparation.md) | P03.3a의 동결한 단일 cache worker·최신 후보/취소·private payload·공통 제어·논리적 메모리 한도 계약 |
 | [에셋 세대 전환·회수](03-architecture/project-asset-activation.md) | P03.3b/c의 live state 보존·consumer staging·actor commit·실제 표시·old audio/GPU 회수를 동결하기 위한 상세 초안 |
 | [Renderer CPU generation](03-architecture/render-cpu-generation.md) | P03.3b.3.2a의 managed CPU owner·실제 leaf/별칭·frame 예약·검증·독립 논리 예산을 GPU 코드 전에 동결 |
+| [Renderer device generation](03-architecture/render-device-generation.md) | P03.3b.3.2b의 same-device stage+draw·partial completeness·upload/use serial·pin union·drain을 동결 |
 | [에셋 교체 authored 호환성](03-architecture/asset-replacement-compatibility.md) | P03.3b.1의 단일 content 비교기·허용 field/revision/order·유한 오류/임시 index를 먼저 동결해 consumer별 중복 판정을 방지 |
 | [Headless CPU 세대 commit](03-architecture/headless-asset-generation.md) | P03.3b.2의 동일 authority·Stage/Commit/replay·초기 source consume·worker 회수·frame identity를 장치 연결 전에 검증 |
 | [Render 세대 staged 준비·표시](03-architecture/staged-render-asset-generation.md) | P03.3b.3의 제한된 GPU 업로드·last-good pin·native lease/CPU 회수·실제 present ACK를 동결하기 위한 source 기반 상세 초안 |

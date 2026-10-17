@@ -25,3 +25,5 @@ raw `p03-replay-terminal-ci-rust-root-attempt01.log` SHA-256은 `7279b267c324edd
 ## CPU renderer 계약 추가
 
 [render-cpu-generation](../03-architecture/render-cpu-generation.md)은 독립 leaf alias·prepared/frame/scratch 장부와 첫 committed frame 예약을 코드 전에 고정한다. source 감사에서 두 sidecar map의 중복 capacity와 maximum instance count/metadata budget의 독립성을 확인했다. 실제 type size/capacity 경계와 회수 시험은 구현 후 검증한다. first CPU API의 prepare는 동기 owner 작업이며 취소 checkpoint를 frame 선점으로 부르지 않는다. 실제 host의 frame 우선/pose 지연 검증은 b.3 미통과 조건으로 남긴다.
+
+[render-device-generation](../03-architecture/render-device-generation.md)은 resource-only input/같은 planner·4MiB/8 actual-create의 combined submit·partial completeness와 upload/use serial을 동결한다. source 감사에서 기존 commit_resources의 전체 생성/upload와 saturating submission serial을 staged transaction으로 그대로 재사용할 수 없음을 확인했다. 실제 GPU 준비/취소/픽셀/drain은 후속 테스트 대상이며 문서/코드 작성으로 통과 처리하지 않는다.

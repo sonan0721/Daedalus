@@ -143,6 +143,7 @@ P03.1 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있
 - [ ] P03.3b.3.1: [runtime consumer 계약](../03-architecture/project-generation-consumer.md)의 초기/후보 lease·표준 erased pin·Queued/Applied·실제 publication token·ACK/stop/회수. runtime 검증이며 GPU/present 완료를 대신하지 않음.
 - [ ] P03.3b.3.2: 공통 resource planner·opaque CPU validation·실제 backing registry·bounded staged upload/완료·취소/장치 회수.
 - [ ] P03.3b.3.2a: [CPU generation 계약](../03-architecture/render-cpu-generation.md)의 managed owner·실제 leaf와 frame 예약·별도 CPU 한도·publication/검증 재사용. GPU·frame 선점/host 통합 인수는 별도다.
+- [ ] P03.3b.3.2b: [device generation 계약](../03-architecture/render-device-generation.md)의 protected union·resource-only stage·combined chunk+draw·partial completeness/serial·장치 drain/실제 GPU 회귀.
 - [ ] P03.3b.3.3: 공통 native host·window bootstrap/device 반환·CLI adapter·SDK 소비와 같은 session/window/device 실제 교체·픽셀/pose/ACK/회수 통합 인수.
 - [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.
 

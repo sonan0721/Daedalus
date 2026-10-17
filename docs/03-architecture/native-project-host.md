@@ -12,16 +12,22 @@ CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별�
 
 | 계층 | 책임 | 의존/경계 |
 | --- | --- | --- |
-| `daedalus-project-host` 제안 | native project/session/view lifecycle, typed input relay, publication 추출, CPU 준비 owner, consumer handoff·상태·종료 조합 | runtime/content/core/renderer를 소비. runtime에 renderer 역의존을 만들지 않음 |
+| `daedalus-project-host` | native project/session/view lifecycle, typed input relay, publication 추출, CPU 준비 owner, consumer handoff·상태·종료 조합 | runtime/content/core/renderer를 소비. runtime에 renderer 역의존을 만들지 않음 |
 | runtime | 기존 Engine·authority actor, source 준비/cache worker, Stage/Commit/replay, source lease·bounded consumer metadata | GPU object나 renderer type을 보유하지 않음 |
 | renderer | CPU render 자원·불변 packet, device cache·bounded stage+draw·completion, 실제 present 경계 | runtime type을 읽거나 authority를 변경하지 않음 |
 | CLI | 옵션 검증, 프로젝트 경로 전달, JSONL codec/transport, report 파일 저장·JSON serialization | 같은 host/session client에 attach. 별도 source load/두 번째 actor/device를 만들지 않음 |
 
-프로젝트 filesystem resolver/import/cache는 이미 content/runtime의 책임이며 CLI 전용으로 옮기지 않는다. native library 사용자가 CLI process 없이도 같은 실행 기능을 소비해야 한다. C#·MCP의 전체 attach/SDK는 별도 제품 항목이며 이 Rust host 경계만으로 구현됐다고 하지 않는다. 새 crate 이름과 Cargo feature는 코드 전 최종 리뷰 대상이다.
+프로젝트 filesystem resolver/import/cache는 이미 content/runtime의 책임이며 CLI 전용으로 옮기지 않는다. native library 사용자가 CLI process 없이도 같은 실행 기능을 소비해야 한다. C#·MCP의 전체 attach/SDK는 별도 제품 항목이며 이 Rust host 경계만으로 구현됐다고 하지 않는다. crate 이름은 위와 같이 채택하고 renderer의 default features는 끈다. host 기본 feature는 비장치 SDK 경계, native 창은 opt-in `window`다. activation-enabled host의 audio/native-audio는 P03.3c 전에는 제공하지 않으며 CLI의 기존 non-activation audio 경로를 보존한다.
 
 ## 외부 facade와 startup
 
-제안 facade는 `NativeProjectHostOptions`, `NativeProjectHost`, `NativeViewOptions`, compact `NativeViewOutcome`이다. start/attach_control/run_view/request_stop/try_shutdown 책임을 분리한다. attach는 기존 `SessionControlClient`를 반환해 모든 frontend가 한 authority를 사용한다. run_view는 macOS의 OS event loop 제약을 따라 호출 thread에서 실행하며 별도 임의 window thread를 만들지 않는다.
+외형은 `NativeProjectHostOptions`, `NativeProjectHost`, `NativeProjectViewOptions`, compact `NativeViewOutcome`으로 좁힌다. start/attach_control/run_view/request_stop/try_shutdown 책임을 분리한다. attach는 기존 `SessionControlClient`를 반환해 모든 frontend가 한 authority를 사용한다. run_view는 macOS의 OS event loop 제약을 따라 호출 thread에서 실행하며 별도 임의 window thread를 만들지 않는다. 정확한 renderer 입력/반환 type과 library 파일 소유권은 연결 API 동결 뒤 배정한다.
+
+`run_view(&mut self, options)` 동안 같은 host borrow로 `request_stop(&self)`를 호출할 수 없으므로 미리 얻는 cloneable `NativeProjectHostControl`을 둔다. handle은 out-of-band `request_stop()`, `request_view_close()`, nonwaiting `try_status()`만 담당하며 작은 atomic/상태 metadata를 보유한다. source/packet/prepared roots를 넣지 않는다. control/input/packet queue가 가득 차도 close/stop은 관측한다. 새 일반 controller framework를 만들지 않는다.
+
+첫 view는 one-shot이다. 창을 닫으면 consumer도 Closed가 되며 reopening을 광고하지 않는다. 같은 authority의 read/Step 등 허용 operation은 whole-host `request_stop` 전까지 계속 가능하지만 새 Stage/Commit은 runtime의 consumer-closed 오류로 거부한다. CLI는 창 결과를 얻은 뒤 whole stop을 요청하고 nonwaiting 종료 진행을 관찰한다. view close와 whole-host stop을 같은 성공 상태로 합치지 않는다.
+
+작은 status/outcome은 session·active generation/digest·activation/CPU owner/view lifecycle·논리 장부·bounded resource counters·latest accepted publication과 last actual-present identity/view·최대 유한 failure code/message를 구분한다. publication/authority sequence와 tick은 각각 보존한다. `PacketPresentationWindowOutcome`이나 final packet Arc를 public outcome으로 반환하지 않는다. window interval samples 등 기존 유한 report를 재사용하되 source/이미지/instance 배열을 넣지 않는다.
 
 첫 host slice의 `start`는 현재 native 준비 factory처럼 **동기 initial load**다. 호출 전에 창이 생겼다고 하거나 async로 문서화하지 않는다. initial source를 두 번 읽지 않으려면 runtime의 additive render-consumer factory가 exact initial source lease를 제공해야 한다. 이후 교체는 같은 session 안에서 background 준비한다.
 
@@ -100,6 +106,14 @@ renderer prepared-generation registry는 두 슬롯으로 active+candidate 또�
 engine-held frame slot은 ready·새 current/committed frame·held previous presentation/outcome 등 최대3개의 unique backing으로 제한한다. 같은 backing의 clone은 byte/slot을 다시 세지 않고 회수를 막는 pin이다. 다른 backing을 추가할 여유가 없으면 effect-free Busy이며 기존 화면/입력/actor는 유지한다. candidate device-ready를 보고하기 전 첫 committed packet에 필요한 frame reservation도 확보하고, Commit 뒤 capacity 부족이 처음 드러나지 않게 한다. 한 frame/candidate 자체가 per-item 상한을 넘거나 최소 한 항목도 진행할 수 없는 config는 typed budget/config 오류다. 신뢰된 외부 SDK의 임의 clone/String copy를 sandbox로 제한한다는 뜻은 아니다.
 
 종료는 먼저 stop/cancel 요청, small final metadata 복사, 큰 outcome/packet/device owner 해제·회수 진행, actor/CPU/preparation worker의 finished 관측 순서다. `PacketWindowOutcome.final_packet`을 잡은 채 source 회수를 기다리는 coordinator에 join하지 않는다. `try_shutdown`은 실제로 finished인 thread만 join하며 다른 owner가 남으면 Stopping이다. Drop은 stop 요청만 한다. [설계 probe](../06-worklog/2026-10-17-native-host-design.md)에서 기존 PacketRenderer/PacketViewSubmission/ProjectRenderResources의 Send·RenderPacket의 Send+Sync는 compile 확인했다. 이는 실제 GPU completion drain/마지막 device drop의 검증이 아니다. 그 retirement owner는 후속 장치·종료 검사까지 열린 상태이며 winit Window/Surface를 임의 worker로 옮기지 않는다.
+
+## CLI에서 공통 library로 옮길 책임
+
+현재 `project_view.rs`의 BindingMap/collect_bindings·latest_frame/submit_wait·InputTicket와 native 입력/ticket 진행은 host로 옮긴다. run_window/coordinate는 host의 typed coordinator·CPU owner·window lifecycle로 나누며 무거운 prepare/extract를 작은 입력 loop에 남기지 않는다. CLI의 ProjectViewArgs/validate_args, ProtocolController/StdioTransport·wire DTO/JSONL, build_report/emit_report와 파일 출력은 adapter로 남긴다. protocol의 Close는 host control handle에 연결하며 별도 Engine을 시작하지 않는다.
+
+옮긴 코드의 동작을 복사한 두 번째 구현을 유지하지 않는다. 다만 P03.3c 이전의 기존 audio-view 경로는 지원을 잃지 않도록 별도 유지하고, 공통 입력/제어 helper 재사용 범위를 명시한다. 새 activation+audio 조합은 준비를 생략한 성공이 아니라 효과 전 unsupported 진단이다.
+
+비장치 integration test는 새 crate의 public API만 import해 외부 temporary project start→attach/read/Step→status→stop/실제 shutdown을 수행한다. daedalus-cli를 dependency로 삼거나 CLI module을 test에 include하지 않는다. 후속 window hardware 검사는 실제 present→view close→같은 authority Step/read와 Stage/Commit 거부→whole shutdown을 확인한다. 이 최소 SDK 시험은 전체 C# SDK/AI 제작 제품 인수를 대신하지 않는다.
 
 ## 착수 전 남은 검증과 작업 분할
 

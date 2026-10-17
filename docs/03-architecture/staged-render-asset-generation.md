@@ -4,7 +4,7 @@
 
 ## 문서 목적과 선행 게이트
 
-[전체 activation 계약](project-asset-activation.md)의 renderer 부분을 실행 가능한 작업 경계로 좁힌다. [b.2 headless](headless-asset-generation.md)는 PR16/main360ceb6에서 인수했지만 source commit이 실제 픽셀 교체는 아니다. [runtime consumer](project-generation-consumer.md)와 [CPU generation 계약](render-cpu-generation.md)은 해당 slice의 API/예산을 동결했다. GPU/window의 미결 API는 별도 리뷰 뒤 코드 작업을 배정한다. runtime/CPU 단독 구현으로 이 renderer나 b.3를 인수하지 않는다.
+[전체 activation 계약](project-asset-activation.md)의 renderer 부분을 실행 가능한 작업 경계로 좁힌다. [b.2 headless](headless-asset-generation.md)는 PR16/main360ceb6에서 인수했지만 source commit이 실제 픽셀 교체는 아니다. [runtime consumer](project-generation-consumer.md)·[CPU generation 계약](render-cpu-generation.md)·[device 계약](render-device-generation.md)은 각 slice의 API/예산을 동결했다. window/host 연결 API는 별도 리뷰 뒤 코드 작업을 배정한다. 부품 단독 구현으로 이 renderer나 b.3를 인수하지 않는다.
 
 목표는 같은 Engine/SessionId·live pose를 유지하며 CPU 후보 준비→기존 device의 제한된 업로드→actor commit→새 generation의 실제 present 관찰→old CPU/GPU 회수를 연결하는 것이다. 새 renderer/device/캐시/프로토콜을 세대마다 만들지 않는다. 연결된 audio의 전환은 c의 별도 선행 조건이며 이 단계에서 audio를 붙인 채 준비를 생략해 성공시키지 않는다.
 

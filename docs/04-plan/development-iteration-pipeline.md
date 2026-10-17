@@ -220,6 +220,10 @@ renderer source 리뷰에서는 미참조 legacy mesh의 불필요 stage 요청�
 
 device production과 실제 GPU 시나리오 테스트를 한 작업자에게 직렬로 몰지 않도록, 새 test module 파일만 별도 Luna가 작성하고 device 담당이 parent 선언/기존 helper의 최소 visibility를 소유하도록 분리했다. CPU 담당의 실제 PreparedProject/validated-frame 경계를 공유하며 forged FrameHandle이나 별도 smoke framework는 만들지 않는다. compile은 관련 source가 모두 동결된 뒤 단일 owner가 맡아 작성 병렬화와 불안정한 동시 빌드를 구분한다. 실제 검증/효과는 후속 기록 대상이다.
 
+PR19/mainc507835에서 CPU owner·canonical slot/token·same-device stage library를 인수했다. workspace359·실제 Metal19와 downloaded CI Mac package의 기존 native72가 해당 경계를 검사했으며 실제 host edit→present는 후속이다. 같은 Mac CI artifact를 checksum/checkout/dirty=false와 실제 binary hash로 검증해 native 회귀에 재사용했고, main에서 같은 binary bytes가 나온 뒤 하드웨어 회귀를 다시 실행하지 않았다. 검증 범위가 다른 실행들을 합쳐 고유 테스트 수나 속도 개선율로 보고하지 않는다.
+
+다음 host/window 연결에서도 반복 제거를 코드 계약에 둔다. Busy로 소비된 StageInput은 canonical CPU generation에서 Arc projection만 다시 요청한다. source import·CPU prepare·validation·새 GPU device를 다시 만들지 않는다. 초기화 owner와 legacy 생성자는 같은 builder를 쓰며 shader/pipeline 코드를 두 벌로 복제하지 않는다. 기존 WindowApp의 surface/input/camera와 combined stage+draw를 확장하고 CLI는 후속 host의 transport/report adapter로 좁힌다. 이 source 작업의 실제 검사·iteration 효과는 [generation 기록](../06-worklog/2026-10-17-render-generation.md)에 남기며 현재 설계를 이미 측정된 개선이라고 부르지 않는다.
+
 ### 검증 출력 보존의 공통 실행기
 
 서로 다른 작업에서 기존 로그 덮어쓰기·zsh readonly 종료 변수·빈 출력 파일이 반복됐다. 규칙만 다시 읽게 하는 대신 noninteractive 명령의 출력 보존만 담당하는 `scripts/run_logged.py`를 추가하는 작은 도구 작업을 채택했다. 테스트 선택·Cargo lease·timeout·재시도·성공 판정은 기존 caller의 책임이며 새 smoke/test framework를 만들지 않는다. 아래는 착수 전에 고정한 계약과 실제 검증 범위다.

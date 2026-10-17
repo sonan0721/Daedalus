@@ -313,3 +313,7 @@ AI가 final report 전에 실제 표시를 관측하도록 기존 protocol2 atta
 문서 검사 첫 시도 `p03-host-public-api-docs-root-attempt01.log`는 이 local skill 절대 경로를 repository link로 쓴 탓에 실패했다(SHA-256 `99db214e5759221db02f7a2400d7f3754d7b826b88d5aa0da4a83fc781f77b0a`). 재현 환경 설명의 코드 경로로 바꾸고 후속 검사를 별도 실행한다.
 
 수정 뒤 `p03-host-public-api-docs-root-attempt02.log`는 exit0·SHA-256 `135632fd8e4ade9df7ebcebcc8c32895de7c966e841dd57a022d29393805bcba`다. 문서 검사는 source compile/제품 인수 근거와 구분한다.
+
+실제 SDK 실행 전 root source 리뷰는 두 추가 오류를 발견했다. window 성공 후 poisoned host status를 session1의 가짜 Failed status로 바꾸던 경로는 owner 반환 뒤 typed status_poisoned 오류로 고치도록 요청했다. 또 managed 창은 같은 packet을 매 redraw마다 새 present sequence로 보고하지만 host가 첫 ACK 뒤 pending publication을 지워 후속 정상 재표시를 unknown으로 처리할 수 있었다. 마지막 신뢰 token/key 하나를 작은 metadata로 보존하고 정확한 identity를 검증하는 계약을 추가했다. 큰 frame/source pin·새 publication·재전송으로 우회하지 않는다. 실제 SDK 실행은 수정/집중 검사 뒤로 미루고 Manual publication을500ms 더 관측하도록 검증 계획을 바꿨다. 이 발견은 source 근거이며 아직 실행 실패/수정 성공으로 보고하지 않는다.
+
+A의 CLI/protocol/Python source가 동결된 뒤 D의 host 수정 동안 C의 비어 있는 검증 lease를 잠시 넘겨받아 root가 Python 전체 discovery를 실행했다. `p03-host-python-root-attempt01.log`는72통과/0실패·unittest11.948초/runner12.118초·SHA-256 `d0d892e53a8dec4b91065f58b48f8b9debbdc504578629837d3b343ae9d979b4`다. 실제 CLI/GPU가 아닌 stub process·schema·기존 package/docs 검사를 포함한다. Cargo/hardware와 겹치지 않았고 종료 후 C에게 lease를 반환했다. 이 실행을 native source 교체 통과로 세지 않는다.

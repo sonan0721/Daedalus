@@ -145,9 +145,9 @@ P03.1 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있
 - [x] P03.3b.3.2a: [CPU generation 계약](../03-architecture/render-cpu-generation.md)의 managed owner·실제 leaf와 frame 예약·별도 CPU 한도·publication/검증 재사용. workspace CPU359·strict/feature별 회귀·다섯 CI와 package 회귀를 확인했다. frame 선점/host 통합 인수는 별도다.
 - [x] P03.3b.3.2b: [device generation 계약](../03-architecture/render-device-generation.md)의 protected union·resource-only stage·combined chunk+draw·partial completeness/serial·renderer drain. 실제 Metal19·두 packaged CPU62·downloaded CI Mac native72·PR19/main 동일 tree 확인. window 종료/부분 device 초기화·실제 authority present ACK는 다음 host 게이트다. [상세 근거](../06-worklog/2026-10-17-render-generation.md).
 - [ ] P03.3b.3.3: 공통 native host·window bootstrap/device 반환·CLI adapter·SDK 소비와 같은 session/window/device 실제 교체·픽셀/pose/ACK/회수 통합 인수.
-- [ ] P03.3b.3.3a: [recoverable GPU owner](../03-architecture/native-renderer-owner-lifecycle.md)의 부분 base/packet 초기화·lazy handle·stage paired create 보존·worker final drop. CPU/실제 GPU와 legacy 회귀 인수 전 미완료.
+- [ ] P03.3b.3.3a: [recoverable GPU owner](../03-architecture/native-renderer-owner-lifecycle.md)의 부분 base/packet 초기화·lazy handle·stage paired create 보존·worker final drop. renderer focused CPU85·실제 Metal29는 통과했으며 host/legacy·최종 CI/package 회귀 인수 전 미완료. [원본 근거](../06-worklog/2026-10-17-render-generation.md).
 - [ ] P03.3b.3.3b: additive managed window의 clear/loading bootstrap·stage/frame 분리·실제 publication/present·내부 catch/항상 owner 반환·surface/window 정리. 기존 창 API 호환성 포함.
-- [ ] P03.3b.3.3c: `daedalus-project-host`의 단일 source/session·CPU owner·공개 control/attach·동일 authority·backstop과 nonwaiting shutdown. 외부 Rust library 소비 확인.
+- [ ] P03.3b.3.3c: `daedalus-project-host`의 단일 source/session·CPU owner·공개 control/attach·동일 authority·backstop과 nonwaiting shutdown. focused window-feature13/기본10·공개 SDK compile은 통과. default strict 정리·실제 SDK 창/종료·통합 회귀 인수는 남음.
 - [ ] P03.3b.3.3d: CLI adapter와 실제 source edit→Stage→Commit→pixels/pose/ACK/retirement, SDK 소비·두 package·5 CI·exact tree 인수. 하위 코드/fixture 통과를 전체 b.3/P03/D1 인수로 대체하지 않음.
 - [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.
 

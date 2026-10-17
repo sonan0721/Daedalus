@@ -123,6 +123,12 @@ runtime frame의 publication sequence와 authority_snapshot_sequence는 다르�
 
 compact last_presented는 실제 window 관측과 ACK 수락을 혼합해 과거로 되돌리지 않는다. 같은 session의 더 큰 present_sequence가 관측된 뒤 이전 pending ACK가 Applied되어도 최신 관측을 덮어쓰지 않는다. runtime ACK 진행은 별도 상태다. 성공 view outcome에는 실제 view/행렬이 있지만 첫 compact summary에는 identity/dimensions만 남을 수 있으므로 오류 report의 누락 표현은 CLI 계약을 따른다.
 
+하나의 authority publication을 창이 여러 번 그릴 수 있다. ACK Applied 뒤 ingress의 pending identity를 회수해도, 현재 표시한 신뢰된 publication token/key 하나는 작은 metadata로 유지해 같은 packet의 후속 present/resize를 검증한다. 정확한 session·key·generation·digest·tick·authority snapshot을 재확인하고 큰 frame/source pin은 보유하지 않는다. 새 frame을 추출하거나 같은 publication을 재전송해 redraw identity 오류를 숨기지 않는다. Commit 뒤 새 generation의 첫 frame 전에는 기존 active publication의 재표시도 허용한다. pending에도 마지막 신뢰 token에도 없는 publication은 여전히 unknown 오류다. 같은 publication/increasing present sequence의 ACK→다시 표시를 결정적 CPU 시험과 실제 Manual 창의 짧은 관측 구간에서 확인한다.
+
+같은 신뢰 publication의 후속 redraw는 host의 actual status만 갱신해도 되며 runtime에 retirement ACK를 매번 다시 보내지 않는다. 따라서 runtime의 latest_applied_present는 마지막 ACK된 관측이고 최신 redraw/resize라는 뜻은 아니다. 새로운 publication은 반드시 기존 ACK 경로를 통과하고, 새로운 generation의 실제 첫 present는 actual-view gate를 진행시킨다. runtime 보고와 host actual 관측을 같은 최신성으로 표시하지 않는다.
+
+성공 window outcome 뒤 host status가 poisoned라면 가짜 session/default counter로 compact status를 만들지 않고 typed status_poisoned 오류를 반환한다. GPU owner 반환은 이 status 조회보다 먼저 수행한다.
+
 ## 큰 CPU backing과 종료
 
 source pin만으로 복사된 legacy Mesh Vec·map·draw array·packet instances의 마지막 free thread를 보장할 수 없다. CPU owner는 **handoff 전에 실제로 공유될 각각의 backing Arc**를 typed registry에 등록한다. ProjectRenderResources wrapper/packet root의 refcount만 보지 않는다. RenderPacket은 Clone이며 실제 renderer에도 packet.clone 경로가 있어 root와 별개로 leaf가 남는다.

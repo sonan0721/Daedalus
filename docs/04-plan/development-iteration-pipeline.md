@@ -226,6 +226,8 @@ PR19/mainc507835에서 CPU owner·canonical slot/token·same-device stage librar
 
 host 구현 검토에서는 기존 digest validator·runtime compact publication token·service shutdown report·renderer의 actual view-projection 수식을 재사용하도록 정했다. identifier를 진단 문자열처럼 자른 실제 CPU 실패를 고쳤고 최종 renderer CPU85/Metal29는 해당 worklog에 기록했다. host/CLI 통합 통과는 별도다. CPU Busy status memoization은 같은 준비의 무의미한 반복을 줄이는 방향이지만 cancellation/currentness가 바뀌면 장부가 같아도 pending lease/snapshot을 해제해야 한다. 재시도 절감과 무효화 정확성을 함께 검사하며 단순 cache/memo 추가를 성능 달성으로 계산하지 않는다.
 
+후속 CLI는 direct view_status와 final report의 host 요약에 같은 serializer를 사용한다. native smoke도 기존 project writer·JSONL process·ticket/command-ID issuer·종료 helper를 확장한다. 작은 신뢰 publication token/key는 ACK 뒤에도 보존해 같은 packet의 redraw 때문에 prepare/extract/재전송을 반복하지 않게 한다. 새 publication의 retirement ACK는 보존하고 같은 publication의 redraw/resize 최신성은 host actual status로 보고한다. 이 경계는 root 리뷰에서 발견한 실제 source 오류를 고치기 위한 설계이며 실행 시간 절감 결과가 아니다. shutdown/status contention의 polling은 기존 작은 sleep/deadline을 재사용해 yield spin을 줄인다. host source 수정 동안 비어 있는 단일 lease를 Python 검증과 의존 없는 managed 회귀에 넘겨 기다리는 시간을 사용하되, 같은 crate를 편집하면서 빌드하거나 무거운 검사를 겹치지 않는다. 실제 결과는 위 작업 기록을 기준으로 한다.
+
 ### 검증 출력 보존의 공통 실행기
 
 서로 다른 작업에서 기존 로그 덮어쓰기·zsh readonly 종료 변수·빈 출력 파일이 반복됐다. 규칙만 다시 읽게 하는 대신 noninteractive 명령의 출력 보존만 담당하는 `scripts/run_logged.py`를 추가하는 작은 도구 작업을 채택했다. 테스트 선택·Cargo lease·timeout·재시도·성공 판정은 기존 caller의 책임이며 새 smoke/test framework를 만들지 않는다. 아래는 착수 전에 고정한 계약과 실제 검증 범위다.

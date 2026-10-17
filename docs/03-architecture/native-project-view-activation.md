@@ -43,6 +43,8 @@ legacy `accepted_packet`은 activation report v2에서 생략한다. queued toke
 
 성공 outcome에서는 실제 managed present의 view/행렬을 쓰고 `actual_view_available:true`로 표시한다. run_view 오류로 compact NativePresentedSummary만 남은 경우 identity/dimensions는 보존하되 view와 view_projection은 null, actual_view_available은 false로 보고한다. 아예 present가 없으면 last_presented도 null이다. source/final camera로 누락된 실제 view를 추측하지 않는다. 이 오류 경로의 view 손실은 첫 slice의 명시적 제한이다.
 
+최종 report를 출력한 뒤의 CLI 종료 판정은 adapter/window 오류·실제 host failure·종료 미완료/오류·runtime termination을 모두 반영한다. window outcome이 Ok이고 actor가 StopRequested로 종료됐어도 host coordinator/CPU의 실제 failure가 있으면 성공 exit0으로 바꾸지 않는다. 기존 오류 우선순위를 유지하며 host code/message를 사용한다. status를 읽지 못했다는 이유만으로 없는 failure나 session을 만들어내지 않는다.
+
 ## 같은 host의 live view_status
 
 final report를 기다리거나 authority latest_frame을 화면 표시로 오해하지 않도록 protocol2의 직접 read 요청 `{"request":{"op":"view_status"}}`를 추가한다. 실제 envelope에는 기존 protocol/request_id도 유지한다. submit/ticket/actor operation이 아닌, 기존 LatestFrame/Close처럼 attachment의 read다. 기존 actor operations 배열은 유지하고 capabilities에 `view_status` boolean을 더한다. managed host control이 붙은 activation view에서만 true이며 headless/legacy attachment에서는 `view_status_unavailable` 오류를 반환한다.

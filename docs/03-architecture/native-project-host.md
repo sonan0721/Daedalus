@@ -25,7 +25,7 @@ CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별�
 
 `run_view(&mut self, options)` 동안 같은 host borrow로 `request_stop(&self)`를 호출할 수 없으므로 미리 얻는 cloneable `NativeProjectHostControl`을 둔다. handle은 out-of-band `request_stop()`, `request_view_close()`, nonwaiting `try_status()`만 담당하며 작은 atomic/상태 metadata를 보유한다. source/packet/prepared roots를 넣지 않는다. control/input/packet queue가 가득 차도 close/stop은 관측한다. 새 일반 controller framework를 만들지 않는다.
 
-source 감사상 SessionControlClient에는 owner stop API가 없다. 첫 host 구현은 host와 장수 coordinator가 `Arc<NativeProjectActivationService>`를 내부에서만 공유하는 선택을 먼저 검증한다. 공개 control handle은 service/ControlShared의 strong/weak handle을 받지 않고 host-only atomic signals·작은 status만 보유한다. coordinator가 whole-stop을 관측해 기존 service의 request_stop을 호출하고 private Arc를 반환한다. 이 선택은 actual host compile에서 service의 Sync를 확인해야 하며 현재 검증 사실이 아니다. Sync가 맞지 않으면 코딩을 확장하기 전에 소유권 계약을 다시 리뷰한다. 임의 두 번째 actor나 UI mutex 대기로 우회하지 않는다.
+source 감사상 SessionControlClient에는 owner stop API가 없다. 첫 host 구현은 host와 장수 coordinator가 `Arc<NativeProjectActivationService>`를 내부에서만 공유한다. 공개 control handle은 service/ControlShared의 strong/weak handle을 받지 않고 host-only atomic signals·작은 status만 보유한다. coordinator가 whole-stop을 관측해 기존 service의 request_stop을 호출하고 private Arc를 반환한다. 2026-10-17의 기존 artifact rustc probe에서 service의 Send+Sync와 private Arc의 Send를 확인했다. 이는 해당 Mac feature 조합의 compile 근거이며 actual host 구현·종료 검증은 아니다. 임의 두 번째 actor나 UI mutex 대기로 우회하지 않는다.
 
 host try_shutdown은 종료 신호를 보낸 뒤 finished coordinator만 join한다. 그 전에는 Stopping이고 private Arc가 실제 반환된 뒤 `Arc::get_mut`으로 기존 service try_shutdown을 호출한다. CPU owner/device 반환·drain은 별도 진행이며 unfinished join을 하지 않는다. coordinator panic도 finished 뒤 관측/유한 failure를 기록하고 host가 가진 service로 stop·cleanup polling을 계속한다. view-close만으로 coordinator를 종료해 whole-stop 경로를 잃지 않으며 authority Step/read는 유지한다. 이 설계는 작은 control capability를 추가하려고 runtime의 큰 queue/frame state를 일시 upgrade하는 새 경로를 피하기 위한 내부 소유권 선택이다.
 
@@ -142,9 +142,9 @@ engine-held frame slot은 ready·새 current/committed frame·held previous pres
 ## 착수 전 남은 검증과 작업 분할
 
 1. b.2 실제 native/PR 인수는 main360ceb6에서 확인. 과거 native 실패 원인 미확정은 보존.
-2. runtime initial/candidate port·failure/cancel/ACK·Queued/Applied/Busy는 consumer 계약으로 동결. 구현/실제 검증은 후속.
-3. renderer의 combined stage+old-ready draw·partial resource completeness·CPU leaf/frame registry와 수치 동결.
-4. existing type의 Send/auto-trait compile probe3건은 확인. transient frame accounting·window-close 후 실제 device retirement owner는 미검증. probe를 production 기능 통과로 쓰지 않는다.
+2. runtime initial/candidate port·failure/cancel/ACK·Queued/Applied/Busy의 library 구현은 PR17에서 인수. 실제 renderer/window ACK 생성·host 전달은 후속.
+3. renderer combined stage+old-ready draw·partial resource completeness·CPU leaf/frame registry의 library 경계는 PR19/mainc507835에서 인수. 실제 host 연결은 미완료.
+4. 2026-10-17 새 public type의 auto-trait probe도 확인. PacketCpuOwner Send, CpuFrameHandle/PacketStageInput Send+Sync, PacketRenderer/Renderer Send와 service private Arc 전달이 해당 artifact에서 compile됐다. 실제 host frame 선점·window-close 후 device retirement·부분 초기화 실패 반환은 미검증이며 probe를 기능 통과로 쓰지 않는다.
 5. Luna xhigh에 runtime/renderer/host/CLI 파일 소유권과 단일 Cargo lease를 나눠 단계별 구현. 기존 helper/프로토콜/service를 확장하고 새 smoke framework를 만들지 않음.
 
 그 뒤 실제 같은 session의 source edit→Stage→Commit→현재 pose publication→실제 픽셀/present ACK→old CPU/GPU 회수를 검증한다. Rust SDK가 host를 소비하는 최소 통합도 확인해 CLI 안에서만 동작하는 구현을 통과시키지 않는다. P03 전체와 D1/D2/D3는 별도 최종 인수까지 계속 미완료다.

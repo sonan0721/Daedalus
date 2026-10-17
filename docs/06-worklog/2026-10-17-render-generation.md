@@ -188,3 +188,35 @@ style 정리 전 같은 최종 로직의 renderer default는71pass/18ignored, no
 독립적인 기존 managed 회귀는 pinned home SDK10.0.402로 확인했다. bridge build, warning/error0의 Release solution build, 실제 Rust-backed self-test, native round-trip/module lifecycle 두 integration scenario가 통과했다. 순서대로 `p03-render-managed-{bridge-build,build,selftest,integration}-root-attempt01.log`의 SHA-256은 `868681d4f0bbad1b883d85a372c2c8d32bceb59b297a3b7c02e5dae28142d099`/`b1182587d1e1dc6239a83020d51a72445266792559e1978531660db3859a58bf`/`c958af7b5356db019fb0e871336978350000be3bbf694fa027be7522fdf6a7bb`/`6c403eb8673a0281cd18245d17a5fb54d4aaf0ef61c7207790e7e7ed20bb9e67`다. 새 renderer가 C# SDK나 host에 연결됐다는 뜻은 아니다.
 
 Luna가 작성한 source와 root 리뷰·로컬 검증은 이 범위까지다. 다음은 clean PR의 다섯 check·두 package와 실제 artifact의 회귀/동일성·main tree 인수다. 해당 인수 전 b.3.2a/b 체크는 열어두며, host/실제 세션·창/SDK 연결과 전체 b.3/P03/D1/D2/D3도 미완료다.
+
+## PR19 renderer library 경계 인수
+
+[PR19](https://github.com/sonan0721/Daedalus/pull/19)의 exact head `e3056f0fe1692ea2f3ade250f102b2025fba8dbe`, CI checkout `956893762e812425edeff34eb1a76ffeb67d6e16`, squash main `c507835c9920cab4b075904e80f2d7f7980e8cdf`의 tree는 모두 `a6588117dc712296e1bad9b8698f5ff4d897fc44`다. 다섯 성공과 아래 extracted artifact 회귀 뒤 ready/squash했다. 보호 contexts3개·strict=true·squash-only 설정도 재조회했다. Publish skipped·tag/공개 Release 없음이다.
+
+docs run39004284192/job117313445986는 실제 Python70·문서 검사, Rust39004284148/job117313446006은 CPU359/0failed/22ignored·locked check/fmt/strict, managed39004284146/job117313446226은 실제 native bridge/managed integration을 통과했다. release39004284190의 Linux117313446297/Mac117313446501는 각각 packaged CPU62/1.062378초·62/4.612823초를 통과했다. Linux audio linkage도 성공했다. staged binary SHA-256은 Linux `907f889d66112be7bffab900e272485fb40017ffb4685bdea3a3cbebb0172784`, Mac `73961a47103d00bb8ba6ea4414451c17d4c1965bbdc86aa625380502dd5fcdb0`다.
+
+실제 Mac artifact12090148045를 내려받았다. archive `daedalus-0.1.0-aarch64-apple-darwin-20261017T045435Z-506aa951a12a4036bfee7e29c0913927.tar.gz` SHA-256은 `76f24f5bd69fe8ea2417a3ad9b6031c63c223b9cac3e2227e2148849d7c5a5f5`다. checksum·embedded manifest/file hash·dirty=false·exact CI checkout과 extracted CPU/offline audio를 기존 archive verifier로 확인했다. 추출 binary는 위 Mac SHA와 같다. local package rebuild나 별도 smoke backend는 추가하지 않았다.
+
+그 binary에 기존 helper의 assets/view/models/sprites/audio/native-audio/preparation/activation 조합을 한 번 실행해 실제 M3 Pro/Metal의72/72·21.72137초를 확인했다. native finite voice도 실제 Ended였다. loopback/이 시도에 대한 새 사용자 가청 확인은 아니며 과거 audio 실패 원인은 여전히 미확정이다. 새 stage API는 별도 library GPU19로 검증했으며, 이 기존 CLI 회귀가 host activation을 연결했다는 뜻은 아니다.
+
+| 보존한 raw | SHA-256 |
+| --- | --- |
+| `p03-render-ci-rust-root-attempt01.log` | `b3bc748dfc57ac1f9ebe985e623f76344c55dc945a90e805fafa5347226df281` |
+| `p03-render-ci-release-root-attempt01.log` | `914e71bfbf6fd8ea9647805bf8e739c6a0a1f4ed838b73d0240a0cc68ab32a29` |
+| `p03-render-ci-docs-root-attempt01.log` | `be934e5f1283604b011a7e68ac85425a3c0e6140ba974b7b8b8fa128f987de01` |
+| `p03-render-ci-download-root-attempt01.log` | `03c2240e80e88358f38c99b362ac267a52c80334514ad78fe279ba0088d6174a` |
+| `p03-render-ci-archive-verify-root-attempt01.log` | `7d8b17a882c811fe07b0948f275f86f1a60364186594275c41b832e130d3b404` |
+| `p03-render-ci-macos-native-root-attempt01.log` | `c82696af29bebb58c48efed38cf1b9495a7f91e9b8f2ee9fdb931be57fb1f24c` |
+| `p03-render-ci-merge-root-attempt01.log` | `95b2254e568ee8e79609352a8661439deb4e6c61e97daa91599596e0450feced` |
+
+main c507835의 docs39004551395·Rust39004551392·managed39004551438·release39004551409도 성공했다. main package Mac117314235028/Linux117314235276 성공·Publish117314461500 skipped를 확인했다. status raw `p03-render-main-checks-root-attempt01.log` SHA-256은 `e7a5356b0af5a63b3ce34f332ae363383ce8a3cc01240f865ddef936be891268`다. 추가 hardware 실행으로 세지 않는다.
+
+main release raw `p03-render-main-release-root-attempt01.log` SHA-256은 `d77d13c4f0f34404ab17793fb287c7f96bf8437395203f421126029cd899103e`다. 두 main staged binary도 위 PR19의 Mac/Linux hash와 각각 같고 packaged CPU62가 통과했다. 같은 binary bytes에 장치 검사를 다시 반복하지 않았으며 새 archive 전체가 동일하다는 뜻은 아니다.
+
+이 근거로 b.3.2/2a/2b library 체크만 인수했다. b.3.3의 실제 host·window bootstrap/부분 초기화 회수·SDK·같은 authority의 실제 present ACK와 전체 b.3/P03/D1/D2/D3는 계속 미완료다. 다음 branch는 `feat/native-project-host`이며 exact API/오류 소유권을 먼저 문서화한다.
+
+## 다음 host의 auto-trait 설계 probe
+
+remote CI를 기다리는 동안 Luna D가 `/tmp`의 작은 Rust source만 작성해 기존 artifact에 rustc metadata probe를 실행했다. production/test/manifest/lock/dependency 변경이나 추가 Cargo build, runtime/GPU/audio 초기화는 없다. service Send+Sync·private Arc Send, PacketCpuOwner Send, CpuFrameHandle/PacketStageInput Send+Sync, PacketRenderer/Renderer Send가 해당 feature 조합에서 compile됐다. root도 probe source와 raw hash를 대조했다. 실제 host의 안전한 종료·device 마지막 drop·frame 선점은 여전히 별도 검증이다.
+
+source `/tmp/daedalus-host-traits-luna-attempt01.rs` SHA-256은 `757bba9247137ed946b31ac6552d285dea7176fcce25f9f7529d51f70dce6902`, raw `p03-host-traits-luna-attempt01.log`는 `670854115b876c9dd389e2f9530928149f5a211821e8f2d8fafa055c51cf824d`다. renderer default+test-fixtures+window artifact `libdaedalus_renderer-5638dc27dcc90085.rlib` SHA-256은 `84611d768570ed177e3403a951e7485e84ff97c2036505590682eb2423ef1aa3`, runtime audio+native-audio artifact `libdaedalus_runtime-bda12bd485c4cc76.rlib`는 `06d9d7b83b9bca96a797963076f98bd1e33eebe1624f3c11259f259f669a7c4f`다. 새 host crate 자체의 compile 결과로 보고하지 않는다.

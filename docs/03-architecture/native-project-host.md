@@ -25,6 +25,10 @@ CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별�
 
 `run_view(&mut self, options)` 동안 같은 host borrow로 `request_stop(&self)`를 호출할 수 없으므로 미리 얻는 cloneable `NativeProjectHostControl`을 둔다. handle은 out-of-band `request_stop()`, `request_view_close()`, nonwaiting `try_status()`만 담당하며 작은 atomic/상태 metadata를 보유한다. source/packet/prepared roots를 넣지 않는다. control/input/packet queue가 가득 차도 close/stop은 관측한다. 새 일반 controller framework를 만들지 않는다.
 
+source 감사상 SessionControlClient에는 owner stop API가 없다. 첫 host 구현은 host와 장수 coordinator가 `Arc<NativeProjectActivationService>`를 내부에서만 공유하는 선택을 먼저 검증한다. 공개 control handle은 service/ControlShared의 strong/weak handle을 받지 않고 host-only atomic signals·작은 status만 보유한다. coordinator가 whole-stop을 관측해 기존 service의 request_stop을 호출하고 private Arc를 반환한다. 이 선택은 actual host compile에서 service의 Sync를 확인해야 하며 현재 검증 사실이 아니다. Sync가 맞지 않으면 코딩을 확장하기 전에 소유권 계약을 다시 리뷰한다. 임의 두 번째 actor나 UI mutex 대기로 우회하지 않는다.
+
+host try_shutdown은 종료 신호를 보낸 뒤 finished coordinator만 join한다. 그 전에는 Stopping이고 private Arc가 실제 반환된 뒤 `Arc::get_mut`으로 기존 service try_shutdown을 호출한다. CPU owner/device 반환·drain은 별도 진행이며 unfinished join을 하지 않는다. coordinator panic도 finished 뒤 관측/유한 failure를 기록하고 host가 가진 service로 stop·cleanup polling을 계속한다. view-close만으로 coordinator를 종료해 whole-stop 경로를 잃지 않으며 authority Step/read는 유지한다. 이 설계는 작은 control capability를 추가하려고 runtime의 큰 queue/frame state를 일시 upgrade하는 새 경로를 피하기 위한 내부 소유권 선택이다.
+
 첫 view는 one-shot이다. 창을 닫으면 consumer도 Closed가 되며 reopening을 광고하지 않는다. 같은 authority의 read/Step 등 허용 operation은 whole-host `request_stop` 전까지 계속 가능하지만 새 Stage/Commit은 runtime의 consumer-closed 오류로 거부한다. CLI는 창 결과를 얻은 뒤 whole stop을 요청하고 nonwaiting 종료 진행을 관찰한다. view close와 whole-host stop을 같은 성공 상태로 합치지 않는다.
 
 작은 status/outcome은 session·active generation/digest·activation/CPU owner/view lifecycle·논리 장부·bounded resource counters·latest accepted publication과 last actual-present identity/view·최대 유한 failure code/message를 구분한다. publication/authority sequence와 tick은 각각 보존한다. `PacketPresentationWindowOutcome`이나 final packet Arc를 public outcome으로 반환하지 않는다. window interval samples 등 기존 유한 report를 재사용하되 source/이미지/instance 배열을 넣지 않는다.

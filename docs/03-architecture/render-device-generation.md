@@ -24,6 +24,10 @@ private `ResourceRequests<'a>`는 geometries·model_bindings·sprite_bindings의
 
 stage 상태는 Admitted/Uploading/AwaitingCompletion/Ready/Cancelling/Retiring/Cancelled/Failed를 구분하는 bounded 표현을 사용한다. 외부 status의 diagnostic은 최대64byte code·2048byte message이며 전체 논리 metadata는32KiB 이내다. 실제 used/remaining bytes·create calls·upload/completion serial을 보고한다. 예상 작업량과 완료 작업량을 섞지 않는다. 알려진 terminal status는 유한 마지막 슬롯만 보존하며 무제한 역사 map을 만들지 않는다.
 
+CPU generation의 private canonical resource-set token을 stage admission 때 보존한다. Ready 뒤 큰 StageInput/plan을 반환해도 작은 token과 source pin은 필요한 실제 수명까지 유지한다. 첫 candidate frame은 기존 CPU 검증·같은 token·session/generation/digest·정확한 limits로 확인한다. UI에서 expected-set을 다시 할당하거나 expected bind group×draw의 중첩 탐색을 실행하지 않는다. token은 GPU completeness/serial 검증을 대신하지 않으며, 다른 CPU owner의 token은 같은 문자열 identity여도 거부한다.
+
+성공한 managed submission은 device-active token도 같은 transaction에서 갱신한다. 이후 같은 generation의 새 pose는 active token·identity·정확한 limits로 O(1) 확인하며 기존 CPU validation으로 slot writes를 만든다. Busy/실패 전에는 active token을 바꾸지 않는다. legacy activation이 실제 ready packet을 교체하면 managed token을 지워 stale 권한을 남기지 않는다. old in-flight의 정확한 CpuFrameHandle pin이 이전 token의 실제 수명을 보존하며 작은 token 비용도 bookkeeping에 포함한다.
+
 ## admission·전환·회수
 
 기존 geometry64/128MiB preferred/hard·256/512 mesh, asset128/256MiB working/hard·texture/sampler256/512·bind group1024/2048를 유지한다. 한 후보의 working set과 old-ready+candidate+incomplete-retired union의 hard ceiling을 각각 적용한다. 기존 LRU/victim planner의 protected set이 이 union을 포함해야 한다. 완료된 unpinned cache만 victim이며 pinned shortage는 Busy, 후보 자체의 oversize/unsupported는 영구 오류다.

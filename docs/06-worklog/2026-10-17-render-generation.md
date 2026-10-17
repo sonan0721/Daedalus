@@ -75,3 +75,17 @@ CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 �
 위 raw는 `p03-consumer-busy-fixture-runtime-{default,allfeatures,clippy}-luna-attempt01.log`다. 마지막 scoped runtime rustfmt/diff check도0으로 끝났고 그 뒤 source 변경은 없다. focused `consumer_`는 실제9개가 통과했으나 wrapper가 zsh readonly 변수 `status`에 종료 코드를 대입해 footer 기록에 실패했다. 해당 raw `p03-consumer-busy-fixture-luna-attempt01.log`의 SHA-256은 `9af500cfa2e1cb6cc63d6c2dc8e46a3c90bda24062be9c8f59eb54f814c80a20`이며 Cargo 성공 summary와 wrapper 결함을 구분한다. 최종 전체 두 실행/Clippy에는 exit_code0 footer가 있다.
 
 문서 checker·문서 unit8도 통과했다. Luna raw `p03-consumer-docs-check-luna-attempt-HM0rI6`/`p03-consumer-docs-unittest-luna-attempt-oukBLT`의 SHA-256은 각각 `e9202009d391bd258dcf3f484424f260c9a0c3d079b1448d12bb8e2d0048696c`/`60bb849356ffbc091f601e17fc6ae0b2eb5e26d734d433da020c6e775efbf97f`다. source/로컬 통과와 clean PR의 workspace/managed/두 package 인수는 구분하며 후자는 아직 대기다. renderer WIP·실제 GPU/present·host/SDK/CLI 연결과 전체 b.3/P03/D1은 미완료다.
+
+## PR17의 runtime 하위 경계 인수
+
+[PR17](https://github.com/sonan0721/Daedalus/pull/17)은 exact head `7987d6810f96b15a73849e044b9dd24b9c1532fe`의 다섯 성공과 아래 실제 Mac package 회귀 뒤 ready/squash했다. main `3bc9274163c1a8374c6da7e20e72ea89b3192a09`, head, CI checkout `cbfce6bd738522217e297c757f54f3cf23fbc875`는 모두 tree `e142d43b4db4e10a5365eba837c99f277efe9938`다. 보호3개와 추가 두 package, Publish skipped를 확인했고 tag/공개 Release는 만들지 않았다.
+
+Rust run38990034865/job117270161752는 workspace337pass/0fail/ignored12, strict Clippy/locked check/fmt를 통과했다. docs38990034844/job117270161652와 실제 managed38990034837/job117270161596도 성공했다. release38990034894의 Mac117270162266/Linux117270162107은 각각 packaged CPU62/4.392261초와62/1.051191초로 성공했고 Linux ALSA linkage도 확인했다. binary SHA-256은 Mac `fbe7d138d7129b14df8ee2a6cf534f086175b9ef509477ce3e329968d1e2eff5`, Linux `b7864d6e4207c93354b8bfbcae971e5a9a9d05e4312deda4bfaa5bbc3f85a1b8`다.
+
+실제 CI Mac artifact12085135474를 내려받아 checksum/manifest를 검증했다. archive `daedalus-0.1.0-aarch64-apple-darwin-20261017T011520Z-def80b7d5c0d4e65a4d96f9bd881d5bf.tar.gz`의 SHA-256은 `2c74ee84dde4658a959d82ae333d005e4235794cc704add32543b04d46b1e301`이다. manifest는 exact CI checkout/dirty=false였고 실제 tar 추출 binary도 위 Mac SHA와 같다. local renderer WIP를 포함한 별도 Cargo/package rebuild를 하지 않았다.
+
+그 추출 binary에 기존 helper의 assets/view/models/sprites/audio/native-audio/preparation/activation 조합을 실행해 실제 Apple M3 Pro/Metal에서72/72·19.84801초·stderr0을 확인했다. native finite voice는0.521707초 기다린 뒤 Ended였다. 기존 화면/오디오 경로의 회귀이며 새 render consumer의 실제 GPU 세대 교체가 연결됐다는 뜻은 아니다. raw `p03-consumer-ci-macos-native-root-attempt01.json`의 SHA-256은 `10756a4e6778a40e3993ba998c6c28b077c6c675bbee7c5c12f17d2d02dfa96f`다.
+
+PR metadata raw `p03-consumer-ci-pr-root-attempt01.json`은 SHA-256 `8dda520170c0f9188bf97d698d3777680d0daeb6b7e6a86ddaf3c066229d0cec`, Rust/Mac/Linux job raw는 각각 `d6e9662bed32c69eb8f4fdabce1b65abafcc7a7e9a0b21d2179964ecc9aecadb`, `759717b041ef74ecd736d0a0240c1cbb456a350c7c9b410235e6d9ba79f6ab7b`, `655409756d95e56dacfb06ad20ce1c03cf11042c82714c8a57a4643924182247`이다. Rust의 첫 log 요청은 run 진행 중이라 사용할 수 없었고 빈 attempt01을 보존했다. 실제 완료 로그는 attempt02이며 이를 테스트 실패/재실행으로 세지 않는다.
+
+후속 renderer source 리뷰는 미참조 legacy mesh를 GPU stage 집합에 포함하는 중복과 첫 candidate draw의 expected bind group×draw 중첩 탐색을 확인했다. 실제 참조 binding에서만 stage 집합을 만들고, CPU 검증이 발급한 generation별 private token을 GPU admission/active에 공유하는 작은 계약을 추가했다. 같은 token/identity/limits를 O(1)로 대조하며 actual GPU completeness/serial 검증은 그대로 필요하다. token의 registry/실제 charge/alias 시험도 구현 범위다. 아직 renderer Cargo/실제 GPU 인수는 하지 않았다. 이 runtime slice 인수 후에도 전체 b.3·P03·D1/D2/D3는 계속 미완료다.

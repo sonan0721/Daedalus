@@ -10,7 +10,13 @@ description = "Headless JSON control CLI for the Daedalus engine"
 [features]
 default = []
 capture = ["dep:daedalus-renderer", "daedalus-renderer/test-fixtures"]
-window = ["capture", "daedalus-renderer/window", "dep:glam"]
+window = [
+    "capture",
+    "daedalus-renderer/window",
+    "dep:daedalus-project-host",
+    "daedalus-project-host/window",
+    "dep:glam",
+]
 audio = ["daedalus-runtime/audio"]
 native-audio = ["audio", "daedalus-runtime/native-audio"]
 
@@ -22,6 +28,7 @@ path = "src/main.rs"
 clap.workspace = true
 daedalus-core = { path = "../daedalus-core" }
 daedalus-content = { path = "../daedalus-content" }
+daedalus-project-host = { path = "../daedalus-project-host", default-features = false, optional = true }
 daedalus-renderer = { path = "../daedalus-renderer", default-features = false, optional = true }
 daedalus-runtime = { path = "../daedalus-runtime" }
 daedalus-world = { path = "../daedalus-world" }

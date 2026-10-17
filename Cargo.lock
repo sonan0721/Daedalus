@@ -865,6 +865,7 @@ dependencies = [
  "clap",
  "daedalus-content",
  "daedalus-core",
+ "daedalus-project-host",
  "daedalus-renderer",
  "daedalus-runtime",
  "daedalus-world",
@@ -901,6 +902,17 @@ dependencies = [
  "daedalus-core",
  "oxijolt",
  "rapier2d",
+]
+
+[[package]]
+name = "daedalus-project-host"
+version = "0.1.0"
+dependencies = [
+ "daedalus-content",
+ "daedalus-core",
+ "daedalus-renderer",
+ "daedalus-runtime",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

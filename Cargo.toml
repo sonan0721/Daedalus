@@ -11,6 +11,7 @@ members = [
     "crates/daedalus-bridge",
     "crates/daedalus-physics",
     "crates/daedalus-audio",
+    "crates/daedalus-project-host",
 ]
 default-members = [
     "crates/daedalus-core",
@@ -23,6 +24,7 @@ default-members = [
     "crates/daedalus-bridge",
     "crates/daedalus-physics",
     "crates/daedalus-audio",
+    "crates/daedalus-project-host",
 ]
 
 [workspace.package]

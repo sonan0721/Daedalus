@@ -323,3 +323,25 @@ A의 CLI/protocol/Python source가 동결된 뒤 D의 host 수정 동안 C의 �
 추가 host 리뷰는 close 요청을 실제 ViewClosed로 선보고하던 경로와 initial GPU Ready가 ViewRunning을 덮어쓰는 상태 보고 오류도 수정 대상으로 찾았다. 요청 intent와 실제 channel Closed/run_view 반환을 분리하고, 첫 실제 표시 뒤 실행 상태를 보존하도록 Luna에 배정했다. 또 ResultMailbox는 delivered flag를 slot 잠금 전에만 확인해, 그 사이 consumer가 기존 payload를 take한 뒤 producer가 두 번째 payload를 넣을 수 있었다. 같은 nonwaiting slot guard 안에서 delivered를 재확인해 관측 ACK 전 용량1 예약을 지키도록 요청했다. can_publish/fully-acknowledged도 같은 stale precheck를 점검한다. 이 항목들은 source 감사 결과이며 후속 결정적/통합 검사 전 성공으로 기록하지 않는다.
 
 CLI adapter의 오류 변환도 추가 검토했다. window outcome Ok·actor StopRequested만으로 exit0을 반환하면 host coordinator/CPU failure를 report에 기록하고도 성공할 수 있었다. 최종 report 보존 뒤 실제 host code/message로 비영 종료하도록 계약을 명시하고 A의 해당 파일만 잠시 재개방했다. C가 CLI를 컴파일하기 전에 다시 동결한다. read-only live-capture 감사는 현재 managed window의 실제 metadata/SurfaceTexture를 재사용하되 새 readback·image credit·artifact 수명이 필요함을 확인했다. 기존 capture 문서를 현재 host 소유권에 맞췄고 live_capture=false/픽셀 미검증 상태는 유지한다.
+
+
+## 공개 native host의 집중 인수와 실제 창 실행
+
+Luna source를 동결한 뒤 root가 raw completion/footer와 SHA-256을 대조했다. 기본 feature의 host는4 unit+3 외부 public API=7통과, window 포함은14 unit+3 public API=17통과다. feature별 수를 합산하지 않는다. GPU owner 반환·후보 Busy 시나리오는 window 전용으로 제한했으므로 앞선 기본10통과 기록과 시험 설정이 다르다. 양쪽 all-target strict Clippy도 통과했다. 마지막 두 identity 비교 helper의 인수 개수 lint에는 field를 명시적으로 검증하는 이유를 붙인 함수 범위 허용만 적용했으며 비교 로직은 유지했다.
+
+| 집중 검사 | raw log (`dist/project-evidence/`) | SHA-256 |
+| --- | --- | --- |
+| host 기본7통과 | `p03-host-test-default-luna-attempt02.log` | `29f1cc360795419bf1288a4957d76704e935ca52b41eb44f66a0f906ffbdd139` |
+| host window17통과 | `p03-host-test-window-luna-attempt03.log` | `1bceaeeb4a9c5ae868a27c85cda4511d290f375db86b2edb25e1157e31758d3b` |
+| host 기본 strict | `p03-host-clippy-default-luna-attempt04.log` | `204c89b4e8348944af0c4d69809f858b9d9c3302bb508f8bbedaba7431185338` |
+| host window strict | `p03-host-clippy-window-luna-attempt03.log` | `3adc3f8f782e6f71677243daba34f0e24d7da7e334af9628dddd1161937963ae` |
+| CLI 기본35통과 | `p03-host-cli-default-test-luna-attempt01.log` | `d441725fa08a5b4562f2f0537f186174c69ce0b52df179a58bcf2ffec2264368` |
+| CLI 기본 strict | `p03-host-cli-default-clippy-luna-attempt01.log` | `a3300dac6c99808e9eb76358eaca0a314dfae2a0e3c278a02b71e8af009399b7` |
+
+실패 시도도 보존했다. 기본 strict02는 필수 초기 collect_bindings까지 cfg로 숨긴 오류·조건부 필드 접근·unused import,03은 수명 유지 lease와 window 전용 owner signal의 dead-code를 드러냈다. raw `p03-host-clippy-default-luna-attempt02.log`/`03.log`의 hash는 `c19b38d82bc27388b4d11caad7a418321ab05541fe6e660eb9135c0511e9553f`/`ec099ff76bba5e334c130d983e38cfcddd9beaa8bc577209e9096cf3be8c1fe2`다. window test02는 ManagedPresentedView/Summary 타입 연결과 private test helper 범위 때문에 compile에 실패했다(`67dc2355b4ef3326e2b3ccf25f6e2adb9825a9992e5d9b55d299fc3bde96e080`). window strict02의 두 인수 개수 진단 raw hash는 `4e07db361b4440f8a37f0a555bf05a2a0e4cf26679a4aeab6d253d51b27e435d`다. 해당 source 수정 후 위 성공 실행을 얻었으며 실패를 runtime 실패로 바꾸어 해석하지 않는다.
+
+공개 SDK `native_host_smoke --observe-ms 500`의 첫 실행은 링크 중 `ld: write() failed, errno=28 (No space left on device)`로 종료했다. 실행 당시 Luna가 확인한 여유 공간은145MiB였으며 example 자체는 실행되지 않았다. raw `p03-host-native-sdk-luna-attempt01.log` hash는 `024b4e9a8ff809ec3fdb50f568ac8c698ca7f90d9fcf943287c05428705d0ca6`다. root가 이후12GiB 여유를 확인했고 별도 삭제 없이 새로운 시도만 허가했다. Luna는 compiler 경쟁이 없고 공간이 유지되는 것을 확인한 뒤 단 한 번 새 raw로 실행했다.
+
+`p03-host-native-sdk-luna-attempt02.log`는 exit0·11.301초·SHA-256 `e11383af6cc0be086d9aadb89b2cda6ebb02709eb54e2e526725fab01258d27c`다. 기존 외부 model-runtime-project의 실제 session1/tick0/publication1/authority snapshot1/generation1, source digest `sha256:e6fa43a687b25ce65829dd0e958dd39b11f60137aa47e52d5ef3314cab694d52`, present sequence60과1280×720을 관측했다. 창을 닫은 뒤 같은 Manual authority의 Step이 tick0→1로 진행했고 닫힌 consumer의 Stage는 `asset_activation_unavailable`로 거부했다. 종료 보고는 stopped/StopRequested/final tick1이었다. 실제 창·반복 표시 metadata·동일 authority 생존·종료의 근거다. 실제 창 이미지의 픽셀 정확성·144fps·실행 중 새 세대 교체를 증명하지 않는다. 추가 오디오 실행은 하지 않았다.
+
+후속 CLI all-feature test01은 WireResult에 Debug를 요구한 expect_err와 불필요한 mut 진단으로 compile에 실패했다. raw `p03-host-cli-allfeatures-test-luna-attempt01.log` hash는 `e269711801ff5fab60cc0097652bcdd58731d4379ed15c0123cb777a1ecd18e5`다. Luna가 assertion을 match로 유지하고 mut만 제거해 해당 파일을 다시 동결했으며, 집중 재검증을 이어간다. CLI 실제 source 교체·live capture·전체 workspace/CI/두 package 인수와 P03/D1/D2/D3는 계속 미완료다.

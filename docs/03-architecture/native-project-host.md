@@ -1,10 +1,10 @@
 # Native project host: 엔진 라이브러리와 CLI의 조합 경계
 
-상태: source 대조 후 구체 설계안 · b.2 인수/최종 API 동결 전 · 2026-10-17
+상태: b.2 인수·runtime consumer 계약 동결·renderer/host API 최종 리뷰 전 · 2026-10-17
 
 ## 목적과 현재 사실
 
-CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별로 다시 구현하지 않도록 공통 engine library로 만든다. [staged renderer](staged-render-asset-generation.md)와 [headless CPU activation](headless-asset-generation.md)의 사이를 연결한다. CLI에만 있는 기능을 공개 엔진 SDK라고 보고하지 않는다. P03.3b.2/PR16은 A-042 뒤 clean package combined72가 회복됐고 test-only wait 경계 수정 후 최종 CI/PR 인수가 남았다. 이 문서는 b.3 코드 착수나 제품 통과가 아니다.
+CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별로 다시 구현하지 않도록 공통 engine library로 만든다. [staged renderer](staged-render-asset-generation.md)와 [headless CPU activation](headless-asset-generation.md)의 사이를 연결한다. CLI에만 있는 기능을 공개 엔진 SDK라고 보고하지 않는다. P03.3b.2는 PR16/main360ceb6에서 인수했다. [runtime consumer 계약](project-generation-consumer.md)은 첫 코드 작업을 동결하며 renderer/host는 아래 최종 검토를 거친다. 이 문서가 b.3 구현/제품 통과 증거는 아니다.
 
 현재 `daedalus-cli/src/project_view.rs`가 binding 수집, bounded input/packet 전달, snapshot→packet, actor 호출과 종료를 조합한다. `project_view_control.rs`의 JSONL·wire ID·stdin/stdout worker는 transport adapter다. `daedalus-renderer/window.rs`는 OS event loop·surface·한 PacketRenderer/device를 소유한다. runtime은 renderer에 의존하지 않는다. 이 분리를 보존한다.
 
@@ -40,15 +40,14 @@ bootstrap surface present는 game presented/ACK가 아니다. actor의 generatio
 | `ProjectSourceIdentity::Initial` | 실제 SessionId·generation1·source digest. candidate/activation ID를 만들지 않음 |
 | `ProjectSourceIdentity::Candidate` | session·실제 PreparationId/ActivationId·expected/proposed generation·digest를 묶음 |
 | `ProjectSourceLease` | non-Clone·move-only source 접근. `with_source`의 짧은 borrowed callback, identity, cancellation/currentness 조회만 제공 |
-| `ProjectSourcePin` | 실제 leaf/sidecar/packet/plan에 복제할 opaque source 수명 pin. renderer 자원을 소유하지 않아 역방향 cycle을 만들지 않음 |
+| `source_pin(): Arc<dyn Send + Sync>` | private source marker를 표준 erased Arc로 반환. host가 renderer-local opaque pin에 넣으며 runtime type 의존/역방향 cycle 없음 |
 | consumer의 initial/candidate take | initial은 한 번, pending candidate payload는 capacity1. control 결과·JSON에는 Arc/큰 source를 넣지 않음 |
-| `try_mark_device_ready(identity)` | final upload serial 완료를 확인한 host가 제출. actor가 exact identity/currentness를 검증 |
-| `try_fail_stage(identity, failure)` | CPU/device 준비의 typed phase/code·capped 진단. Failed 전이 뒤에도 실제 보유 backing은 회수 완료까지 charge 유지 |
-| `try_ack_presented(identity)` | Commit 후 실제 present 호출에 해당하는 작은 publication metadata. compositor scanout 증명은 아님 |
+| `try_report_stage(identity, Ready/Failed)` | final upload serial 완료 또는 bounded CPU/device failure를 제출. actor의 exact identity/currentness 검증 뒤에만 Applied |
+| `try_ack_presented(ProjectPresentedFrame)` | 실제 SessionFrame에서 복사한 opaque publication identity·checked present sequence·neutral view metadata. 실제 present 호출 보고이며 scanout 증명은 아님 |
 
 source pin이 남아 있으면 원래 lease를 drop해도 source charge를 반환하지 않는다. 기존 worker의 Sized PreparedProject canonical Arc가 `try_unwrap`될 때까지 active/candidate/retired 장부를 유지한다. borrowed Rust source는 신뢰된 SDK 경계이며 caller가 임의로 Clone/allocation하는 것까지 sandbox로 막는다는 뜻은 아니다.
 
-ready/failure는 현재 stage의 유한 terminal metadata 한 슬롯으로, presented는 latest-only metadata로 처리하는 방향이다. 정확한 actor 반영 전 Busy는 효과 없이 반환하고 같은 identity를 재시도할 수 있다. 이미 반영된 같은 결과는 idempotent이며 conflicting/foreign/stale identity는 거부한다. Stage 성공 뒤 cleanup이 새 worker 결과를 버렸던 실제 회귀를 반복하지 않는다.
+ready/failure는 현재 stage의 유한 terminal metadata 한 슬롯, presented는 별도 latest-only metadata다. 접수 Queued와 실제 actor 반영 Applied를 구분한다. Busy는 효과 전 거부이며 같은 identity를 재시도할 수 있다. 이미 반영된 같은 결과는 idempotent이고 conflicting/foreign/stale identity는 거부한다. Stage 성공 뒤 cleanup이 새 worker 결과를 버렸던 실제 회귀를 반복하지 않는다. 상세 API/한도는 consumer 문서를 기준으로 한다.
 
 host는 window의 present 관측을 받았다는 이유만으로 이전 generation의 source/ready pin을 먼저 반환하지 않는다. matching ACK가 actor에 수락될 때까지 같은 pending metadata를 유지한다. 같은 committed generation 내 더 최신 present로 coalesce할 수 있지만, 필요한 ACK를 잃은 채 다음 generation으로 넘어가지 않는다. actor ACK 수락·old GPU 마지막 serial 완료·실제 CPU alias 해제를 각각 확인한 뒤 retired source를 해제한다. 비어 있는 씬도 explicit generation/source pin을 유지하므로 mesh가 없다는 이유로 present 전 source가 회수되지 않는다.
 
@@ -94,6 +93,8 @@ packet instances/normal cache는 source별 prepared CPU와 별도의 frame 비�
 | canonical frame | unique packet instances·OnceLock normal cache·추가로 retain하는 validation map·wrapper/문자열을 한 번씩 계산. 기본 **per-frame16MiB/aggregate48MiB·최대3 unique backing** 제안 |
 | CPU scratch | 한 owner의 extraction/validation/prepare 계획 scratch16MiB 제안. snapshot index, Vec→Arc 겹침, ID/map/slot/resource/victim 계획 포함. upload packing scratch와 별개 |
 
+renderer prepared-generation registry는 두 슬롯으로 active+candidate 또는 active+retiring을 보유하는 방향을 채택한다. cancelled/failed partial GPU 작업도 retiring 슬롯을 점유한다. old alias/serial이 남으면 다음 renderer prepare는 Busy다. runtime source의 active/candidate/retired 세 슬롯·cooked 합산 budget과 이 renderer의 두 슬롯을 같은 것으로 부르지 않는다. runtime source candidate가 준비됐어도 renderer 슬롯을 얻기 전에는 큰 prepared backing을 새로 만들지 않는다.
+
 위 숫자는 실측/최종 계약이 아니다. 최초 리뷰의 frame8MiB 제안은 opaque validation을 보유할 때 추가 normal map 비용까지 검증한 수치가 아니어서 그대로 동결하지 않았다. 현재 source의 HashMap load-factor/bucket 논리 estimator·실제 capacity·checked size_of로 각 경로의 합산을 검증해야 한다. 이 논리 byte accounting은 allocator/RSS 상한이 아니다. prepared geometry64MiB/128MiB의 기존 GPU 장부와 별도 legacy CPU copy 장부는 같은 수치라도 의미를 혼합하지 않는다.
 
 engine-held frame slot은 ready·새 current/committed frame·held previous presentation/outcome 등 최대3개의 unique backing으로 제한한다. 같은 backing의 clone은 byte/slot을 다시 세지 않고 회수를 막는 pin이다. 다른 backing을 추가할 여유가 없으면 effect-free Busy이며 기존 화면/입력/actor는 유지한다. candidate device-ready를 보고하기 전 첫 committed packet에 필요한 frame reservation도 확보하고, Commit 뒤 capacity 부족이 처음 드러나지 않게 한다. 한 frame/candidate 자체가 per-item 상한을 넘거나 최소 한 항목도 진행할 수 없는 config는 typed budget/config 오류다. 신뢰된 외부 SDK의 임의 clone/String copy를 sandbox로 제한한다는 뜻은 아니다.
@@ -102,8 +103,8 @@ engine-held frame slot은 ready·새 current/committed frame·held previous pres
 
 ## 착수 전 남은 검증과 작업 분할
 
-1. b.2 실제 native 회귀/PR 인수. 현재 실패를 생략하지 않는다.
-2. runtime initial/candidate port·failure/cancel/ACK와 exact Busy/idempotency를 최종 동결.
+1. b.2 실제 native/PR 인수는 main360ceb6에서 확인. 과거 native 실패 원인 미확정은 보존.
+2. runtime initial/candidate port·failure/cancel/ACK·Queued/Applied/Busy는 consumer 계약으로 동결. 구현/실제 검증은 후속.
 3. renderer의 combined stage+old-ready draw·partial resource completeness·CPU leaf/frame registry와 수치 동결.
 4. existing type의 Send/auto-trait compile probe3건은 확인. transient frame accounting·window-close 후 실제 device retirement owner는 미검증. probe를 production 기능 통과로 쓰지 않는다.
 5. Luna xhigh에 runtime/renderer/host/CLI 파일 소유권과 단일 Cargo lease를 나눠 단계별 구현. 기존 helper/프로토콜/service를 확장하고 새 smoke framework를 만들지 않음.

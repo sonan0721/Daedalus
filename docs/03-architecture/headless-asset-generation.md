@@ -1,6 +1,6 @@
 # P03.3b.2 동일 authority의 CPU 세대 commit
 
-상태: native headless 계약 동결·A-042 뒤 clean package combined72 회복·test-only wait 수정 후 최종 CI/PR 인수 대기 · 2026-10-17
+상태: b.2 인수·PR16/main360ceb6 동일 tree·native 회복/원인 미확정 기록 보존 · 2026-10-17
 
 ## 목적과 제한
 
@@ -108,7 +108,7 @@ cooked/catalog 총 상한은 기존 옵션의 최대256MiB다. active+candidate/
 
 mailbox 포화로 즉시 게시하지 못한 경우 actor commit을 되감지 않는다. 실제 committed identity와 published frame identity를 구분하고 후속 actor 진행에서 최신 generation의 게시를 재시도한다. 반복 게시가 새 logical project payload를 복제하지 않는다. frame 독자가 source backing을 장부 밖으로 꺼낼 새 Arc getter는 추가하지 않는다.
 
-렌더러의 explicit packet sequence·stage-only device 준비·actual-present ACK는 후속 계약이다. 이번 headless frame 재게시가 기존 창을 자동 지원하게 하는 것은 아니다.
+렌더러의 explicit packet sequence·제한된 device 자원 준비·actual-present ACK는 후속 계약이다. 이번 headless frame 재게시가 기존 창을 자동 지원하게 하는 것은 아니다.
 
 ## CLI/protocol2 adapter 계약
 

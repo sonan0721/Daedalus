@@ -58,6 +58,8 @@ P03.3b.2에서는 [headless 계약](../03-architecture/headless-asset-generation
 
 그 뒤676f93f도 다섯 CI를 통과했고, A-042 사용자 출력 보고 이후 같은 보존 extracted CLI의 native-only19건이 실제 Ended로 통과했다. 현재 회복 결과는 과거 실패를 지우거나 근본 원인을 확정하지 않는다. 최신 clean source/package의 combined 장치 검사와 새 head CI를 확인한 뒤 PR ready/정확한 head의 squash/main 동일 tree를 처리한다. 반복 비용을 줄이기 위해 보존 binary에 전체 suite를 먼저 돌린 뒤 새 package에서 다시 반복하지 않는다.
 
+최종 head523757a의 다섯 CI·두 packaged CPU62·clean package와 실제 장치 검증 bytes 동일성 뒤 PR16을 ready/squash했다. main360ceb6·head·CI synthetic8d5bbf1은 tree57d87c2ab924e5efd2690313df7330e0eab1f0db로 같았다. [최종 인수 기록](../06-worklog/2026-10-17-render-generation.md)은 이전 CI 실패/해결·native 회복의 scope를 보존한다. 이 headless CPU 하위 gate의 병합이 P03 전체나 D1의 완료는 아니다.
+
 기여 문서의 구조는 Bevy·Godot의 공식 기여 입구를 참고하되 대규모 팀 규칙을 그대로 복제하지 않았다. [Bevy](https://github.com/bevyengine/bevy/blob/main/CONTRIBUTING.md), [Godot](https://raw.githubusercontent.com/godotengine/godot/master/CONTRIBUTING.md)
 
 ## 개발·CI 파이프라인 최적화

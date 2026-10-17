@@ -4,7 +4,7 @@
 
 ## 문서 목적과 선행 게이트
 
-[전체 activation 계약](project-asset-activation.md)의 renderer 부분을 실행 가능한 작업 경계로 좁힌다. [b.2 headless](headless-asset-generation.md)의 source commit은 실제 픽셀 교체가 아니다. b.2 lifecycle·통합 인수 뒤에 이 계약의 미결 API/예산을 리뷰·동결하고 Luna xhigh에 코드를 배정한다. 현재 구현 착수·b.2 또는 b.3 인수를 표시하지 않는다.
+[전체 activation 계약](project-asset-activation.md)의 renderer 부분을 실행 가능한 작업 경계로 좁힌다. [b.2 headless](headless-asset-generation.md)는 PR16/main360ceb6에서 인수했지만 source commit이 실제 픽셀 교체는 아니다. [runtime consumer](project-generation-consumer.md) 경계는 먼저 동결했으며 이 renderer의 미결 API/예산은 리뷰 후 해당 코드 작업을 배정한다. runtime port 구현만으로 이 renderer나 b.3를 인수하지 않는다.
 
 목표는 같은 Engine/SessionId·live pose를 유지하며 CPU 후보 준비→기존 device의 제한된 업로드→actor commit→새 generation의 실제 present 관찰→old CPU/GPU 회수를 연결하는 것이다. 새 renderer/device/캐시/프로토콜을 세대마다 만들지 않는다. 연결된 audio의 전환은 c의 별도 선행 조건이며 이 단계에서 audio를 붙인 채 준비를 생략해 성공시키지 않는다.
 

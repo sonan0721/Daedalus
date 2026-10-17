@@ -74,6 +74,16 @@ CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 �
 
 이후 새 실행기로 실제 docs 명령을 실행해 child/runner0·launched=true·0.1866초와 completion footer를 확인했다. raw `p03-run-logged-docs-luna-attempt01.log` SHA-256은 `7a3330b99fdd92d88a4e1bd6751627cae6c1ea3655ff6687a986b04b39256132`이며 root도 bytes/hash를 독립 대조했다. child17·SIGTERM·기존 binary bytes 불변/child 미실행·launch 오류·주입 hash 실패의 의미는 focused tests가 검사했다. 이 도구는 retry/build/lease를 자동화하지 않으며 과거 잃은 증거를 되살리거나 엔진 기능·GPU 동작을 인수하지 않는다.
 
+## DEV06 실행기·설계 문서 PR18 인수
+
+[PR18](https://github.com/sonan0721/Daedalus/pull/18)은 렌더러 WIP를 제외한 Python 실행기/테스트·설계 문서만 선택 commit했다. exact head `226b698489850c662814123c55e7c2b0a3d5d2b8`, CI checkout `341b2a88e8b0d0299232b5dab6eaf8c6159db491`, squash main `daa161d405e80e1b53ab1167cb8d9fc506efd02a`의 tree는 모두 `c65ada3b6a7adde117d9a4ad86b40a70225871b5`다. 다섯 check 성공 뒤 ready/squash했고 Publish skipped·tag/공개 Release 없음이다.
+
+docs run38992499013/job117277735782는 실제 Python70개·문서 검사를 통과했다. Rust run38992499081/job117277736241는 기존 committed 엔진 CPU337/failed0/ignored12와 locked check/fmt/strict Clippy를 통과했다. managed run38992498967/job117277735586도 성공했다. release run38992499016의 Linux117277736002/Mac117277736037는 각각 실제 packaged CPU62개를1.038902초/4.416979초에 통과했다. 새 렌더러 source가 remote checkout에 포함됐다는 뜻은 아니다.
+
+두 CI staged binary의 SHA-256은 Linux `b7864d6e4207c93354b8bfbcae971e5a9a9d05e4312deda4bfaa5bbc3f85a1b8`, Mac `fbe7d138d7129b14df8ee2a6cf534f086175b9ef509477ce3e329968d1e2eff5`로 PR17과 같다. runtime/renderer/packaging backend·device helper 변경이 없고 Mac binary는 위 PR17의 실제 downloaded artifact native72 검사와 같은 bytes다. 따라서 이 workflow-only PR을 위해 native 검사를 반복하지 않았다. archive/manifest는 새 source metadata를 가지므로 archive 전체가 같다고 보고하지 않으며 새 hardware run도 주장하지 않는다.
+
+새 실행기로 보존한 `dev06-ci-docs-root-attempt01.log`/`dev06-ci-rust-root-attempt01.log`/`dev06-ci-release-root-attempt01.log`의 SHA-256은 순서대로 `13cbff7f463723c919d9eb81c20bb94cb46edede85515ad8f22969cb297f76ae`/`fc205a791d8a965aeac53ad933455dfe1ccfeaf01f8bc89f5fea984d07016bd2`/`25d569f9c5c019366393e1f551deb434ba653dbc520850fdc66c2ffa086cd7bf`다. merge 결과 metadata JSON `dev06-ci-pr-root-attempt01.json`은 `590c4024829de1db4273f8f9b816d2b2615de6451356a4f512198d3be529be12`다. 실제 head/tree를 확인한 후 HEAD만 같은 main tree로 정렬하고 renderer WIP를 보존했다. 실행기 인수와 b.3.2 CPU/device·host·P03·D1/D2/D3의 미완료를 구분한다.
+
 ## runtime source 최종 동결·로컬 검증
 
 마지막 fixture 리뷰에서 nonwaiting port의 정상 호출도 actor와 경합하면 합법적인 Busy를 반환할 수 있음을 확인했다. 테스트의 정상 성공/오류 판정만 기존 방식의 유한 Busy 재시도로 묶고, mutex를 의도적으로 잡고 Busy를 검사하는 assertion은 그대로 유지했다. production·deadline·임의 sleep을 바꾸지 않았다. 이 수정 뒤 runtime source 네 파일을 동결했다.

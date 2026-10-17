@@ -33,6 +33,8 @@ host try_shutdown은 종료 신호를 보낸 뒤 finished coordinator만 join한
 
 작은 status/outcome은 session·active generation/digest·activation/CPU owner/view lifecycle·논리 장부·bounded resource counters·latest accepted publication과 last actual-present identity/view·최대 유한 failure code/message를 구분한다. publication/authority sequence와 tick은 각각 보존한다. `PacketPresentationWindowOutcome`이나 final packet Arc를 public outcome으로 반환하지 않는다. window interval samples 등 기존 유한 report를 재사용하되 source/이미지/instance 배열을 넣지 않는다.
 
+CLI 연결의 첫 compact publication 관측은 `NativeProjectHostStatus::last_queued_publication() -> Option<&ProjectPublicationIdentity>`로 구체화한다. 기존 runtime의 실제 publication token을 재사용하고 window Frame payload의 try_send가 성공한 뒤에만 갱신한다. 이는 ingress enqueue 사실이며 UI dequeue/accept·draw·present를 뜻하지 않는다. non-window/아직 전달 전은 None이다. 별도의 UI-accepted 관측은 이 getter로 구현됐다고 하지 않는다. `NativeProjectHost::shutdown_report() -> Option<&SessionShutdownReport>`는 기존 private service의 bounded 보고를 빌려 반환하고, 미완료에는 None을 유지한다. source/snapshot/packet root가 없는 기존 type을 재사용한다.
+
 첫 host slice의 `start`는 현재 native 준비 factory처럼 **동기 initial load**다. 호출 전에 창이 생겼다고 하거나 async로 문서화하지 않는다. initial source를 두 번 읽지 않으려면 runtime의 additive render-consumer factory가 exact initial source lease를 제공해야 한다. 이후 교체는 같은 session 안에서 background 준비한다.
 
 구체 startup 순서는 pure options/limits 검증 → signals/유한 slots 할당 → 기존 render-consumer factory → host가 service/port 즉시 보유 → private coordinator와 단일 CPU owner 시작이다. coordinator는 run_view 전부터 OOB stop을 service에 전달한다. `start -> Result<NativeProjectHost, StartError>`의 Err는 service 반환 전 검증/factory 실패까지만 쓴다. factory는 기존 동기 partial cleanup을 수행하므로 start 전체를 nonwaiting API라고 하지 않는다. service가 생긴 뒤 spawn 등의 실패는 consumer close/service stop과 Failed status를 가진 host를 Ok로 반환해 caller가 실제 try_shutdown을 계속할 수 있게 한다. Ok는 Ready/Running 보장이 아니며 status를 확인한다. 살아 있는 service/thread를 잃는 plain late Err를 만들지 않는다.
@@ -152,6 +154,8 @@ CPU job의 catch는 CPU owner를 바깥에 보유한 범위에서 실행하며 j
 현재 `project_view.rs`의 BindingMap/collect_bindings·latest_frame/submit_wait·InputTicket와 native 입력/ticket 진행은 host로 옮긴다. run_window/coordinate는 host의 typed coordinator·CPU owner·window lifecycle로 나누며 무거운 prepare/extract를 작은 입력 loop에 남기지 않는다. CLI의 ProjectViewArgs/validate_args, ProtocolController/StdioTransport·wire DTO/JSONL, build_report/emit_report와 파일 출력은 adapter로 남긴다. protocol의 Close는 host control handle에 연결하며 별도 Engine을 시작하지 않는다.
 
 옮긴 코드의 동작을 복사한 두 번째 구현을 유지하지 않는다. 다만 P03.3c 이전의 기존 audio-view 경로는 지원을 잃지 않도록 별도 유지하고, 공통 입력/제어 helper 재사용 범위를 명시한다. 새 activation+audio 조합은 준비를 생략한 성공이 아니라 효과 전 unsupported 진단이다.
+
+첫 additive CLI 전환은 explicit `--asset-activation` 경로이며 기존 non-activation/audio 경로는 보존한다. 이 한정 때문에 기존 non-activation packet coordinator 전체가 이미 제거됐다고 하지 않는다. protocol·diagnostic 입력 mapping은 adapter에 남기고 새 활성화 경로의 load/CPU/frame/stage/window/회수는 host만 담당한다. flag·report v2·Close/whole stop·파일 소유권은 [CLI activation 연결 계약](native-project-view-activation.md)으로 동결한다.
 
 비장치 integration test는 새 crate의 public API만 import해 외부 temporary project start→attach/read/Step→status→stop/실제 shutdown을 수행한다. daedalus-cli를 dependency로 삼거나 CLI module을 test에 include하지 않는다. 후속 window hardware 검사는 실제 present→view close→같은 authority Step/read와 Stage/Commit 거부→whole shutdown을 확인한다. 이 최소 SDK 시험은 전체 C# SDK/AI 제작 제품 인수를 대신하지 않는다.
 

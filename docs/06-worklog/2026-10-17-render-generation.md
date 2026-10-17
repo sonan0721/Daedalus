@@ -144,4 +144,47 @@ raw는 `p03-render-device-cpu-{allfeatures,default,nodefault}-luna-attemptNN.log
 
 CPU checkpoint 뒤 Cargo lease를 반환하고 C에는 effective whole-record/row·frame/overlay headroom·permanent/Busy 분리의 source-only 수정, A에는 scratch1MiB와 staging1MiB를 서로 독립해 검증하는 실제 GPU 회귀 source를 배정했다. 낮춘 staging 시험은 scratch를 기본값으로 유지해 두 원인을 숨기지 않는다. padding 최소 단위 거부는 실제 frame 최소 예약에 가려지면 pure helper 시험으로 분리한다. cap/deadline/queue 증가나 runtime/window/CLI 변경은 허용하지 않는다. 소유자 동결 후 한 lease로 다시 CPU·strict·실제 GPU 검증한다. 이 시점에 GPU·새 renderer source의 workspace/package/CI·host·전체 b.3/P03/D1/D2/D3는 미완료다.
 
-사용자가 다시 조정자의 실행에서도 일부 소리가 들렸다고 확인했다. A-042의 가청 보고를 보강하지만 정확한 실행/시점·loopback 계측·과거 실패 원인은 확정하지 않는다. 별도 새 오디오 재생 시험을 수행한 것으로 세지 않는다.
+사용자가 조정자의 실행에서도 일부 소리가 들렸다고 한 보고는 A-042에 기록했다. 정확한 실행/시점·loopback 계측·과거 실패 원인은 확정하지 않는다. 같은 사용자 보고를 두 번째 확인이나 별도 새 오디오 재생 시험으로 세지 않는다.
+
+## 낮춘 cap 구현과 첫 실제 GPU feedback
+
+Luna C는 공통 frame-write byte 계산을 normal submit/clear/stage 계획에 재사용하고, raw quota·실제 vertex Vec capacity scratch·padded staging·frame/overlay/in-flight headroom으로 whole record/row를 나눈다. global 단위 초과는 효과 전 영구 오류다. 가변 dirty frame 때문에 여유가 없으면 frame-only submit으로 stage cursor를 유지한다. 매번 필요한 overlay 최소 비용과 양립할 수 없는 남은 단위는 create 전에 오류로 알리며, 기본 예산에서는 O(1) bound로 통과한다. 좁은 cap에서만 이미 완료된 단위를 제외한 remaining scan을 사용한다. 이 설명은 source와 아래 집중 검증의 범위이며 host 연결 인수가 아니다.
+
+Luna A는 기존 여섯 실제-adapter 시나리오에 lowered scratch, lowered staging+overlay, 65pixel/padded512byte 행의 cap400 사전 거부, dirty old frame의 일시 지연/동일 frame 재시작을 더해 열 개를 작성했다. generated project·synthetic snapshot과 실제 GPU를 사용하며 runtime authority/window 통합 시험은 아니다.
+
+root의 all-features CPU attempt01은 compile 오류2개로 exit101이었다. clear-only 통계에서 refactor 뒤 사라진 overlay 변수와 sibling-private field를 읽은 테스트였다. 공통 frame 계산 결과 재사용·기존 stage 상태 조회 method로 각각 수정했다. raw `p03-render-lowered-cpu-allfeatures-root-attempt01.log` SHA-256은 `da9ee9828168cca24a951dd6d6ade18d0fb8d4d46ff923f295eb63004fec0f3c`다. attempt02는71pass/0failed/18ignored·runner6.704초에 통과했고 raw SHA-256은 `f4def3c239d7b39b8e02f7349861f063664bfd9489a973a7ca6504fbfa590128`이다.
+
+첫 실제 GPU 열 개는 Apple M3 Pro/Metal/IntegratedGpu에서7pass/3failed·test8.32초였다. raw `p03-render-staged-gpu-root-attempt01.log` SHA-256은 `c86061e86da7787f8b177f0331ed61054393d91ccee43e273240c56cfe70703a`다. 낮춘 scratch/staging, padded 최소 행 거부, 큰 geometry/mip·취소/drain·old pose/token·cold pipeline 시나리오는 통과했다. 실패 세 건은 다음과 같이 분리해 후속 수정한다.
+
+- victim이 없는 후보를 status poll만 했는데 `victims_applied=true` 때문에 Admitted에서 Uploading으로 바뀌었다. 실제 create/upload 시작 여부를 기존 progress로 판단하도록 production phase 보고를 수정한다.
+- quota 거부 전후 snapshot의 in-flight2→1은 정상 completion poll/회수였다. 실제 이전 제출을 drain한 뒤 baseline을 잡아 preflight의 새 resource 효과만 비교한다. ledger 수치를 제거해 차이를 숨기지 않는다.
+- dirty frame의 전체 upload write counter는 instance+globals 두 쓰기도 센다. candidate stage counter는 그대로였지만 전체 쓰기 수를 불변으로 기대한 테스트가 잘못됐다. 두 쓰기/256byte와 texture 불변을 정확히 확인하도록 수정한다.
+
+이 시점에 실패한 세 건의 수정·재검증과 전체 GPU/strict/workspace/package 인수는 대기다. 반복 실행 수를 고유 테스트 수로 합산하지 않는다. legacy slot-planner의 per-entry slack은 논리적 보수 추정이고 Vec/HashMap/HashSet allocator/RSS의 수학적 상한으로 보고하지 않는다. 전체 b.3/P03/D1/D2/D3는 미완료다.
+
+수정 뒤 fully-qualified/exact 검사로 ledger 포화 case는 실제1개/1.65초, dirty frame deferral case는 실제1개/0.86초가 통과했다. raw `p03-render-staged-ledger-gpu-root-attempt01.log`/`p03-render-staged-headroom-gpu-root-attempt01.log` SHA-256은 각각 `7a9f4214c9bf0950b8ab0dcc5deb68064e2dd794bfa47c5cb23674bc6cf892df`/`77811067ff816e70581790dcfa66f85a90551e9ec5d4fe68cb5be99ea7c0de74`다. quota case의 새 실행은 앞선1/2/3-create 거부/진행 비교를 지나 cache-hit metadata에서 실패했다. raw `p03-render-staged-quota-gpu-root-attempt01.log` SHA-256은 `e1754a0833827f3b110060c9ea3b34fda65dd2344a8d5e0c51d1f6051f797b50`다.
+
+cache-hit의 실제 자원 readiness 검사는 기존 initialization serial로 올바르게 진행됐지만 status는 이번 stage의 새 upload만 보고해 `initialization_serial=None`이었다. [device 계약](../03-architecture/render-device-generation.md)에 Ready 요약은 필요한 upload 초기화 의존성의 최댓값이며 cache-hit도 상속하고 빈 의존성만 None이라는 의미를 명시했다. 기존 readiness traversal에서 completeness와 작은 serial 요약을 함께 얻도록 Luna C에 배정했다. last-use/draw serial을 초기화로 간주하거나 실패 assertion을 제거하지 않는다. 이 추가 수정의 실행 검증은 아직 대기다.
+
+## renderer 로컬 최종 회귀
+
+cache-hit metadata 수정 뒤 quota exact case는 실제1개/1.48초에 통과했다. raw `p03-render-staged-quota-gpu-root-attempt02.log` SHA-256은 `c0ce98c1c41052f6ba7c69a658da03710d6e841e0f7bbcdc0063a2da8d384a4d`다. 이어 전체 renderer 실제 GPU는 library18+capture integration1=19pass/0failed였다. 첫 full raw `p03-render-all-gpu-root-attempt01.log` SHA-256은 `0a79b12cc28cdecf836ef640da36a9b4b5ba4ee23a94ce744e86a8aaeb58315b`다. subset/재실행 수를19개에 더하지 않는다.
+
+다음 strict Clippy attempt01은15개 진단으로 실패했다. CPU의 명시적인 준비/장부 함수와 public render boundary의 인자 수, 새 private frame helper의 인자 수, 불필요 closure/borrow, 테스트 initializer 표현이었다. Luna D/C가 소유 파일에서 동작을 유지하는 정리만 했다. 필요한 boundary의 인자 수 lint는 이유를 적어 해당 함수에만 제한했고 private frame helper의 dimensions는 tuple로 묶었다. crate/module 전체 경고를 끄지 않았다. raw SHA-256은 `b5e029e9c3bf373d3037a872594d9aa6929745b2749c9422e0684ab3eb0688f0`다.
+
+| 최종 검사 | 실제 결과 | raw SHA-256 |
+| --- | --- | --- |
+| workspace all-feature CPU attempt02 | 359pass/0failed/23ignored, runner17.739초. renderer72 포함 | `6c3c577e8344eb14963409860a4093eda965bb18e1f5fe7d65181ced5d6993c2` |
+| renderer 실제 GPU attempt02 | M3 Pro/Metal, library18+integration1=19pass, runner16.180초 | `80fb6f00baa10d16901113a45c698f666875c7391174a8f92835327a9d2aeed2` |
+| workspace all-target/all-feature strict Clippy attempt02 | success, runner5.071초 | `a7609ba117c525086c605082f9accb4bb677cfbaa6140a9bd42df4b6d1507269` |
+| cargo fmt all/check attempt02 | success | `296706f7339ab61518bd00435240661a8ec10234325b3ed8e3dc9dd453cf636b` |
+| included GPU test standalone rustfmt/check | success | `4541e1e908b5760190a858a2f682ad1d4d182ebc491988e55e81e1ddca9ccf0e` |
+| Python discovery attempt01 | 70pass/0failed,11.347초 | `9e8d677dfc432d89a14abbe35f3529b413e12fe2c295b8423e06dd66ff36e16e` |
+
+위 파일명은 각각 `p03-render-workspace-cpu-root-attempt02.log`, `p03-render-all-gpu-root-attempt02.log`, `p03-render-workspace-clippy-root-attempt02.log`, `p03-render-final-fmt-root-attempt02.log`, `p03-render-final-gpu-test-fmt-root-attempt01.log`, `p03-render-final-python-root-attempt01.log`다. 마지막 전체 검사 이후 renderer.rs의 한 predicate 줄바꿈만 rustfmt로 고쳤고 fmt를 다시 통과했다. 실패 fmt attempt01도 보존했으며 SHA-256은 `e468fc8ce1df0a327b0b8918a0769dd3e13633d2bf30adc02c451a04f3e160a8`다. 이 whitespace 변경으로 동작 시험을 반복하지 않았다.
+
+style 정리 전 같은 최종 로직의 renderer default는71pass/18ignored, no-default는56pass/17ignored였다. raw `p03-render-final-cpu-default-root-attempt01.log`/`p03-render-final-cpu-nodefault-root-attempt01.log` SHA-256은 `45020fb5a0c958b45ff1654be859f5557de59005de7532051299fd800d44b030`/`f4f1ff7e5e09647c28088670492b9f7350a0d3d0ae5d104924759da230ad09b2`다. style 정리 전 workspace 첫 실행도359pass/23ignored였고 raw `p03-render-workspace-cpu-root-attempt01.log` SHA-256은 `93e996d98b5559fd22deb6d6ffc3bd0fd4297ed64536aacefc8ff20a5d96c194`다. Mac 전용 audio diagnostic ignore가 있어 Linux CI의 ignore 수와 다를 수 있다.
+
+독립적인 기존 managed 회귀는 pinned home SDK10.0.402로 확인했다. bridge build, warning/error0의 Release solution build, 실제 Rust-backed self-test, native round-trip/module lifecycle 두 integration scenario가 통과했다. 순서대로 `p03-render-managed-{bridge-build,build,selftest,integration}-root-attempt01.log`의 SHA-256은 `868681d4f0bbad1b883d85a372c2c8d32bceb59b297a3b7c02e5dae28142d099`/`b1182587d1e1dc6239a83020d51a72445266792559e1978531660db3859a58bf`/`c958af7b5356db019fb0e871336978350000be3bbf694fa027be7522fdf6a7bb`/`6c403eb8673a0281cd18245d17a5fb54d4aaf0ef61c7207790e7e7ed20bb9e67`다. 새 renderer가 C# SDK나 host에 연결됐다는 뜻은 아니다.
+
+Luna가 작성한 source와 root 리뷰·로컬 검증은 이 범위까지다. 다음은 clean PR의 다섯 check·두 package와 실제 artifact의 회귀/동일성·main tree 인수다. 해당 인수 전 b.3.2a/b 체크는 열어두며, host/실제 세션·창/SDK 연결과 전체 b.3/P03/D1/D2/D3도 미완료다.

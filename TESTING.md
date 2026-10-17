@@ -175,7 +175,7 @@ The nine explicit Metal tests include independent sRGB/unlit sprite references, 
 
 ## Staged renderer generations under implementation
 
-The managed CPU owner and same-device staging path have separate [CPU](docs/03-architecture/render-cpu-generation.md) and [device](docs/03-architecture/render-device-generation.md) contracts. Focused renderer library CPU tests have passed in default, all-feature, and no-default configurations at the recorded checkpoint. Lowered-cap upload fixes and their regressions are still being integrated; the worklog identifies the source and results for each attempt.
+The managed CPU owner and same-device staging path have separate [CPU](docs/03-architecture/render-cpu-generation.md) and [device](docs/03-architecture/render-device-generation.md) contracts. Local validation passes 359 workspace CPU tests, 19 real Metal renderer tests (ten new staging cases and nine existing cases), strict Clippy, formatting, and 70 Python tests. Focused renderer CPU configurations and every failed/fixed attempt are recorded in the worklog. Clean PR/package acceptance and host integration remain pending.
 
 The new native-adapter cases are ignored by CPU CI. Select them explicitly and serialize device use:
 

@@ -24,6 +24,8 @@ private `ResourceRequests<'a>`는 geometries·model_bindings·sprite_bindings의
 
 stage 상태는 Admitted/Uploading/AwaitingCompletion/Ready/Cancelling/Retiring/Cancelled/Failed를 구분하는 bounded 표현을 사용한다. 외부 status의 diagnostic은 최대64byte code·2048byte message이며 전체 논리 metadata는32KiB 이내다. 실제 used/remaining bytes·create calls·upload/completion serial을 보고한다. 예상 작업량과 완료 작업량을 섞지 않는다. 알려진 terminal status는 유한 마지막 슬롯만 보존하며 무제한 역사 map을 만들지 않는다.
 
+아직 create/upload가 없는 후보는 status poll만으로 Admitted에서 Uploading으로 바뀌지 않는다. victim 목록이 비어 있다는 사실은 작업 시작의 근거가 아니다. 실제 create/upload progress가 시작 상태를 구분하며, 완전히 준비된 cache-hit 후보는 별도 불필요한 upload 없이 Ready가 될 수 있다.
+
 CPU generation의 private canonical resource-set token을 stage admission 때 보존한다. Ready 뒤 큰 StageInput/plan을 반환해도 작은 token과 source pin은 필요한 실제 수명까지 유지한다. 첫 candidate frame은 기존 CPU 검증·같은 token·session/generation/digest·정확한 limits로 확인한다. UI에서 expected-set을 다시 할당하거나 expected bind group×draw의 중첩 탐색을 실행하지 않는다. token은 GPU completeness/serial 검증을 대신하지 않으며, 다른 CPU owner의 token은 같은 문자열 identity여도 거부한다.
 
 성공한 managed submission은 device-active token도 같은 transaction에서 갱신한다. 이후 같은 generation의 새 pose는 active token·identity·정확한 limits로 O(1) 확인하며 기존 CPU validation으로 slot writes를 만든다. Busy/실패 전에는 active token을 바꾸지 않는다. legacy activation이 실제 ready packet을 교체하면 managed token을 지워 stale 권한을 남기지 않는다. old in-flight의 정확한 CpuFrameHandle pin이 이전 token의 실제 수명을 보존하며 작은 token 비용도 bookkeeping에 포함한다.
@@ -37,6 +39,8 @@ CPU에서 준비한 canonical dense draw-ID→slot Arc도 candidate와 active를
 renderer의 두 generation 슬롯은 active+candidate 또는 active+retiring이다. 취소된 partial도 실제 serial/alias가 남으면 retiring이다. CPU source의 세 슬롯과 같은 장부가 아니다. candidate Ready 뒤 실제 committed CpuFrameHandle의 session/generation/digest와 canonical resource key set이 stage input과 같을 때만 정상 ready 교체를 허용한다. live tick/publication/pose는 달라질 수 있다. 예상하지 않은 key를 즉석 전체 upload해 Commit을 숨기지 않는다.
 
 GPU cache key 재사용은 기존 payload/layout·texture/sampler/pair 의미를 따른다. **range/mip 초기화 완료와 submission 완료는 별개**다. partial entry는 ordinary ready cache hit가 될 수 없다. cancel 후 fence가 완료됐다는 이유로 incomplete를 complete로 승격하지 않는다. 완전히 초기화되고 해당 upload serial이 완료된 뒤에만 Ready다. cache hit에도 이 조건이 필요하다.
+
+Ready status의 `initialization_serial`은 필요한 geometry/texture/default texture의 실제 초기화 serial 최댓값을 나타낸다. 이번 stage에서 새 upload가 없는 cache-hit도 기존 초기화 serial을 보고하며, upload 초기화 의존성이 없는 빈 집합만 None일 수 있다. 같은 자원을 다시 그려 증가한 last-use serial로 이 값을 덮어쓰지 않는다. 각 자원의 completion/completeness 검사와 별개로 status 요약의 의미도 보존한다.
 
 initialization에 필요한 serial과 마지막 draw/use serial은 구분한다. 계속 그리는 old-ready가 last-use serial을 갱신해도 이미 완료된 upload가 다시 미완료가 되지 않는다. candidate Ready를 unrelated 최신 draw의 완료까지 무한히 미루지 않는다. 반대로 eviction/drain은 실제 last-use serial을 기다린다. zero-new-upload/cache-hit·empty generation도 명시적 source identity/pin을 유지한다.
 

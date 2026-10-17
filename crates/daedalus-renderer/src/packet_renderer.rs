@@ -13,17 +13,25 @@ use glam::{Mat3, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Camera, CaptureArtifact, CaptureOptions, Material, MeshHandle, PacketAssetLimits,
-    PacketRenderError, PacketRendererLimits, RenderInstance, RenderInstanceId, RenderPacket,
-    RenderView, Renderer, RendererError,
+    Camera, CaptureArtifact, CaptureOptions, CpuFrameHandle, Material, MeshHandle,
+    PacketAssetLimits, PacketRenderError, PacketRendererLimits, PacketStageInput, RenderInstance,
+    RenderInstanceId, RenderPacket, RenderView, Renderer, RendererError,
     packet::{
-        GeometryKey, ModelTextureUpload, PacketValidation, SamplerKey, TextureKey,
-        TextureSamplerKey, sampler_key,
+        GeometryKey, ManagedResourceSetToken, ManagedSlotAssignments, ModelTextureUpload,
+        PacketValidation, SamplerKey, TextureKey, TextureSamplerKey, sampler_key,
     },
     renderer::{
         ClearAlphaPolicy, GlobalsUniform, GpuModelVertex, MaterialUniform, OverlayUniform,
         PngAlphaRepresentation, target_clear_color,
     },
+};
+
+#[path = "packet_renderer/staging.rs"]
+mod staging;
+pub use staging::{
+    PacketRendererDrainError, PacketRendererDrainStatus, PacketStageError, PacketStageFailure,
+    PacketStageFrameSubmission, PacketStageId, PacketStageLimits, PacketStageState,
+    PacketStageStatus,
 };
 
 /// Cumulative packet path writes and current cache residency.
@@ -95,6 +103,7 @@ struct GeometryResource {
     index: wgpu::Buffer,
     index_count: u32,
     bytes: usize,
+    initialization_serial: u64,
     last_submission: u64,
     last_touch: u64,
 }
@@ -103,6 +112,7 @@ struct TextureResource {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     bytes: usize,
+    initialization_serial: u64,
     last_submission: u64,
     last_touch: u64,
 }
@@ -127,8 +137,7 @@ struct SlotState {
 }
 
 struct PreparedSlotUpdate {
-    planned: HashMap<RenderInstanceId, usize>,
-    sprite_uv: HashMap<RenderInstanceId, SpriteUvUniform>,
+    planned: ManagedSlotAssignments,
 }
 
 struct PacketFrameWrites<'a> {
@@ -140,8 +149,16 @@ struct PacketFrameWrites<'a> {
     globals_changed: bool,
     slot_write_counts: &'a SlotWriteCounts,
     validation: Option<&'a PacketValidation>,
-    slot_update: Option<&'a PreparedSlotUpdate>,
+    slot_assignments: Option<&'a HashMap<RenderInstanceId, usize>>,
     resource_plan: Option<&'a ResourceAdmissionPlan>,
+}
+
+struct StagingSubmission {
+    serial: u64,
+    bytes: usize,
+    // A managed frame's validation and packet backing stay alive until the
+    // queue completion callback proves the GPU no longer reads its resources.
+    _cpu_frame: Option<Arc<CpuFrameHandle>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -170,6 +187,7 @@ struct ResourceAdmissionPlan {
     default_texture_requested: bool,
     default_texture_missing: bool,
     sprite_uv_buffer_missing: bool,
+    sprite_uv_buffer_required: bool,
     staging_new_bytes: usize,
     scratch_bytes: usize,
 }
@@ -203,7 +221,7 @@ pub struct PacketRenderer {
     active_texture_bind_groups: HashSet<TextureSamplerKey>,
     default_model_texture: Option<TextureResource>,
     active_default_texture: bool,
-    slots: HashMap<RenderInstanceId, usize>,
+    slots: ManagedSlotAssignments,
     slot_state: Vec<Option<SlotState>>,
     instance_buffer: wgpu::Buffer,
     material_buffer: wgpu::Buffer,
@@ -216,16 +234,20 @@ pub struct PacketRenderer {
     last_globals: Option<GlobalsUniform>,
     ready_packet: Option<Arc<RenderPacket>>,
     pending_packet: Option<Arc<RenderPacket>>,
+    active_resource_set_token: Option<Arc<ManagedResourceSetToken>>,
     stats: PacketResourceStats,
     asset_stats: PacketAssetResourceStats,
     submission_serial: u64,
     completion_watermark: Arc<AtomicU64>,
-    staging_submissions: VecDeque<(u64, usize)>,
+    staging_submissions: VecDeque<StagingSubmission>,
     staging_in_flight_bytes: usize,
     cpu_scratch_current_bytes: usize,
     cpu_scratch_peak_bytes: usize,
     fixed_resident_bytes: usize,
+    bookkeeping_base_bytes: usize,
+    staging_bookkeeping_bytes: usize,
     touch_serial: u64,
+    stage_state: staging::StageState,
 }
 
 /// The packet and exact camera/projection used for one successful submission.
@@ -262,6 +284,9 @@ impl PacketRenderer {
     ) -> Result<Self, PacketRenderError> {
         limits.validate()?;
         asset_limits.validate()?;
+        let stage_state = staging::StageState::new().ok_or_else(|| {
+            PacketRenderError::InvalidPacket("packet renderer stage identity exhausted".into())
+        })?;
         let device_limits = renderer.device.limits();
         let instance_size = (limits.max_instances as u64)
             .checked_mul(std::mem::size_of::<GpuInstance>() as u64)
@@ -368,7 +393,7 @@ impl PacketRenderer {
             active_texture_bind_groups: HashSet::new(),
             default_model_texture: None,
             active_default_texture: false,
-            slots: HashMap::new(),
+            slots: Arc::new(HashMap::new()),
             slot_state,
             instance_buffer,
             material_buffer,
@@ -381,6 +406,7 @@ impl PacketRenderer {
             last_globals: None,
             ready_packet: None,
             pending_packet: None,
+            active_resource_set_token: None,
             stats: PacketResourceStats::default(),
             asset_stats: PacketAssetResourceStats {
                 bookkeeping_reserved_bytes: bookkeeping_bytes,
@@ -393,7 +419,10 @@ impl PacketRenderer {
             cpu_scratch_current_bytes: 0,
             cpu_scratch_peak_bytes: 0,
             fixed_resident_bytes,
+            bookkeeping_base_bytes: bookkeeping_bytes,
+            staging_bookkeeping_bytes: 0,
             touch_serial: 0,
+            stage_state,
         })
     }
 
@@ -481,7 +510,11 @@ impl PacketRenderer {
             );
         stats.resident_total_bytes = stats
             .resident_active_bytes
-            .saturating_add(stats.resident_retired_bytes);
+            .saturating_add(stats.resident_retired_bytes)
+            .saturating_add(
+                self.stage_state
+                    .staged_resident_bytes(self.sprite_uv_buffer_bytes),
+            );
         stats.upload_staging_in_flight_bytes = self.staging_in_flight_bytes;
         stats.in_flight_submissions = self.staging_submissions.len();
         stats.cpu_upload_scratch_current_bytes = self.cpu_scratch_current_bytes;
@@ -541,6 +574,9 @@ impl PacketRenderer {
         view_override: Option<ViewOverride<'_>>,
         loading_elapsed: Option<f32>,
     ) -> Result<PacketViewSubmission, PacketRenderError> {
+        if self.stage_state.blocks_ordinary_rendering() {
+            return Err(PacketRenderError::ResidencyBusy);
+        }
         if let Err(error) = self.validate_packet_target_format(&packet) {
             self.asset_stats.rejected_count = self.asset_stats.rejected_count.saturating_add(1);
             return Err(error);
@@ -615,6 +651,9 @@ impl PacketRenderer {
         packet: &RenderPacket,
         options: &CaptureOptions,
     ) -> Result<CaptureArtifact, PacketRenderError> {
+        if self.stage_state.blocks_ordinary_rendering() {
+            return Err(PacketRenderError::ResidencyBusy);
+        }
         if let Err(error) = self.validate_packet_target_format(packet) {
             self.asset_stats.rejected_count = self.asset_stats.rejected_count.saturating_add(1);
             return Err(error);
@@ -700,6 +739,38 @@ impl PacketRenderer {
         loading_elapsed: Option<f32>,
         clear_alpha_policy: ClearAlphaPolicy,
     ) -> Result<PacketViewSubmission, PacketRenderError> {
+        self.submit_packet_frame_with_stage(
+            packet,
+            activate,
+            view,
+            width,
+            height,
+            view_override,
+            loading_elapsed,
+            clear_alpha_policy,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_packet_frame_with_stage(
+        &mut self,
+        packet: Arc<RenderPacket>,
+        activate: bool,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        view_override: Option<&ViewOverride<'_>>,
+        loading_elapsed: Option<f32>,
+        clear_alpha_policy: ClearAlphaPolicy,
+        stage_upload: Option<(staging::PacketStageId, staging::PreparedUploadChunk)>,
+        known_validation: Option<&PacketValidation>,
+        cpu_frame: Option<Arc<CpuFrameHandle>>,
+        stage_action: Option<staging::StageSubmitAction>,
+    ) -> Result<PacketViewSubmission, PacketRenderError> {
         if !packet.sprite_order.is_empty() && !self.renderer.format.is_srgb() {
             return Err(PacketRenderError::UnsupportedPresentationFormat(format!(
                 "sprite packets require an sRGB surface; adapter supplied {:?}",
@@ -719,7 +790,7 @@ impl PacketRenderer {
             height,
             self.renderer.manual_srgb,
         )?;
-        let validation = if activate {
+        let generated_validation = if activate && known_validation.is_none() {
             let previous = self
                 .pending_packet
                 .as_deref()
@@ -728,44 +799,57 @@ impl PacketRenderer {
         } else {
             None
         };
-        let slot_update = validation
-            .as_ref()
-            .map(|validation| self.prepare_slot_update(&packet, validation))
-            .transpose()?;
-        let slot_write_counts =
-            if let (Some(validation), Some(update)) = (validation.as_ref(), slot_update.as_ref()) {
-                self.slot_write_counts(&packet, validation, update)?
+        let validation = known_validation.or(generated_validation.as_ref());
+        let slot_update = if activate && known_validation.is_none() {
+            validation
+                .map(|validation| self.prepare_slot_update(&packet, validation))
+                .transpose()?
+        } else {
+            None
+        };
+        let slot_assignments = if activate {
+            if known_validation.is_some() {
+                Some(Arc::clone(
+                    validation
+                        .and_then(PacketValidation::slot_assignments)
+                        .ok_or_else(|| {
+                            PacketRenderError::InvalidPacket(
+                                "managed candidate slot assignments are missing".into(),
+                            )
+                        })?,
+                ))
             } else {
-                SlotWriteCounts::default()
-            };
-        let resource_plan = validation
-            .as_ref()
-            .map(|validation| self.plan_resources(validation))
-            .transpose()?;
+                slot_update
+                    .as_ref()
+                    .map(|update| Arc::clone(&update.planned))
+            }
+        } else if known_validation.is_some() {
+            Some(Arc::clone(&self.slots))
+        } else {
+            None
+        };
+        if let Some(assignments) = &slot_assignments {
+            validate_slot_assignments(&packet, assignments, self.limits.max_instances)?;
+        }
+        let slot_write_counts = match (validation, slot_assignments.as_deref()) {
+            (Some(validation), Some(assignments)) => {
+                self.slot_write_counts(&packet, validation, assignments)?
+            }
+            _ => SlotWriteCounts::default(),
+        };
+        let resource_plan = if activate && known_validation.is_none() {
+            validation
+                .map(|validation| self.plan_resources(validation))
+                .transpose()?
+        } else {
+            None
+        };
         let globals_changed = self.last_globals != Some(globals);
-        let global_bytes = usize::from(globals_changed) * std::mem::size_of::<GlobalsUniform>();
-        let overlay_bytes =
-            usize::from(loading_elapsed.is_some()) * std::mem::size_of::<OverlayUniform>();
-        let frame_write_bytes = slot_write_counts
-            .instances
-            .checked_mul(std::mem::size_of::<GpuInstance>())
-            .and_then(|bytes| {
-                slot_write_counts
-                    .materials
-                    .checked_mul(std::mem::size_of::<MaterialUniform>())
-                    .and_then(|material| bytes.checked_add(material))
-            })
-            .and_then(|bytes| {
-                slot_write_counts
-                    .sprite_uv
-                    .checked_mul(std::mem::size_of::<SpriteUvUniform>())
-                    .and_then(|uv| bytes.checked_add(uv))
-            })
-            .and_then(|bytes| bytes.checked_add(global_bytes))
-            .and_then(|bytes| bytes.checked_add(overlay_bytes))
-            .ok_or_else(|| {
-                PacketRenderError::InvalidPacket("frame upload bytes overflowed".into())
-            })?;
+        let frame_write_bytes = frame_upload_staging_bytes(
+            slot_write_counts,
+            globals_changed,
+            loading_elapsed.is_some(),
+        )?;
         let candidate_staging = resource_plan
             .as_ref()
             .map_or(0, |plan| plan.staging_new_bytes);
@@ -777,8 +861,12 @@ impl PacketRenderer {
                 limit: self.asset_limits.cpu_upload_scratch_bytes,
             });
         }
+        let stage_staging = stage_upload
+            .as_ref()
+            .map_or(0, |(_, chunk)| chunk.staging_bytes);
         let total_staging = candidate_staging
             .checked_add(frame_write_bytes)
+            .and_then(|bytes| bytes.checked_add(stage_staging))
             .ok_or_else(|| {
                 PacketRenderError::InvalidPacket("upload staging bytes overflowed".into())
             })?;
@@ -796,12 +884,28 @@ impl PacketRenderer {
             self.staging_submissions.len(),
             self.asset_limits.max_in_flight_submissions,
         )?;
-        if let Some(validation) = &validation
+        let _next_serial = self.submission_serial.checked_add(1).ok_or_else(|| {
+            PacketRenderError::InvalidPacket("packet submission serial exhausted".into())
+        })?;
+        self.staging_submissions.try_reserve(1).map_err(|_| {
+            PacketRenderError::InvalidPacket("submission ledger allocation failed".into())
+        })?;
+        if let Some((stage_id, chunk)) = stage_upload.as_ref() {
+            self.preflight_stage_submission(*stage_id, chunk)
+                .map_err(|error| PacketRenderError::InvalidPacket(error.to_string()))?;
+        }
+        if let Some(action) = stage_action {
+            self.preflight_stage_action(action, cpu_frame.as_deref(), Some(&packet))
+                .map_err(|error| PacketRenderError::InvalidPacket(error.to_string()))?;
+        }
+        if resource_plan.is_some()
+            && let Some(validation) = validation
             && !validation.model_bindings.is_empty()
         {
             self.renderer.ensure_model_packet_pipeline()?;
         }
-        if let Some(validation) = &validation
+        if resource_plan.is_some()
+            && let Some(validation) = validation
             && !validation.sprite_bindings.is_empty()
         {
             if !self.renderer.format.is_srgb() {
@@ -812,17 +916,28 @@ impl PacketRenderer {
             }
             self.renderer.ensure_sprite_packet_pipeline()?;
         }
-        if activate {
+        if activate && let Some(plan) = &resource_plan {
             self.validate_candidate_draws(
                 &packet,
-                slot_update
-                    .as_ref()
-                    .map_or(&self.slots, |update| &update.planned),
-                validation.as_ref().expect("activation validates packet"),
-                resource_plan.as_ref().expect("activation plans resources"),
+                slot_assignments.as_deref().unwrap_or(&self.slots),
+                validation.expect("activation validates packet"),
+                plan,
             )?;
+        } else if matches!(
+            stage_action,
+            Some(staging::StageSubmitAction::Promote { .. })
+        ) {
+            // Promotion preflight already proved this exact CPU generation has
+            // completed all required GPU initialization on this renderer.
         } else {
-            self.validate_draw_resources(&packet, &self.slots)?;
+            self.validate_draw_resources(
+                &packet,
+                slot_assignments.as_deref().unwrap_or(&self.slots),
+            )?;
+        }
+        if let Some(action) = stage_action {
+            self.execute_stage_action(action)
+                .map_err(|error| PacketRenderError::InvalidPacket(error.to_string()))?;
         }
         self.ensure_depth(width, height);
         if let (Some(plan), Some(validation)) = (&resource_plan, &validation) {
@@ -836,13 +951,14 @@ impl PacketRenderer {
             globals: &globals,
             globals_changed,
             slot_write_counts: &slot_write_counts,
-            validation: validation.as_ref(),
-            slot_update: slot_update.as_ref(),
+            validation,
+            slot_assignments: slot_assignments.as_deref(),
             resource_plan: resource_plan.as_ref(),
         });
-        let draw_slots = slot_update
-            .as_ref()
-            .map_or(&self.slots, |update| &update.planned);
+        if let Some((stage_id, chunk)) = stage_upload.as_ref() {
+            self.write_prepared_upload(*stage_id, chunk);
+        }
+        let draw_slots = slot_assignments.as_deref().unwrap_or(&self.slots);
         let submission = self.encode_packet(
             view,
             &packet,
@@ -850,30 +966,50 @@ impl PacketRenderer {
             draw_slots,
             clear_alpha_policy,
         );
-        self.note_submission(submission, total_staging, &packet);
-        if let (Some(validation), Some(update)) = (&validation, slot_update) {
-            self.commit_slot_update_state(&packet, validation, update);
-            self.active_keys = validation.geometries.keys().copied().collect();
-            self.active_textures = resource_plan
-                .as_ref()
-                .map_or_else(HashSet::new, |plan| plan.active_textures.clone());
-            self.active_samplers = resource_plan
-                .as_ref()
-                .map_or_else(HashSet::new, |plan| plan.active_samplers.clone());
-            self.active_texture_bind_groups = resource_plan
-                .as_ref()
-                .map_or_else(HashSet::new, |plan| plan.active_bind_groups.clone());
-            self.active_default_texture = resource_plan
-                .as_ref()
-                .is_some_and(|plan| plan.default_texture_requested);
-            self.ready_packet = Some(Arc::clone(&packet));
-            if self
-                .pending_packet
-                .as_ref()
-                .is_some_and(|pending| pending.sequence() <= packet.sequence())
-            {
-                self.pending_packet = None;
+        let activated_resource_set_token = activate
+            .then(|| {
+                cpu_frame
+                    .as_ref()
+                    .map(|frame| Arc::clone(frame.resource_set_token()))
+            })
+            .flatten();
+        self.note_submission(submission, total_staging, &packet, cpu_frame);
+        if let Some((stage_id, chunk)) = stage_upload {
+            self.record_stage_submission(stage_id, chunk, self.submission_serial);
+        }
+        if let (Some(validation), Some(assignments)) = (validation, slot_assignments.as_ref()) {
+            self.commit_slot_update_state(&packet, validation, assignments);
+            if activate {
+                self.slots = Arc::clone(assignments);
             }
+            if activate && let Some(plan) = &resource_plan {
+                self.active_keys.clear();
+                self.active_keys
+                    .extend(validation.geometries.keys().copied());
+                self.active_textures.clear();
+                self.active_samplers.clear();
+                self.active_texture_bind_groups.clear();
+                self.active_textures
+                    .extend(plan.active_textures.iter().copied());
+                self.active_samplers
+                    .extend(plan.active_samplers.iter().copied());
+                self.active_texture_bind_groups
+                    .extend(plan.active_bind_groups.iter().copied());
+                self.active_default_texture = plan.default_texture_requested;
+            }
+            if activate || known_validation.is_some() {
+                self.ready_packet = Some(Arc::clone(&packet));
+                if self
+                    .pending_packet
+                    .as_ref()
+                    .is_some_and(|pending| pending.sequence() <= packet.sequence())
+                {
+                    self.pending_packet = None;
+                }
+            }
+        }
+        if activate {
+            self.active_resource_set_token = activated_resource_set_token;
         }
         self.asset_stats.pending_candidate = self.pending_packet.is_some();
         Ok(PacketViewSubmission {
@@ -887,11 +1023,11 @@ impl PacketRenderer {
         packet: &RenderPacket,
         validation: &PacketValidation,
     ) -> Result<PreparedSlotUpdate, PacketRenderError> {
-        let planned = plan_instance_slots(
+        let planned = Arc::new(plan_instance_slots(
             &self.slots,
             packet.instances().iter().map(|instance| instance.id),
             self.limits.max_instances,
-        )?;
+        )?);
         for instance in packet.instances() {
             let slot = planned[&instance.id];
             let normal = validation
@@ -905,51 +1041,22 @@ impl PacketRenderer {
                 })?;
             let _ = GpuInstance::new(instance, slot, normal)?;
         }
-        let sprite_uv = validation
-            .sprite_bindings
-            .iter()
-            .map(|(id, binding)| {
-                (
-                    *id,
-                    SpriteUvUniform {
-                        rect: binding.uv_rect,
-                    },
-                )
-            })
-            .collect();
-        Ok(PreparedSlotUpdate { planned, sprite_uv })
+        Ok(PreparedSlotUpdate { planned })
     }
 
     fn slot_write_counts(
         &self,
         packet: &RenderPacket,
         validation: &PacketValidation,
-        update: &PreparedSlotUpdate,
+        assignments: &HashMap<RenderInstanceId, usize>,
     ) -> Result<SlotWriteCounts, PacketRenderError> {
         let mut counts = SlotWriteCounts::default();
         for instance in packet.instances() {
-            let slot = update.planned[&instance.id];
+            let slot = *assignments.get(&instance.id).ok_or_else(|| {
+                PacketRenderError::InvalidPacket("instance slot assignment is missing".into())
+            })?;
             let previous = self.slot_state[slot].as_ref();
-            let normal = validation
-                .normal_matrices
-                .get(&instance.id)
-                .copied()
-                .ok_or_else(|| {
-                    PacketRenderError::InvalidPacket("instance normal matrix is missing".into())
-                })?;
-            let next_instance = if previous.is_some_and(|old| {
-                old.id == instance.id && old.instance.model == instance.transform.to_cols_array_2d()
-            }) {
-                previous.expect("checked Some above").instance
-            } else {
-                GpuInstance::new(instance, slot, normal)?
-            };
-            let next = SlotState {
-                id: instance.id,
-                instance: next_instance,
-                material: material_uniform(instance, validation),
-                sprite_uv: update.sprite_uv.get(&instance.id).copied(),
-            };
+            let next = slot_state_for_instance(instance, slot, validation, previous)?;
             counts.instances = counts
                 .instances
                 .checked_add(usize::from(needs_instance_write(previous, &next)))
@@ -972,36 +1079,54 @@ impl PacketRenderer {
         Ok(counts)
     }
 
+    pub(super) fn frame_staging_reservation(
+        &self,
+        packet: &RenderPacket,
+        view: &RenderView,
+        dimensions: (u32, u32),
+        validation: Option<&PacketValidation>,
+        assignments: Option<&HashMap<RenderInstanceId, usize>>,
+        overlay_present: bool,
+    ) -> Result<usize, PacketRenderError> {
+        let (width, height) = dimensions;
+        let globals = make_globals(packet, view, width, height, self.renderer.manual_srgb)?;
+        let slot_writes = match (validation, assignments) {
+            (Some(validation), Some(assignments)) => {
+                self.slot_write_counts(packet, validation, assignments)?
+            }
+            (None, None) => SlotWriteCounts::default(),
+            _ => {
+                return Err(PacketRenderError::InvalidPacket(
+                    "frame staging reservation has incomplete slot validation".into(),
+                ));
+            }
+        };
+        frame_upload_staging_bytes(
+            slot_writes,
+            self.last_globals != Some(globals),
+            overlay_present,
+        )
+    }
+
     fn commit_slot_update_state(
         &mut self,
         packet: &RenderPacket,
         validation: &PacketValidation,
-        update: PreparedSlotUpdate,
+        assignments: &HashMap<RenderInstanceId, usize>,
     ) {
-        for (id, old_slot) in &self.slots {
-            if !update.planned.contains_key(id) {
+        for (id, old_slot) in self.slots.iter() {
+            if assignments.get(id) != Some(old_slot) {
                 self.slot_state[*old_slot] = None;
             }
         }
         for instance in packet.instances() {
-            let slot = update.planned[&instance.id];
-            let normal = validation.normal_matrices[&instance.id];
-            let next_instance = if let Some(old) = self.slot_state[slot].as_ref().filter(|old| {
-                old.id == instance.id && old.instance.model == instance.transform.to_cols_array_2d()
-            }) {
-                old.instance
-            } else {
-                GpuInstance::new(instance, slot, normal)
-                    .expect("slot was range-checked before GPU writes")
-            };
-            self.slot_state[slot] = Some(SlotState {
-                id: instance.id,
-                instance: next_instance,
-                material: material_uniform(instance, validation),
-                sprite_uv: update.sprite_uv.get(&instance.id).copied(),
-            });
+            let slot = assignments[&instance.id];
+            let old = self.slot_state[slot].as_ref();
+            self.slot_state[slot] = Some(
+                slot_state_for_instance(instance, slot, validation, old)
+                    .expect("validated slot update was preflighted"),
+            );
         }
-        self.slots = update.planned;
     }
 
     fn validate_draw_resources(
@@ -1096,13 +1221,43 @@ impl PacketRenderer {
         &self,
         validation: &PacketValidation,
     ) -> Result<ResourceAdmissionPlan, PacketRenderError> {
-        let requested_geometries = validation.geometries.clone();
+        let requests = validation.resource_requests();
+        self.plan_resource_maps(
+            requests.geometries,
+            requests.model_bindings,
+            requests.sprite_bindings,
+            None,
+        )
+    }
+
+    fn plan_stage_resources(
+        &self,
+        input: &PacketStageInput,
+        protected: &staging::ProtectedResources,
+    ) -> Result<ResourceAdmissionPlan, PacketRenderError> {
+        let requests = input.resource_requests();
+        self.plan_resource_maps(
+            requests.geometries,
+            requests.model_bindings,
+            requests.sprite_bindings,
+            Some(protected),
+        )
+    }
+
+    fn plan_resource_maps(
+        &self,
+        geometries: &HashMap<GeometryKey, MeshHandle>,
+        model_bindings: &HashMap<RenderInstanceId, crate::packet::ModelDrawBinding>,
+        sprite_bindings: &HashMap<RenderInstanceId, crate::packet::SpriteDrawBinding>,
+        protected: Option<&staging::ProtectedResources>,
+    ) -> Result<ResourceAdmissionPlan, PacketRenderError> {
+        let requested_geometries = geometries.clone();
         let active_geometries: HashSet<_> = requested_geometries.keys().copied().collect();
         let mut requested_textures = HashMap::<TextureKey, Arc<ModelTextureUpload>>::new();
         let mut requested_samplers = HashSet::new();
         let mut requested_bind_groups = HashSet::new();
         let mut default_texture_requested = false;
-        for binding in validation.model_bindings.values() {
+        for binding in model_bindings.values() {
             let texture = binding.texture.as_ref().map(|upload| upload.key);
             if let Some(upload) = &binding.texture {
                 requested_textures
@@ -1115,7 +1270,7 @@ impl PacketRenderer {
             requested_samplers.insert(sampler);
             requested_bind_groups.insert(TextureSamplerKey { texture, sampler });
         }
-        for binding in validation.sprite_bindings.values() {
+        for binding in sprite_bindings.values() {
             requested_textures
                 .entry(binding.texture.key)
                 .or_insert_with(|| Arc::clone(&binding.texture));
@@ -1126,8 +1281,8 @@ impl PacketRenderer {
                 sampler,
             });
         }
-        let sprite_uv_buffer_missing =
-            !validation.sprite_bindings.is_empty() && self.sprite_uv_buffer.is_none();
+        let sprite_uv_buffer_required = !sprite_bindings.is_empty();
+        let sprite_uv_buffer_missing = sprite_uv_buffer_required && self.sprite_uv_buffer.is_none();
         let active_textures: HashSet<_> = requested_textures.keys().copied().collect();
         let active_samplers = requested_samplers.clone();
         let active_bind_groups = requested_bind_groups.clone();
@@ -1207,10 +1362,25 @@ impl PacketRenderer {
                 )
             })
             .collect();
-        let no_active = HashSet::new();
+        let mut protected_geometries = HashSet::new();
+        let mut protected_textures = HashSet::new();
+        let mut protected_samplers = HashSet::new();
+        let mut protected_bind_groups = HashSet::new();
+        if let Some(protected) = protected {
+            protected_geometries.extend(protected.geometries.iter().copied());
+            protected_textures.extend(protected.textures.iter().copied());
+            protected_samplers.extend(protected.samplers.iter().copied());
+            protected_bind_groups.extend(protected.bind_groups.iter().copied());
+        }
+        // Only staged admission protects the old-ready side of the transition.
+        // A normal activation may retire it after its last submitted use completes.
+        protected_geometries.extend(active_geometries.iter().copied());
+        protected_textures.extend(active_textures.iter().copied());
+        protected_samplers.extend(active_samplers.iter().copied());
+        protected_bind_groups.extend(active_bind_groups.iter().copied());
         let mut geometry_victims = plan_cache_admission(
             &geometry_existing,
-            &no_active,
+            &protected_geometries,
             &requested_geometry_bytes,
             completed,
             self.limits,
@@ -1219,7 +1389,7 @@ impl PacketRenderer {
             self.textures
                 .iter()
                 .map(|(key, entry)| (*key, entry.last_submission, entry.last_touch)),
-            &active_textures,
+            &protected_textures,
             self.asset_limits.max_total_textures,
             completed,
         )?;
@@ -1227,7 +1397,7 @@ impl PacketRenderer {
             self.samplers
                 .iter()
                 .map(|(key, entry)| (*key, entry.last_submission, entry.last_touch)),
-            &active_samplers,
+            &protected_samplers,
             self.asset_limits.max_total_samplers,
             completed,
         )?;
@@ -1235,7 +1405,7 @@ impl PacketRenderer {
             self.texture_bind_groups
                 .iter()
                 .map(|(key, entry)| (*key, entry.last_submission, entry.last_touch)),
-            &active_bind_groups,
+            &protected_bind_groups,
             self.asset_limits.max_total_bind_groups,
             completed,
         )?;
@@ -1356,7 +1526,7 @@ impl PacketRenderer {
                 .geometry
                 .iter()
                 .filter(|(key, entry)| {
-                    !active_geometries.contains(key)
+                    !protected_geometries.contains(key)
                         && !geometry_victim_set.contains(key)
                         && entry.last_submission <= completed
                 })
@@ -1366,7 +1536,7 @@ impl PacketRenderer {
                 .textures
                 .iter()
                 .filter(|(key, entry)| {
-                    !active_textures.contains(key)
+                    !protected_textures.contains(key)
                         && !texture_victim_set.contains(key)
                         && entry.last_submission <= completed
                 })
@@ -1455,6 +1625,7 @@ impl PacketRenderer {
             default_texture_requested,
             default_texture_missing,
             sprite_uv_buffer_missing,
+            sprite_uv_buffer_required,
             staging_new_bytes,
             scratch_bytes,
         })
@@ -1547,6 +1718,7 @@ impl PacketRenderer {
                     index,
                     index_count,
                     bytes: mesh.gpu_bytes(),
+                    initialization_serial: 0,
                     last_submission: 0,
                     last_touch: self.touch_serial.saturating_add(1),
                 },
@@ -1584,6 +1756,7 @@ impl PacketRenderer {
                     _texture: texture,
                     view,
                     bytes: upload.byte_len,
+                    initialization_serial: 0,
                     last_submission: 0,
                     last_touch: self.touch_serial.saturating_add(1),
                 },
@@ -1624,6 +1797,7 @@ impl PacketRenderer {
                 _texture: texture,
                 view,
                 bytes: 4,
+                initialization_serial: 0,
                 last_submission: 0,
                 last_touch: self.touch_serial.saturating_add(1),
             });
@@ -1853,40 +2027,13 @@ impl PacketRenderer {
         &mut self,
         packet: &RenderPacket,
         validation: &PacketValidation,
-        update: &PreparedSlotUpdate,
+        assignments: &HashMap<RenderInstanceId, usize>,
     ) {
         for instance in packet.instances() {
-            let slot = update.planned[&instance.id];
-            let normal = validation.normal_matrices[&instance.id];
+            let slot = assignments[&instance.id];
             let old = self.slot_state[slot].as_ref();
-            let gpu = if old.is_some_and(|old| {
-                old.id == instance.id && old.instance.model == instance.transform.to_cols_array_2d()
-            }) {
-                old.expect("checked Some above").instance
-            } else {
-                GpuInstance::new(instance, slot, normal).expect("slot conversion was preflighted")
-            };
-            let material = MaterialUniform::from_material(&instance.material);
-            let sprite_uv =
-                validation
-                    .sprite_bindings
-                    .get(&instance.id)
-                    .map(|binding| SpriteUvUniform {
-                        rect: binding.uv_rect,
-                    });
-            let next = SlotState {
-                id: instance.id,
-                instance: gpu,
-                material: if let Some(binding) = validation.sprite_bindings.get(&instance.id) {
-                    MaterialUniform {
-                        base_color: binding.tint,
-                        ..material
-                    }
-                } else {
-                    material
-                },
-                sprite_uv,
-            };
+            let next = slot_state_for_instance(instance, slot, validation, old)
+                .expect("slot conversion was preflighted");
             if needs_instance_write(old, &next) {
                 self.renderer.queue.write_buffer(
                     &self.instance_buffer,
@@ -1944,8 +2091,8 @@ impl PacketRenderer {
             if let Some(plan) = frame.resource_plan {
                 self.write_texture_uploads(plan);
             }
-            if let Some(update) = frame.slot_update {
-                self.write_slot_updates(frame.packet, validation, update);
+            if let Some(assignments) = frame.slot_assignments {
+                self.write_slot_updates(frame.packet, validation, assignments);
                 self.stats.instance_write_count = self.stats.instance_write_count.saturating_add(
                     (frame.slot_write_counts.instances + frame.slot_write_counts.sprite_uv) as u64,
                 );
@@ -2210,17 +2357,14 @@ impl PacketRenderer {
         _submission: wgpu::SubmissionIndex,
         staging_bytes: usize,
         packet: &RenderPacket,
+        cpu_frame: Option<Arc<CpuFrameHandle>>,
     ) {
-        self.submission_serial = self.submission_serial.saturating_add(1);
-        let serial = self.submission_serial;
-        self.staging_in_flight_bytes = self.staging_in_flight_bytes.saturating_add(staging_bytes);
-        self.asset_stats.upload_staging_peak_bytes = self
-            .asset_stats
-            .upload_staging_peak_bytes
-            .max(self.staging_in_flight_bytes);
-        self.staging_submissions.push_back((serial, staging_bytes));
+        let serial = self.note_submission_bookkeeping(staging_bytes, cpu_frame);
         for instance in packet.instances() {
             if let Some(resource) = self.geometry.get_mut(&instance.mesh.key()) {
+                if resource.initialization_serial == 0 {
+                    resource.initialization_serial = serial;
+                }
                 resource.last_submission = serial;
             }
             if let Some(binding) = packet.model_binding(&instance.id) {
@@ -2233,6 +2377,9 @@ impl PacketRenderer {
                 if let Some(texture_key) = texture_key
                     && let Some(texture) = self.textures.get_mut(&texture_key)
                 {
+                    if texture.initialization_serial == 0 {
+                        texture.initialization_serial = serial;
+                    }
                     texture.last_submission = serial;
                 }
                 if let Some(sampler) = self.samplers.get_mut(&sampler) {
@@ -2244,6 +2391,9 @@ impl PacketRenderer {
                 if texture_key.is_none()
                     && let Some(texture) = self.default_model_texture.as_mut()
                 {
+                    if texture.initialization_serial == 0 {
+                        texture.initialization_serial = serial;
+                    }
                     texture.last_submission = serial;
                 }
             }
@@ -2255,6 +2405,9 @@ impl PacketRenderer {
                     sampler,
                 };
                 if let Some(texture) = self.textures.get_mut(&texture_key) {
+                    if texture.initialization_serial == 0 {
+                        texture.initialization_serial = serial;
+                    }
                     texture.last_submission = serial;
                 }
                 if let Some(sampler) = self.samplers.get_mut(&sampler) {
@@ -2265,10 +2418,34 @@ impl PacketRenderer {
                 }
             }
         }
+    }
+
+    fn note_empty_submission(&mut self, _submission: wgpu::SubmissionIndex, staging_bytes: usize) {
+        self.note_submission_bookkeeping(staging_bytes, None);
+    }
+
+    fn note_submission_bookkeeping(
+        &mut self,
+        staging_bytes: usize,
+        cpu_frame: Option<Arc<CpuFrameHandle>>,
+    ) -> u64 {
+        self.submission_serial = self.submission_serial.saturating_add(1);
+        let serial = self.submission_serial;
+        self.staging_in_flight_bytes = self.staging_in_flight_bytes.saturating_add(staging_bytes);
+        self.asset_stats.upload_staging_peak_bytes = self
+            .asset_stats
+            .upload_staging_peak_bytes
+            .max(self.staging_in_flight_bytes);
+        self.staging_submissions.push_back(StagingSubmission {
+            serial,
+            bytes: staging_bytes,
+            _cpu_frame: cpu_frame,
+        });
         let watermark = Arc::clone(&self.completion_watermark);
         self.renderer.queue.on_submitted_work_done(move || {
             watermark.fetch_max(serial, Ordering::AcqRel);
         });
+        serial
     }
 
     fn poll_retirement(&mut self) -> Result<(), PacketRenderError> {
@@ -2280,10 +2457,12 @@ impl PacketRenderer {
         while self
             .staging_submissions
             .front()
-            .is_some_and(|(serial, _)| *serial <= completed)
+            .is_some_and(|submission| submission.serial <= completed)
         {
-            if let Some((_, bytes)) = self.staging_submissions.pop_front() {
-                self.staging_in_flight_bytes = self.staging_in_flight_bytes.saturating_sub(bytes);
+            if let Some(submission) = self.staging_submissions.pop_front() {
+                self.staging_in_flight_bytes = self
+                    .staging_in_flight_bytes
+                    .saturating_sub(submission.bytes);
             }
         }
         self.asset_stats.upload_staging_in_flight_bytes = self.staging_in_flight_bytes;
@@ -2304,6 +2483,35 @@ fn check_asset_active_count(
         });
     }
     Ok(())
+}
+
+fn frame_upload_staging_bytes(
+    slot_writes: SlotWriteCounts,
+    globals_changed: bool,
+    overlay_present: bool,
+) -> Result<usize, PacketRenderError> {
+    slot_writes
+        .instances
+        .checked_mul(std::mem::size_of::<GpuInstance>())
+        .and_then(|bytes| {
+            slot_writes
+                .materials
+                .checked_mul(std::mem::size_of::<MaterialUniform>())
+                .and_then(|material| bytes.checked_add(material))
+        })
+        .and_then(|bytes| {
+            slot_writes
+                .sprite_uv
+                .checked_mul(std::mem::size_of::<SpriteUvUniform>())
+                .and_then(|uv| bytes.checked_add(uv))
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(usize::from(globals_changed) * std::mem::size_of::<GlobalsUniform>())
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(usize::from(overlay_present) * std::mem::size_of::<OverlayUniform>())
+        })
+        .ok_or_else(|| PacketRenderError::InvalidPacket("frame upload bytes overflowed".into()))
 }
 
 fn check_submission_admission(
@@ -2388,15 +2596,22 @@ fn packet_bookkeeping_bytes(
     limits: PacketRendererLimits,
     asset_limits: PacketAssetLimits,
 ) -> Result<usize, PacketRenderError> {
-    // Reserve one bounded draw record plus map/load-factor allowance for the
-    // active slot table and candidate planning table, then bounded cache records.
-    let draw_record = std::mem::size_of::<SlotState>()
-        .checked_add(std::mem::size_of::<RenderInstanceId>())
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<usize>()))
+    // Managed slot-map buckets are accounted by PacketCpuOwner and shared by
+    // Arc. This renderer reservation covers the SlotState vector and two
+    // separately bounded legacy maps (active plus one activation plan).
+    let slot_state_bytes = std::mem::size_of::<Option<SlotState>>()
+        .checked_mul(limits.max_instances)
+        .ok_or(PacketRenderError::InvalidAssetLimits)?;
+    let legacy_map_record = std::mem::size_of::<RenderInstanceId>()
+        .checked_add(std::mem::size_of::<usize>())
         .and_then(|bytes| bytes.checked_add(64))
         .ok_or(PacketRenderError::InvalidAssetLimits)?;
-    let draws = draw_record
+    let legacy_map_bytes = legacy_map_record
         .checked_mul(limits.max_instances)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or(PacketRenderError::InvalidAssetLimits)?;
+    let draw_bytes = slot_state_bytes
+        .checked_add(legacy_map_bytes)
         .ok_or(PacketRenderError::InvalidAssetLimits)?;
     let cache_bytes = limits
         .max_total_entries
@@ -2430,8 +2645,14 @@ fn packet_bookkeeping_bytes(
                 .and_then(|groups| bytes.checked_add(groups))
         })
         .ok_or(PacketRenderError::InvalidAssetLimits)?;
-    draws
+    draw_bytes
         .checked_add(cache_bytes)
+        .and_then(|bytes| {
+            asset_limits
+                .max_in_flight_submissions
+                .checked_mul(std::mem::size_of::<StagingSubmission>())
+                .and_then(|pins| bytes.checked_add(pins))
+        })
         .and_then(|bytes| bytes.checked_add(32 * 1024))
         .ok_or(PacketRenderError::InvalidAssetLimits)
 }
@@ -2548,6 +2769,33 @@ fn plan_instance_slots(
     Ok(planned)
 }
 
+fn validate_slot_assignments(
+    packet: &RenderPacket,
+    assignments: &HashMap<RenderInstanceId, usize>,
+    capacity: usize,
+) -> Result<(), PacketRenderError> {
+    if assignments.len() != packet.instances().len() || assignments.len() > capacity {
+        return Err(PacketRenderError::InvalidPacket(
+            "instance slot assignments do not match packet draws".into(),
+        ));
+    }
+    for instance in packet.instances() {
+        if assignments
+            .get(&instance.id)
+            .is_none_or(|slot| *slot >= capacity)
+        {
+            return Err(PacketRenderError::InvalidPacket(
+                "instance slot assignment is missing or out of range".into(),
+            ));
+        }
+    }
+    // These maps have private constructors: managed maps are minted once by
+    // CPU preparation, and legacy maps are produced by plan_instance_slots.
+    // Both builders guarantee unique dense slots without rebuilding a set on
+    // the render path.
+    Ok(())
+}
+
 fn needs_instance_write(previous: Option<&SlotState>, next: &SlotState) -> bool {
     previous.is_none_or(|old| old.id != next.id || old.instance != next.instance)
 }
@@ -2567,6 +2815,40 @@ fn material_uniform(instance: &RenderInstance, validation: &PacketValidation) ->
         uniform.base_color = binding.tint;
     }
     uniform
+}
+
+fn slot_state_for_instance(
+    instance: &RenderInstance,
+    slot: usize,
+    validation: &PacketValidation,
+    previous: Option<&SlotState>,
+) -> Result<SlotState, PacketRenderError> {
+    let normal = validation
+        .normal_matrices
+        .get(&instance.id)
+        .copied()
+        .ok_or_else(|| {
+            PacketRenderError::InvalidPacket("validated instance normal matrix is missing".into())
+        })?;
+    let gpu_instance = if previous.is_some_and(|old| {
+        old.id == instance.id && old.instance.model == instance.transform.to_cols_array_2d()
+    }) {
+        previous.expect("checked Some above").instance
+    } else {
+        GpuInstance::new(instance, slot, normal)?
+    };
+    let sprite_uv = validation
+        .sprite_bindings
+        .get(&instance.id)
+        .map(|binding| SpriteUvUniform {
+            rect: binding.uv_rect,
+        });
+    Ok(SlotState {
+        id: instance.id,
+        instance: gpu_instance,
+        material: material_uniform(instance, validation),
+        sprite_uv,
+    })
 }
 
 #[repr(C)]
@@ -2696,9 +2978,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CacheEntryPlan, GpuInstance, MaterialUniform, SlotState, check_submission_admission,
-        make_globals, needs_instance_write, needs_material_write, packet_bookkeeping_bytes,
-        plan_cache_admission, plan_entry_victims, plan_instance_slots,
+        CacheEntryPlan, GpuInstance, MaterialUniform, SlotState, StagingSubmission,
+        check_submission_admission, make_globals, needs_instance_write, needs_material_write,
+        packet_bookkeeping_bytes, plan_cache_admission, plan_entry_victims, plan_instance_slots,
+        validate_slot_assignments,
     };
     use crate::renderer::PngAlphaRepresentation;
     use crate::{
@@ -2707,6 +2990,10 @@ mod tests {
         RenderInstanceId, RenderObject, RenderPacket, RenderProjection, RenderScene, RenderView,
         Renderer, Vertex, packet::GeometryKey, renderer::GlobalsUniform,
     };
+
+    mod staged_gpu_tests {
+        include!("packet_renderer/staged_gpu_tests.rs");
+    }
 
     fn key(byte: u8) -> GeometryKey {
         let mut hash = [0; 32];
@@ -2843,6 +3130,59 @@ mod tests {
         assert_eq!(next[&id(2)], 1);
         assert_eq!(next[&id(3)], 0);
         assert!(plan_instance_slots(&current, [id(2), id(3), id(4)], 2).is_err());
+    }
+
+    #[test]
+    fn slot_assignment_validation_requires_exact_draw_membership_and_capacity() {
+        let mesh = MeshHandle::new(
+            StableId::new("asset:slot-validation").unwrap(),
+            1,
+            Mesh::new(
+                vec![
+                    Vertex {
+                        position: [-0.5, -0.5, 0.0],
+                        normal: [0.0, 0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [0.5, -0.5, 0.0],
+                        normal: [0.0, 0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [0.0, 0.5, 0.0],
+                        normal: [0.0, 0.0, 1.0],
+                    },
+                ],
+                vec![0, 1, 2],
+            ),
+            MeshResourceLimits::default(),
+        )
+        .unwrap();
+        let instance_id = id(1);
+        let packet = RenderPacket::new(
+            SessionId::from_raw(5),
+            Tick(1),
+            1,
+            1,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            Camera::default(),
+            DirectionalLight::default(),
+            [0.1; 3],
+            [0.1, 0.1, 0.1, 1.0],
+            vec![crate::RenderInstance {
+                id: instance_id,
+                mesh,
+                transform: Mat4::IDENTITY,
+                material: Material::default(),
+            }],
+        );
+
+        assert!(validate_slot_assignments(&packet, &HashMap::from([(instance_id, 0)]), 1).is_ok());
+        assert!(validate_slot_assignments(&packet, &HashMap::new(), 1).is_err());
+        assert!(validate_slot_assignments(&packet, &HashMap::from([(instance_id, 1)]), 1).is_err());
+        assert!(
+            validate_slot_assignments(&packet, &HashMap::from([(instance_id, 0), (id(2), 1)]), 2,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3613,9 +3953,11 @@ mod tests {
         );
         let future = renderer.submission_serial + 100;
         for offset in 0..renderer.asset_limits.max_in_flight_submissions {
-            renderer
-                .staging_submissions
-                .push_back((future + offset as u64, 0));
+            renderer.staging_submissions.push_back(StagingSubmission {
+                serial: future + offset as u64,
+                bytes: 0,
+                _cpu_frame: None,
+            });
         }
         assert!(matches!(
             renderer.render_packet_view(&view, 64, 64, Arc::clone(&unchanged), None, None),
@@ -3656,9 +3998,11 @@ mod tests {
         let staging_capacity = renderer.asset_limits.upload_staging_bytes;
         let globals_bytes = std::mem::size_of::<GlobalsUniform>();
         let fallback_bytes = staging_capacity - globals_bytes;
-        renderer
-            .staging_submissions
-            .push_back((staging_serial, fallback_bytes));
+        renderer.staging_submissions.push_back(StagingSubmission {
+            serial: staging_serial,
+            bytes: fallback_bytes,
+            _cpu_frame: None,
+        });
         renderer.staging_in_flight_bytes = fallback_bytes;
         let camera_override = Camera {
             position: [0.0, 0.0, 6.0],
@@ -3771,7 +4115,7 @@ mod tests {
         let staged_serial = renderer
             .staging_submissions
             .iter()
-            .map(|(serial, _)| *serial)
+            .map(|submission| submission.serial)
             .max()
             .unwrap_or(0);
         let full_override_base = renderer
@@ -3783,9 +4127,11 @@ mod tests {
             .checked_add(1)
             .expect("test submission serial has headroom");
         let full_override_staging = staging_capacity - globals_bytes;
-        renderer
-            .staging_submissions
-            .push_back((full_override_serial, full_override_staging));
+        renderer.staging_submissions.push_back(StagingSubmission {
+            serial: full_override_serial,
+            bytes: full_override_staging,
+            _cpu_frame: None,
+        });
         renderer.staging_in_flight_bytes = full_override_staging;
         let full_override_submission = renderer
             .render_packet_view_with_view(

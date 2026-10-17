@@ -56,7 +56,7 @@ port의 `try_status()`는 small consumer status를 nonwaiting으로 읽는다. i
 
 pending lease1·terminal report1·present ACK1·ACK 대기 old-source pin1을 둔다. status/slot 접근은 try-lock이며 큰 작업을 lock 안에서 실행하지 않는다. stop/consumer-closed/currentness 표시는 out-of-band atomic/기존 wake 경계로 전달하고 queue의 여유를 기다리지 않는다. actor가 control queue 포화 중에도 이 신호/보고를 처리해야 한다. stage request마다 thread를 만들지 않는다.
 
-port Drop은 기다리지 않고 Closed를 표시한다. 아직 commit하지 않은 candidate는 취소/실패로 수렴하며 새 Stage/Commit은 기존 AssetActivationUnavailable 등 기존 typed session 오류로 효과 전 거부한다. 일반 Step/read는 살아 있는 authority에서 계속 가능하다. Closed/stop은 불가능해진 ACK 대기 pin을 abandoned로 반환할 수 있으나 presented 성공을 기록하지 않는다. host의 GPU/CPU pins는 실제 drain/회수까지 남는다. actor/worker panic·startup 실패에서도 기존 canonical worker backstop과 source charge를 유지한다. try_shutdown은 실제 join 가능 상태만 관측하고 held pin이 있으면 Stopping이다.
+port의 `request_close()`와 Drop은 기다리지 않고 같은 out-of-band Closed를 표시한다. 명시적 close는 idempotent이며 port를 상태 조회용으로 보유한 채 표시 경로만 닫을 수 있다. 아직 commit하지 않은 candidate는 취소/실패로 수렴하며 새 Stage/Commit은 기존 AssetActivationUnavailable 등 기존 typed session 오류로 효과 전 거부한다. 일반 Step/read는 살아 있는 authority에서 계속 가능하다. Closed/stop은 불가능해진 ACK 대기 pin을 abandoned로 반환할 수 있으나 presented 성공을 기록하지 않는다. host의 GPU/CPU pins는 실제 drain/회수까지 남는다. actor/worker panic·startup 실패에서도 기존 canonical worker backstop과 source charge를 유지한다. try_shutdown은 실제 join 가능 상태만 관측하고 held pin이 있으면 Stopping이다.
 
 ## 구현 소유권과 필수 검증
 

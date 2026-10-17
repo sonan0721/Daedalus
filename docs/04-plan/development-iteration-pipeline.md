@@ -205,3 +205,11 @@ CLI adapter는 실제 네 capability 배열의 base7 반복을 base/extension co
 이후 실제 CLI opt-in은28개(CPU18+activation10)를 통과했다. PNG/model/atlas/WAV를 같은 session에서 순서대로 commit하고 현재 handle/pose/tick을 유지했다. helper의 잘못된 ProjectInfo 필드 assertion만 고친 재시도는 기존 binary를 그대로 사용해 불필요한 Cargo rebuild를 피했다. runtime source 변경 뒤에는 해당 runtime 검사만 먼저 수행하고, source freeze 후 CLI/전체 통합/장치/package를 순서대로 수행한다. 단순 raw/count/hash는 위 작업 기록을 기준으로 하고 설계·TESTING·체크리스트에 중복 복사하지 않는다. 서로 다른 범위의 실행 시간을 속도 향상으로 비교하지 않는다.
 
 마지막 경계 검증에서는 한 작업자가 기존 runtime attempt 번호를 재사용해 앞선 raw 일부를 덮어썼다. 현재 raw를 다른 고유 prefix로 보존하고 손실 범위를 작업 기록에 명시했다. 이후 로그 생성은 고유 이름뿐 아니라 exclusive/noclobber로 기존 파일을 거부한다. 통과한 과거 검사를 다시 실행해 과거 원본처럼 보관하지 않는다. CLI 모든 기능 test/Clippy는 다음 workspace 모든 기능 검사에 이미 포함되므로 별도로 중복 실행하지 않고, default feature 경계는 별도 유지한다.
+
+## P03.3b.3의 실행 연결 재사용
+
+[ADR-0007](../05-decisions/0007-reusable-native-host-and-generation-consumer.md)은 각 frontend가 CLI의 프로젝트 load·actor·입력·packet·종료 코드를 다시 만드는 반복을 줄이기 위해 공통 native host library를 채택했다. 초기 source는 runtime worker가 한 번 읽은 실제 Arc를 [consumer port](../03-architecture/project-generation-consumer.md)로 전달한다. renderer가 다시 project를 load하거나 세대마다 device를 만드는 방식을 추가하지 않는다. CLI는 기존 protocol2/파일 출력 adapter를 유지하고 Rust SDK 통합 시험은 CLI 없이 같은 host를 소비한다. 이 공통 제작 경로는 현재 구현 중이며 아직 실제 edit→present 루프를 통과하지 않았다.
+
+공통화 전 source 감사는 prepared model/sprite sidecar 두 map을 각각 전체 expanded instance 수로 예약하는 중복을 찾았다. 실제 각 binding 수로 예약·동일 estimator에 반영하는 작은 변경을 renderer CPU 작업에 포함한다. instance 최대16384와 metadata8MiB는 독립 한도이며 모든 조합이 들어간다는 보장이 아니다. wrapper가 아니라 실제 공유 leaf·validation normal map·capacity를 세고, 일시 pin 포화의 Busy와 개별 상한 초과의 영구 오류를 구분한다. 숫자를 줄였다는 이유만으로 제작 반복 시간이 개선됐다고 계산하지 않는다.
+
+runtime source 작성 중에도 별도 renderer/host의 read-only 리뷰를 진행하되 Cargo/장치 lease는 한 명에게만 둔다. 초기 코드 리뷰에서 consumer close와 try-lock 경합 때 currentness·untaken payload 정리가 늦어질 수 있는 경계를 찾았고, 컴파일 전에 독립 atomic 관측과 기존 preparation worker의 최종 cleanup으로 조정하도록 작업을 배정했다. 실제 재현 테스트·결과는 후속 worklog에 기록한다. public signature와 표준 erased pin을 먼저 고정하고 dependent source를 이어 붙여 서로 private 구현을 추측하는 재작업을 줄인다. 절감 시간/배율은 측정하지 않았다.

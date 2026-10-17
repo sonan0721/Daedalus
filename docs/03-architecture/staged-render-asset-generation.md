@@ -4,7 +4,7 @@
 
 ## 문서 목적과 선행 게이트
 
-[전체 activation 계약](project-asset-activation.md)의 renderer 부분을 실행 가능한 작업 경계로 좁힌다. [b.2 headless](headless-asset-generation.md)는 PR16/main360ceb6에서 인수했지만 source commit이 실제 픽셀 교체는 아니다. [runtime consumer](project-generation-consumer.md) 경계는 먼저 동결했으며 이 renderer의 미결 API/예산은 리뷰 후 해당 코드 작업을 배정한다. runtime port 구현만으로 이 renderer나 b.3를 인수하지 않는다.
+[전체 activation 계약](project-asset-activation.md)의 renderer 부분을 실행 가능한 작업 경계로 좁힌다. [b.2 headless](headless-asset-generation.md)는 PR16/main360ceb6에서 인수했지만 source commit이 실제 픽셀 교체는 아니다. [runtime consumer](project-generation-consumer.md)와 [CPU generation 계약](render-cpu-generation.md)은 해당 slice의 API/예산을 동결했다. GPU/window의 미결 API는 별도 리뷰 뒤 코드 작업을 배정한다. runtime/CPU 단독 구현으로 이 renderer나 b.3를 인수하지 않는다.
 
 목표는 같은 Engine/SessionId·live pose를 유지하며 CPU 후보 준비→기존 device의 제한된 업로드→actor commit→새 generation의 실제 present 관찰→old CPU/GPU 회수를 연결하는 것이다. 새 renderer/device/캐시/프로토콜을 세대마다 만들지 않는다. 연결된 audio의 전환은 c의 별도 선행 조건이며 이 단계에서 audio를 붙인 채 준비를 생략해 성공시키지 않는다.
 
@@ -48,7 +48,7 @@ Stage 수락·authored compatibility·CPU resource 준비·device staged·actor 
 
 ## source lease와 두 종류의 CPU 메모리
 
-native owner가 한 슬롯의 move-only `ProjectSourceLease`를 host로 전달하는 방향을 검토한다. 짧은 `with_source` borrowed callback은 기존 prepare에 필요한 `&PreparedProject`를 제공하고 control 결과/JSON에 payload를 넣지 않는다. runtime 내부는 같은 worker reclamation Arc를 유지한다. source와 renderer를 묶는 token은 downcast/Any/새 registry framework 없이 유지하는 방향이다. 정확한 factory·port·token API/반환 수명은 아직 동결하지 않았다.
+native owner는 move-only `ProjectSourceLease`를 host로 전달한다. 짧은 `with_source` borrowed callback은 기존 prepare에 필요한 `&PreparedProject`를 제공하고 control 결과/JSON에 payload를 넣지 않는다. runtime 내부는 같은 worker reclamation Arc를 유지한다. factory·port·표준 erased source pin의 API/반환 수명은 consumer 계약을 기준으로 한다. renderer-local SourcePin과 실제 backing registry는 CPU generation 계약에서 동결하며 downcast/Any/새 marker crate를 추가하지 않는다.
 
 `PreparedProject`는 기존 Clone 가능한 native type이다. borrowed 접근도 신뢰된 Rust SDK 경계이며 임의 caller의 clone/allocation까지 제한하는 sandbox가 아니다. 엔진 내부 구현은 명시적 소유권 장부를 따른다. [S87](../02-research/source-register.md)의 auto-trait-only `Arc<dyn Send + Sync>` coercion/clone·opaque Debug wrapper와 unsized Arc의 strong/Weak 해제 뒤 worker final-drop을 Rust1.94 설계 probe에서 확인했다. 기존 `PacketRenderer`·`PacketViewSubmission`·`ProjectRenderResources`의 Send, `RenderPacket`의 Send+Sync도 compile 확인했다. [작업 기록](../06-worklog/2026-10-17-native-host-design.md)의 3건은 새 host API·실제 GPU 이동/회수의 통과가 아니다. 새 공통 marker crate가 반드시 필요하다고 가정하지 않는다.
 

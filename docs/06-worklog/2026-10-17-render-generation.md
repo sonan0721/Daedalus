@@ -286,3 +286,30 @@ C가 renderer lease를 반환한 뒤 root가 전체 Metal 회귀를 실행했다
 report v2의 오류 경로는 compact identity/dimensions만 확보한 경우 실제 view/행렬을 null·actual_view_available=false로 명시하기로 했다. 성공 outcome의 actual view와 혼합하거나 source camera로 복원하지 않는다. 후속 host 리뷰는 창 종료의 최신 present 관측을 이전 pending ACK Applied가 덮어쓸 수 있는 순서도 발견해 same-session present_sequence 단조성을 계약·검사에 추가했다. 아직 실제 통합 통과는 아니다.
 
 bootstrap 리뷰에서는 후보 stage의 gate가 initial DeviceReady뿐이어서 첫 실제 initial frame보다 빠른 candidate BeginStage가 renderer의 active+1 검사에서 실패할 수 있는 초안도 발견했다. 후보 CPU 준비는 병렬로 허용하되 window의 실제 active 관측 뒤 StageInput을 보내고 first frame을 우선하도록 계약·Luna 작업에 추가했다. CLI control pump의 무조건 join도 finished 관측/유한 polling 뒤 join으로 바꾸도록 요청했다. source 리뷰에서 찾은 수정 사항이며 실행 증거는 후속이다.
+
+## 공개 host API의 집중 검사와 다음 통합 경계
+
+Luna D는 같은 service의 Manual/Realtime clock·외부 SDK에서 이름 붙일 수 있는 public accessor type·실제 worker의 Busy/취소/회수와 Drop을 구현했다. 아래는 root가 원본 footer/hash와 실행된 test 이름을 대조한 focused 결과다. 기본과 all-feature의 중복 사례를 합산하지 않는다.
+
+| raw log | 결과 | SHA-256 |
+| --- | --- | --- |
+| `p03-host-test-allfeatures-luna-attempt12.log` | unit10+외부 public API3=13통과 | `80fd5ce7b0c1c49ef5588d94fad406c83ab892596eaed0c1c2e8b2e6c2d44bf4` |
+| `p03-host-test-no-default-luna-attempt07.log` | unit7+외부 public API3=10통과. 당시 window-off dead-code 경고는 남음 | `19a2205bfff8148b708d29255d2c326693b38130b0b6385dbacac5d52fa4605c` |
+| `p03-host-clippy-allfeatures-luna-attempt04.log` | all-target/all-feature strict Clippy exit0 | `3503d8e6e446da4e95b7a1b0ec882b94923a302cb0362724a7d14e3f8cd70674` |
+| `p03-host-test-default-luna-attempt01.log` | C의 manifest 연결 뒤 같은 기본10통과 | `2428ae77cd3d47bb130cb109ac569d27e6d05a19465d12c2ec8b5e4f693beec7` |
+| `p03-host-example-check-luna-attempt01.log` | public SDK `native_host_smoke` example compile exit0. 창 실행은 아님 | `d4e86f9827d14ef7c13852e7ede04762a4124b22599c532d8556b7459d12f2c7` |
+| `p03-host-clippy-default-luna-attempt01.log` | exit101. window-off 미사용 field/helper와 조건문 진단 보존, 수정 후 재검사 대기 | `0c0c70330d42abdd8f25c75dd9b79817ec77a2e626ae18c2bd1751810a15d6bd` |
+
+실제 worker 시험은 prepared result의 관측 ACK를 보류해도 반환 owner를 먼저 drain하고, ACK 후 종료하는 순서를 확인했다. 여기의 owner는 NoDevice variant이며 실제 device drain은 앞선 renderer GPU 시험과 구분한다. owner poll 직후 publication 경합·facade Drop 뒤 failure slot·실제 CPU prepare 실패 뒤 worker 종료도 포함한다. held-alias Busy 상태에서는 취소 시 같은 lease를 해제하고, alias 회수 뒤에는 같은 candidate로 재개하는 각각의 시험이 통과했다. bootstrap stage gate와 오래된 ACK의 last-present 덮어쓰기 방지는 작은 상태 정책 시험이며 실제 창에서 빠른 candidate와 첫 frame을 경쟁시킨 근거는 아직 아니다.
+
+앞선 host 실패 시도도 보존한다. fixture 파일명 `project.json`을 실제 규격 `daedalus.project.json`으로 고쳤고, CPU prepare 실패의 실제 host 진단 code에 기대를 맞췄다. Busy fixture는 Stage 전에 lease가 있다고 가정한 오류를 실제 Prepare→Stage→lease로 수정했다. no-default attempt06의 초기 lease 일회 조회는 실제 transient Busy를 허용하지 않아 실패했으며 bounded retry로 고친07이 위 성공이다. 실패 fixture를 production 한도 완화로 통과시키지 않았다.
+
+C가 Cargo/manifests/lock 단독 lease를 이어받아 CLI optional host 연결과 공개 SDK example을 작성한다. D의 default lint 정리는 owned source에만 제한하고 C가 동결 뒤 재검사한다. `cargo tree`에서 no-default host에도 renderer를 통한 wgpu dependency가 남음을 확인했다. 기본 API의 비장치 약속은 runtime device/window/audio 초기화 없음이며 dependency graph에서 wgpu 제거가 아니다.
+
+AI가 final report 전에 실제 표시를 관측하도록 기존 protocol2 attachment에 직접 `view_status` read를 추가하는 계약도 동결했다. 별도 actor/ticket/상태 복제 없이 같은 host control의 compact status를 읽는다. ingress queue 관측과 실제 present, 완전한 성공 view와 compact 오류 metadata를 분리한다. `--view --asset-activation` 조합은 기존 smoke fixture/JSONL을 재사용해 같은 세션의 source 변경→실제 새 present→old charge 회수를 검증할 예정이다. 아직 실행 결과가 아니며 별도 batch PNG를 실제 창의 변경 픽셀 증거로 쓰지 않는다.
+
+실제 desktop 픽셀 검사를 위해 local computer-use skill(`/Users/danny/.agents/skills/computer-use/SKILL.md`)을 읽었다. 두 환경 override가 없어 선택한 `orca skills get computer-use` 실행은 exit127, `zsh:1: command not found: orca`로 실패했다. 지침의 “If the selected executable cannot run, report its exact error and stop”에 따라 이 경로를 중단했다. tool 응답에 오류가 남아 있으며 별도 raw 실행 로그를 만들었다고 하지 않는다. 다른 executable로 우회하지 않았고 native 창 픽셀 검증은 열린 상태다. SDK 실제 창 실행·CLI 연결·전체 workspace/managed·CI/package와 P03/D1/D2/D3는 계속 미완료다.
+
+문서 검사 첫 시도 `p03-host-public-api-docs-root-attempt01.log`는 이 local skill 절대 경로를 repository link로 쓴 탓에 실패했다(SHA-256 `99db214e5759221db02f7a2400d7f3754d7b826b88d5aa0da4a83fc781f77b0a`). 재현 환경 설명의 코드 경로로 바꾸고 후속 검사를 별도 실행한다.
+
+수정 뒤 `p03-host-public-api-docs-root-attempt02.log`는 exit0·SHA-256 `135632fd8e4ade9df7ebcebcc8c32895de7c966e841dd57a022d29393805bcba`다. 문서 검사는 source compile/제품 인수 근거와 구분한다.

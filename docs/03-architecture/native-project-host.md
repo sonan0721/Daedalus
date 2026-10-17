@@ -1,6 +1,6 @@
 # Native project host: 엔진 라이브러리와 CLI의 조합 경계
 
-상태: runtime/renderer library 인수·부분 초기화 owner 계약 동결·host/window 연결 전 · 2026-10-17
+상태: runtime/renderer library 인수·host 공개 API 집중 검사 통과·실제 창/CLI 연결 검증 전 · 2026-10-17
 
 ## 목적과 현재 사실
 
@@ -18,6 +18,8 @@ CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별�
 | CLI | 옵션 검증, 프로젝트 경로 전달, JSONL codec/transport, report 파일 저장·JSON serialization | 같은 host/session client에 attach. 별도 source load/두 번째 actor/device를 만들지 않음 |
 
 프로젝트 filesystem resolver/import/cache는 이미 content/runtime의 책임이며 CLI 전용으로 옮기지 않는다. native library 사용자가 CLI process 없이도 같은 실행 기능을 소비해야 한다. C#·MCP의 전체 attach/SDK는 별도 제품 항목이며 이 Rust host 경계만으로 구현됐다고 하지 않는다. crate 이름은 위와 같이 채택하고 renderer의 default features는 끈다. host 기본 feature는 비장치 SDK 경계, native 창은 opt-in `window`다. activation-enabled host의 audio/native-audio는 P03.3c 전에는 제공하지 않으며 CLI의 기존 non-activation audio 경로를 보존한다.
+
+여기서 비장치는 실행 중 device/window/audio를 초기화하지 않는다는 뜻이다. renderer의 CPU owner/packet type을 소비하므로 현재 renderer의 무조건 dependency인 `wgpu`는 host의 no-default graph에도 남는다. `default-features = false`는 window/winit 선택을 끄지만 wgpu crate를 제거하지 않는다. wgpu dependency-free SDK·별도 CPU renderer crate 분리가 구현됐다고 하지 않는다. CLI의 optional host dependency는 window feature에서 선택한다. 이번 연결을 위해 renderer crate를 다시 분할하지 않는다.
 
 ## 외부 facade와 startup
 

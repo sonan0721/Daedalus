@@ -43,6 +43,22 @@ legacy `accepted_packet`은 activation report v2에서 생략한다. queued toke
 
 성공 outcome에서는 실제 managed present의 view/행렬을 쓰고 `actual_view_available:true`로 표시한다. run_view 오류로 compact NativePresentedSummary만 남은 경우 identity/dimensions는 보존하되 view와 view_projection은 null, actual_view_available은 false로 보고한다. 아예 present가 없으면 last_presented도 null이다. source/final camera로 누락된 실제 view를 추측하지 않는다. 이 오류 경로의 view 손실은 첫 slice의 명시적 제한이다.
 
+## 같은 host의 live view_status
+
+final report를 기다리거나 authority latest_frame을 화면 표시로 오해하지 않도록 protocol2의 직접 read 요청 `{"request":{"op":"view_status"}}`를 추가한다. 실제 envelope에는 기존 protocol/request_id도 유지한다. submit/ticket/actor operation이 아닌, 기존 LatestFrame/Close처럼 attachment의 read다. 기존 actor operations 배열은 유지하고 capabilities에 `view_status` boolean을 더한다. managed host control이 붙은 activation view에서만 true이며 headless/legacy attachment에서는 `view_status_unavailable` 오류를 반환한다.
+
+controller는 해당 session의 `NativeProjectHostControl`만 보유하고 try_status를 호출한다. Busy는 retryable view_status_busy, poisoned 상태는 유한 오류이며 blocking lock·driver callback·새 actor·source load를 하지 않는다. 응답 kind는 view_status다. host status의 session과 attached client의 session이 일치하는지도 확인한다. status를 대신 추적하는 CLI 전용 상태 기계를 만들지 않는다.
+
+응답은 lifecycle/session·view_started/view_closed·active_generation/원본 digest·queued_publication·actual last_presented identity/physical dimensions·CPU 논리 장부·bounded failure를 담는다. 기존 report의 pure metadata JSON helper를 재사용한다. IDs/tick/sequence는 decimal string, 상한은 기존 1MiB response 규칙이다. compact summary만 제공하므로 실제 view/행렬은 unavailable/null이며 `live_capture:false`다. 이 read가 GPU fence/scanout 또는 pixel capture를 증명하지 않는다.
+
+wire key는 `result.kind = "view_status"`, `result.data` 아래 `lifecycle`, `session`, `view_started`, `view_closed`, `active_generation`, `active_source_digest`, `queued_publication`, `last_presented`, `cpu`, `failure`, `live_capture`로 고정한다. 동일 helper의 출력을 final report의 `host`에도 넣는다. lifecycle은 `initializing`, `initial_preparing`, `cpu_prepared`, `ready`, `view_running`, `view_closed`, `stopping`, `stopped`, `failed`다. failure는 null 또는 code/message다. Busy 오류 code는 view_status_busy/retryable=true, 미부착은 view_status_unavailable, poison은 view_status_poisoned, session 불일치는 view_status_session_mismatch다.
+
+queued_publication은 null 또는 `session`, `tick`, `sequence`, `authority_snapshot_sequence`, `project_generation`, `source_digest`, `scene_revision`이다. last_presented는 null 또는 위 identity 중 scene_revision을 제외한 값과 `present_sequence`, `physical_width`, `physical_height`, `render_view:null`, `view_projection:null`, `actual_view_available:false`다. 마지막 snapshot sequence는 모르는 경우 null이다. success outcome의 final top-level last_presented에는 실제 render_view/행렬이 있으므로 report.host의 compact 관측과 구분한다.
+
+cpu는 PacketCpuStatus의 `generation_slots_used`, `generation_slots_limit`, `frame_slots_used`, `frame_slots_limit`, `prepared_metadata_bytes`, `prepared_metadata_reserved_bytes`, `legacy_mesh_copy_bytes`, `legacy_mesh_copy_reserved_bytes`, `frame_bytes`, `frame_reserved_bytes`, `scratch_current_bytes`, `scratch_peak_bytes` 12개 key를 numeric으로 직렬화한다. 이 값은 논리 장부이며 RSS/VRAM 실측 또는 frame-time 보장이 아니다.
+
+existing smoke의 `--view --asset-activation` 조합에서만 추가 managed view 검사를 수행한다. 단독 activation은 기존 device-free headless CPU 검사이며 단독 view는 legacy 검사를 유지한다. 기존 hybrid model/orthographic sprite fixture와 JSONL 제어를 재사용해 같은 window/session의 initial actual-present→source 변경·prepare/Stage/Commit→새 실제 present→old charge 회수를 관측한다. live view_status로 generation/present sequence를 기다리고 final report와 대조한다. 별도 batch capture를 창의 변경 픽셀 근거로 쓰지 않으며 창 pixel 검증은 직접 수단 확보 전 미완료다.
+
 ## close·오류·종료
 
 ProtocolController의 Close는 host control.request_view_close에 연결한다. view-close는 one-shot consumer를 닫고 추가 CPU frame 요청을 중지하며 같은 authority read/Step는 whole stop 전까지 가능하다. renderer의 ManagedWindowRead::Closed를 Empty/Busy와 같게 처리하지 않는다. Closed를 관측하면 consumer close·view-closed lifecycle로 수렴한다.

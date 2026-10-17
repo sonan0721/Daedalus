@@ -41,6 +41,8 @@ activation report는 `report_version: 2`, `presentation_mode: "managed_activatio
 
 legacy `accepted_packet`은 activation report v2에서 생략한다. queued token이나 마지막 present를 UI가 수락한 final packet처럼 이름만 바꾸어 채우지 않는다. authority latest publication과 GPU 준비/실제 표시도 다르다. IDs/tick/sequence의 기존 decimal string wire 표현과 1MiB final JSON 한도를 유지한다.
 
+성공 outcome에서는 실제 managed present의 view/행렬을 쓰고 `actual_view_available:true`로 표시한다. run_view 오류로 compact NativePresentedSummary만 남은 경우 identity/dimensions는 보존하되 view와 view_projection은 null, actual_view_available은 false로 보고한다. 아예 present가 없으면 last_presented도 null이다. source/final camera로 누락된 실제 view를 추측하지 않는다. 이 오류 경로의 view 손실은 첫 slice의 명시적 제한이다.
+
 ## close·오류·종료
 
 ProtocolController의 Close는 host control.request_view_close에 연결한다. view-close는 one-shot consumer를 닫고 추가 CPU frame 요청을 중지하며 같은 authority read/Step는 whole stop 전까지 가능하다. renderer의 ManagedWindowRead::Closed를 Empty/Busy와 같게 처리하지 않는다. Closed를 관측하면 consumer close·view-closed lifecycle로 수렴한다.

@@ -47,6 +47,8 @@ initial CPU prepare는 같은 owner에서 한 번 수행하고 InitialPreparing 
 
 bootstrap surface present는 game presented/ACK가 아니다. actor의 generation1/source는 이미 initial publication으로 존재할 수 있으나 view는 Starting·presented 없음이다. initial device-ready 뒤 실제 최신 SessionFrame에서 첫 packet을 추출하고 정상 draw/present 경계에서만 initial identity의 ACK를 보낸다. candidate/activation ID를 만들거나 초기 source를 다시 Commit하지 않는다. startup 실패도 candidate stage 실패로 위장하지 않고 host 초기 준비 실패/종료로 보고한다.
 
+후보 CPU 준비는 bootstrap과 겹칠 수 있지만 candidate BeginStage는 window의 실제 active generation을 관측한 뒤 전달한다. initial DeviceReady만으로 첫 실제 frame보다 후보를 먼저 enqueue하지 않는다. 다음 입력의 generation이 renderer가 실제 표시 중인 active+1 계약을 만족하도록 first-frame 전달을 우선한다. 초기 준비 도중 protocol Stage가 빠르게 도착한 경우도 fatal identity 오류로 바뀌지 않아야 한다.
+
 ### managed window의 additive 연결 경계
 
 source 리뷰에서 기존 `run_packet_windowed_presented`는 필수 initial packet을 요구하고 결과의 `final_packet` Arc를 유지하며, 실제 present metadata에는 authority snapshot sequence가 없음을 확인했다. 새 연결은 기존 `WindowApp`/surface/input/camera/event loop를 managed mode로 확장한다. 기존 public packet 함수·message·outcome의 동작과 struct literal은 보존한다.
@@ -117,6 +119,8 @@ runtime frame의 publication sequence와 authority_snapshot_sequence는 다르�
 
 실제 present ACK는 session·project generation·digest·publication sequence·authority snapshot sequence·tick·실제 view metadata를 갖는다. actor commit, submission, GPU completion, surface present 호출, CPU backing 회수는 독립 상태다. consumer ready/present는 trusted host의 보고이며 runtime이 GPU나 compositor를 직접 검증한 것처럼 표현하지 않는다. live 조회는 같은 control service의 bounded 상태로 노출할 방향이며 정확한 wire DTO/capability 추가는 코드 전 동결한다.
 
+compact last_presented는 실제 window 관측과 ACK 수락을 혼합해 과거로 되돌리지 않는다. 같은 session의 더 큰 present_sequence가 관측된 뒤 이전 pending ACK가 Applied되어도 최신 관측을 덮어쓰지 않는다. runtime ACK 진행은 별도 상태다. 성공 view outcome에는 실제 view/행렬이 있지만 첫 compact summary에는 identity/dimensions만 남을 수 있으므로 오류 report의 누락 표현은 CLI 계약을 따른다.
+
 ## 큰 CPU backing과 종료
 
 source pin만으로 복사된 legacy Mesh Vec·map·draw array·packet instances의 마지막 free thread를 보장할 수 없다. CPU owner는 **handoff 전에 실제로 공유될 각각의 backing Arc**를 typed registry에 등록한다. ProjectRenderResources wrapper/packet root의 refcount만 보지 않는다. RenderPacket은 Clone이며 실제 renderer에도 packet.clone 경로가 있어 root와 별개로 leaf가 남는다.
@@ -160,6 +164,8 @@ CPU job의 catch는 CPU owner를 바깥에 보유한 범위에서 실행하며 j
 첫 additive CLI 전환은 explicit `--asset-activation` 경로이며 기존 non-activation/audio 경로는 보존한다. 이 한정 때문에 기존 non-activation packet coordinator 전체가 이미 제거됐다고 하지 않는다. protocol·diagnostic 입력 mapping은 adapter에 남기고 새 활성화 경로의 load/CPU/frame/stage/window/회수는 host만 담당한다. flag·report v2·Close/whole stop·파일 소유권은 [CLI activation 연결 계약](native-project-view-activation.md)으로 동결한다.
 
 비장치 integration test는 새 crate의 public API만 import해 외부 temporary project start→attach/read/Step→status→stop/실제 shutdown을 수행한다. daedalus-cli를 dependency로 삼거나 CLI module을 test에 include하지 않는다. 후속 window hardware 검사는 실제 present→view close→같은 authority Step/read와 Stage/Commit 거부→whole shutdown을 확인한다. 이 최소 SDK 시험은 전체 C# SDK/AI 제작 제품 인수를 대신하지 않는다.
+
+macOS의 실제 window SDK 검증은 test worker thread 대신 호출 main thread에서 실행하는 opt-in `native_host_smoke` engine diagnostic example로 수행한다. 기존 외부 project 경로를 받고 같은 public host/session API만 사용한다. 별도 game project·actor·importer·packet coordinator·smoke framework를 추가하지 않는다. 작은 controller는 실제 present 관측 뒤 view-close를 요청하고, 창 반환 뒤 같은 authority의 read/Manual Step·실제 consumer Closed·whole stop/finished cleanup을 검사한다. native 창을 실행하지 않는 기본 CPU CI에서는 example 실행을 요구하지 않는다. `required-features = ["window"]`로 manifest에 표시하고 해당 hardware 명령/원본 결과를 별도 기록한다. Stage/Commit의 직접 거부 시험과 실제 source 교체는 runtime/CLI 통합의 근거와 각각 구분한다.
 
 ## 착수 전 남은 검증과 작업 분할
 

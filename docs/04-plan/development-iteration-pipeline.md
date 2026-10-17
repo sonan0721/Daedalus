@@ -224,6 +224,8 @@ PR19/mainc507835에서 CPU owner·canonical slot/token·same-device stage librar
 
 다음 host/window 연결에서도 반복 제거를 코드 계약에 둔다. Busy로 소비된 StageInput은 canonical CPU generation에서 Arc projection만 다시 요청한다. source import·CPU prepare·validation·새 GPU device를 다시 만들지 않는다. 초기화 owner와 legacy 생성자는 같은 builder를 쓰며 shader/pipeline 코드를 두 벌로 복제하지 않는다. 기존 WindowApp의 surface/input/camera와 combined stage+draw를 확장하고 CLI는 후속 host의 transport/report adapter로 좁힌다. 이 source 작업의 실제 검사·iteration 효과는 [generation 기록](../06-worklog/2026-10-17-render-generation.md)에 남기며 현재 설계를 이미 측정된 개선이라고 부르지 않는다.
 
+host 구현 검토에서는 기존 digest validator·runtime compact publication token·service shutdown report·renderer의 actual view-projection 수식을 재사용하도록 정했다. identifier를 진단 문자열처럼 자른 실제 CPU 실패를 고쳤고 최종 renderer CPU85/Metal29는 해당 worklog에 기록했다. host/CLI 통합 통과는 별도다. CPU Busy status memoization은 같은 준비의 무의미한 반복을 줄이는 방향이지만 cancellation/currentness가 바뀌면 장부가 같아도 pending lease/snapshot을 해제해야 한다. 재시도 절감과 무효화 정확성을 함께 검사하며 단순 cache/memo 추가를 성능 달성으로 계산하지 않는다.
+
 ### 검증 출력 보존의 공통 실행기
 
 서로 다른 작업에서 기존 로그 덮어쓰기·zsh readonly 종료 변수·빈 출력 파일이 반복됐다. 규칙만 다시 읽게 하는 대신 noninteractive 명령의 출력 보존만 담당하는 `scripts/run_logged.py`를 추가하는 작은 도구 작업을 채택했다. 테스트 선택·Cargo lease·timeout·재시도·성공 판정은 기존 caller의 책임이며 새 smoke/test framework를 만들지 않는다. 아래는 착수 전에 고정한 계약과 실제 검증 범위다.

@@ -107,6 +107,8 @@ CPU 전달은 prepare(실행1+pending1), latest-frame 요청1, stage-input 재�
 
 lease는 non-Clone이며 CPU prepare로 이동한다. coordinator는 consumer status에서 desired/current identity를 관측해 host-owned AtomicBool을 갱신하고 CPU checkpoint가 이를 읽는다. 완료 뒤 lease.is_current를 다시 확인한 뒤에만 handoff한다. exported lease 내부에 즉시 취소 shared cell이 있다고 가정하지 않으며 cancellation latency는 cooperative poll 간격과 현재 work 단위에 의존한다.
 
+Busy 후 같은 CPU 장부 상태에서 prepare/extract를 반복하지 않는 최적화는 취소/currentness 검사를 생략할 이유가 아니다. 매 poll에서 먼저 cancelled/stale을 확인해 pending lease/snapshot을 owner thread에서 해제하고, 살아 있는 작업에만 이전 Busy status와의 비교를 적용한다. held alias가 영구 유지되어 status가 변하지 않아도 무효화된 작업은 해제되어야 한다. 실제 held-alias Busy→취소와 Busy→alias 해제→같은 lease 재개를 각각 검사한다.
+
 ## publication과 표시 identity
 
 runtime frame의 publication sequence와 authority_snapshot_sequence는 다르다. Commit은 같은 tick/snapshot으로 새 source publication을 만들 수 있다. 기존 renderer extract는 snapshot.sequence를 packet.sequence에 넣으므로 이를 그대로 쓰면 정상 세대 교체도 sequence 충돌이 된다.

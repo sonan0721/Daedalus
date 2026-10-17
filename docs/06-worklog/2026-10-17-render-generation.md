@@ -61,3 +61,17 @@ raw `p03-consumer-runtime-focused-luna-attempt01/02/03.log`의 SHA-256은 순서
 CPU owner의 source는 실제 leaf registry·Weak를 포함한 독립 alias·첫 frame 예산·취소 정리·낮춘 한도에서 active/candidate 전환을 기준으로 리뷰 중이다. GPU source에서는 candidate 준비 중 전달된 최신 old-generation frame 대신 기존 ready packet만 그리는 경로와 Ready 뒤 plan 해제 시 다음 poll이 Uploading으로 되돌리는 경로를 확인했다. Luna가 기존 validation을 재사용하는 managed submission/정확한 CPU frame pin과 Ready terminal 유지로 수정한다. 이 사전 리뷰는 compile/GPU 회귀 전의 결함 발견이며 동작 인수나 측정된 개선으로 세지 않는다.
 
 CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 실제 tuple padding을 누락할 수 있었다. GeometryKey/MeshHandle 같은 실제 pair의 `size_of<(K,V)>`를 쓰고 HashSet은 key layout을 쓰도록 같은 estimator의 prepared/scratch/frame 경로를 수정했다. Weak가 남은 실제 mesh·부분 준비 후 취소·old frame을 보유한 active/candidate 전환 시험 source도 추가했다. 아직 이 renderer source의 Cargo 검증은 하지 않았다. GPU source에는 whole-buffer 대신 whole-record chunk, 후보별 최소 create quota, 추가 stage bookkeeping 예약과 managed slot 갱신의 계약 누락이 있어 수정 중이다.
+
+## runtime source 최종 동결·로컬 검증
+
+마지막 fixture 리뷰에서 nonwaiting port의 정상 호출도 actor와 경합하면 합법적인 Busy를 반환할 수 있음을 확인했다. 테스트의 정상 성공/오류 판정만 기존 방식의 유한 Busy 재시도로 묶고, mutex를 의도적으로 잡고 Busy를 검사하는 assertion은 그대로 유지했다. production·deadline·임의 sleep을 바꾸지 않았다. 이 수정 뒤 runtime source 네 파일을 동결했다.
+
+| 최종 명령/범위 | 실제 결과 | raw SHA-256 |
+| --- | --- | --- |
+| runtime default `cargo test -p daedalus-runtime --locked` | unit102+integration1+1=104pass, failed0/ignored0/doc0 | `c42cb8e28d0cce8179c0c48520862c9f8c399bbbd63b8f47c1c278488b33ccfb` |
+| runtime `--all-features --locked` | unit114+integration1+1=116pass, failed0/ignored0/doc0 | `734e972b0c6438637cf339f2c391cdba21908ae9043adc923808d1c96440b0c3` |
+| runtime all-target/all-feature Clippy `-D warnings` | success,1.98초 | `084555292084cdd9f24f50c3235778954d92fa547f8937bea04628e05cd583e8` |
+
+위 raw는 `p03-consumer-busy-fixture-runtime-{default,allfeatures,clippy}-luna-attempt01.log`다. 마지막 scoped runtime rustfmt/diff check도0으로 끝났고 그 뒤 source 변경은 없다. focused `consumer_`는 실제9개가 통과했으나 wrapper가 zsh readonly 변수 `status`에 종료 코드를 대입해 footer 기록에 실패했다. 해당 raw `p03-consumer-busy-fixture-luna-attempt01.log`의 SHA-256은 `9af500cfa2e1cb6cc63d6c2dc8e46a3c90bda24062be9c8f59eb54f814c80a20`이며 Cargo 성공 summary와 wrapper 결함을 구분한다. 최종 전체 두 실행/Clippy에는 exit_code0 footer가 있다.
+
+문서 checker·문서 unit8도 통과했다. Luna raw `p03-consumer-docs-check-luna-attempt-HM0rI6`/`p03-consumer-docs-unittest-luna-attempt-oukBLT`의 SHA-256은 각각 `e9202009d391bd258dcf3f484424f260c9a0c3d079b1448d12bb8e2d0048696c`/`60bb849356ffbc091f601e17fc6ae0b2eb5e26d734d433da020c6e775efbf97f`다. source/로컬 통과와 clean PR의 workspace/managed/두 package 인수는 구분하며 후자는 아직 대기다. renderer WIP·실제 GPU/present·host/SDK/CLI 연결과 전체 b.3/P03/D1은 미완료다.

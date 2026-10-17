@@ -24,6 +24,11 @@ use crate::project_activation::{
     ActivationId, AssetActivationCommandOutcome, AssetActivationCommandResult,
     AssetActivationOperation, AssetActivationRequestResult, AssetActivationStatus,
 };
+use crate::project_generation_consumer::{
+    ProjectConsumerError, ProjectConsumerStageFailure, ProjectConsumerStageFailurePhase,
+    ProjectConsumerStageOutcome, ProjectConsumerStageProgress, ProjectGenerationConsumerShared,
+    ProjectPublicationIdentity, ProjectSourceIdentity,
+};
 use crate::project_preparation::{
     AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
     AssetPreparationResult, PreparationId, ProjectPreparationPort, ProjectPreparationPortError,
@@ -1145,6 +1150,16 @@ struct ControlShared {
     activation_stage_admission_paused: AtomicBool,
     #[cfg(test)]
     release_activation_stage_admission_pause: AtomicBool,
+    #[cfg(test)]
+    pause_after_pending_consumer_stage_report: AtomicBool,
+    #[cfg(test)]
+    pending_consumer_stage_report_paused: AtomicBool,
+    #[cfg(test)]
+    release_pending_consumer_stage_report_pause: AtomicBool,
+    #[cfg(test)]
+    consumer_stage_report_busy_observed: AtomicBool,
+    #[cfg(test)]
+    consumer_publication_busy_observed: AtomicBool,
 }
 
 impl ControlShared {
@@ -1176,6 +1191,28 @@ impl ControlShared {
         self.activation_stage_admission_paused
             .store(false, Ordering::Release);
     }
+
+    #[cfg(test)]
+    fn pause_after_pending_consumer_stage_report_for_test(&self) {
+        if !self
+            .pause_after_pending_consumer_stage_report
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        self.pending_consumer_stage_report_paused
+            .store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !self
+            .release_pending_consumer_stage_report_pause
+            .load(Ordering::Acquire)
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        self.pending_consumer_stage_report_paused
+            .store(false, Ordering::Release);
+    }
 }
 
 /// Owns one project actor. Dropping the owner requests stop without joining; use `shutdown` to
@@ -1202,7 +1239,7 @@ impl SessionControlService {
         let audio_options = None;
         #[cfg(not(feature = "audio"))]
         let audio_options = ();
-        Self::start_shared_inner(prepared, config, audio_options, None, false)
+        Self::start_shared_inner(prepared, config, audio_options, None, false, None)
     }
 
     /// Starts the existing project actor with an optional native preparation control capability.
@@ -1224,6 +1261,7 @@ impl SessionControlService {
             audio_options,
             Some(preparation_port),
             false,
+            None,
         )
     }
 
@@ -1245,6 +1283,36 @@ impl SessionControlService {
             audio_options,
             Some(preparation_port),
             true,
+            None,
+        )
+    }
+
+    pub(crate) fn start_shared_with_render_consumer(
+        prepared: Arc<PreparedProject>,
+        config: SessionControlConfig,
+        preparation_port: ProjectPreparationPort,
+        generation_consumer: ProjectGenerationConsumerShared,
+    ) -> Result<Self, SessionControlStartError> {
+        if !preparation_port.matches_initial_project(&prepared) {
+            return Err(SessionControlStartError::PreparationProjectMismatch);
+        }
+        if generation_consumer.session().ok() != Some(config.engine.session) {
+            return Err(SessionControlStartError::PreparationProjectMismatch);
+        }
+        if !generation_consumer.matches_initial_project(&prepared) {
+            return Err(SessionControlStartError::PreparationProjectMismatch);
+        }
+        #[cfg(feature = "audio")]
+        let audio_options = None;
+        #[cfg(not(feature = "audio"))]
+        let audio_options = ();
+        Self::start_shared_inner(
+            prepared,
+            config,
+            audio_options,
+            Some(preparation_port),
+            true,
+            Some(generation_consumer),
         )
     }
 
@@ -1265,6 +1333,7 @@ impl SessionControlService {
             Some(audio_options),
             Some(preparation_port),
             false,
+            None,
         )
     }
 
@@ -1274,7 +1343,7 @@ impl SessionControlService {
         config: SessionControlConfig,
         audio_options: SessionAudioOptions,
     ) -> Result<Self, SessionControlStartError> {
-        Self::start_shared_inner(prepared, config, Some(audio_options), None, false)
+        Self::start_shared_inner(prepared, config, Some(audio_options), None, false, None)
     }
 
     fn start_shared_inner(
@@ -1283,6 +1352,7 @@ impl SessionControlService {
         audio_options: ActorAudioOptions,
         preparation_port: Option<ProjectPreparationPort>,
         asset_activation_enabled: bool,
+        generation_consumer: Option<ProjectGenerationConsumerShared>,
     ) -> Result<Self, SessionControlStartError> {
         config.limits.validate(&config.engine)?;
         if prepared.entities().len() > MAX_PROJECT_SESSION_ENTITIES {
@@ -1356,6 +1426,16 @@ impl SessionControlService {
             activation_stage_admission_paused: AtomicBool::new(false),
             #[cfg(test)]
             release_activation_stage_admission_pause: AtomicBool::new(false),
+            #[cfg(test)]
+            pause_after_pending_consumer_stage_report: AtomicBool::new(false),
+            #[cfg(test)]
+            pending_consumer_stage_report_paused: AtomicBool::new(false),
+            #[cfg(test)]
+            release_pending_consumer_stage_report_pause: AtomicBool::new(false),
+            #[cfg(test)]
+            consumer_stage_report_busy_observed: AtomicBool::new(false),
+            #[cfg(test)]
+            consumer_publication_busy_observed: AtomicBool::new(false),
         });
         let (startup_sender, startup_receiver) = std::sync::mpsc::sync_channel(1);
         let actor_shared = Arc::clone(&shared);
@@ -1367,6 +1447,7 @@ impl SessionControlService {
                     config,
                     audio_options,
                     preparation_port,
+                    generation_consumer,
                     actor_shared,
                     startup_sender,
                 )
@@ -1756,6 +1837,24 @@ fn activation_port_error(error: ProjectPreparationPortError) -> SessionRequestEr
     }
 }
 
+fn project_consumer_request_error(error: ProjectConsumerError) -> SessionRequestError {
+    match error {
+        ProjectConsumerError::Busy => SessionRequestError::ActivationBusy,
+        ProjectConsumerError::Closed | ProjectConsumerError::Stopped => {
+            SessionRequestError::AssetActivationUnavailable
+        }
+        ProjectConsumerError::ForeignSession | ProjectConsumerError::StaleIdentity => {
+            SessionRequestError::ActivationNotStaged
+        }
+        ProjectConsumerError::ConflictingReport | ProjectConsumerError::InvalidReport => {
+            SessionRequestError::InvalidActivation
+        }
+        ProjectConsumerError::Poisoned => SessionRequestError::ActorFailed(
+            "project generation consumer state was poisoned".to_owned(),
+        ),
+    }
+}
+
 fn replay_storage_error() -> SessionRequestError {
     SessionRequestError::ReplayStorageUnavailable
 }
@@ -1881,6 +1980,11 @@ struct ControlActor {
     latest_activation_failure: Option<crate::AssetActivationFailure>,
     staged_project: Option<StagedProjectCandidate>,
     deferred_stage_result: Option<StageResult>,
+    generation_consumer: Option<ProjectGenerationConsumerShared>,
+    consumer_stage_identity: Option<ProjectSourceIdentity>,
+    consumer_stage_currentness: Option<Arc<std::sync::atomic::AtomicBool>>,
+    consumer_stage_cleanup_pending: Option<ProjectConsumerStageProgress>,
+    consumer_close_cancelled: bool,
     #[cfg(feature = "audio")]
     audio: Option<ProjectAudioRuntime>,
     active_request: Option<ActiveRequest>,
@@ -1899,6 +2003,7 @@ fn run_control_actor(
     #[cfg(feature = "audio")] audio_options: ActorAudioOptions,
     #[cfg(not(feature = "audio"))] _audio_options: ActorAudioOptions,
     mut preparation_port: Option<ProjectPreparationPort>,
+    generation_consumer: Option<ProjectGenerationConsumerShared>,
     shared: Arc<ControlShared>,
     startup_sender: std::sync::mpsc::SyncSender<Result<(), SessionControlStartError>>,
 ) -> SessionShutdownReport {
@@ -2030,6 +2135,11 @@ fn run_control_actor(
         latest_activation_failure: None,
         staged_project: None,
         deferred_stage_result: None,
+        generation_consumer,
+        consumer_stage_identity: None,
+        consumer_stage_currentness: None,
+        consumer_stage_cleanup_pending: None,
+        consumer_close_cancelled: false,
         #[cfg(feature = "audio")]
         audio,
         active_request: None,
@@ -2060,6 +2170,12 @@ fn run_control_actor(
         Err(payload) => SessionTermination::Panicked(panic_message(payload)),
     };
     shared.request_stop();
+    if let Some(consumer) = actor.generation_consumer.as_ref() {
+        consumer.actor_stopped();
+        if let Some(port) = actor.preparation_port.as_ref() {
+            port.request_stop();
+        }
+    }
 
     for request in shared.queue.drain() {
         shared
@@ -2135,6 +2251,7 @@ impl ControlActor {
                 return Err("project preparation worker panicked".to_owned());
             }
             self.poll_activation_stage_results()?;
+            self.poll_generation_consumer()?;
             #[cfg(feature = "audio")]
             if let Some(audio) = self.audio.as_mut() {
                 audio
@@ -2179,6 +2296,26 @@ impl ControlActor {
             if self.frame_needs_publish {
                 self.publish_latest_frame()?;
             }
+        }
+    }
+
+    fn invalidate_consumer_stage(&mut self, progress: ProjectConsumerStageProgress) {
+        if let Some(currentness) = self.consumer_stage_currentness.take() {
+            currentness.store(false, std::sync::atomic::Ordering::Release);
+        }
+        let had_stage = self.consumer_stage_identity.take().is_some();
+        if !had_stage {
+            return;
+        }
+        let Some(consumer) = self.generation_consumer.as_ref() else {
+            return;
+        };
+        match consumer.try_invalidate_stage(progress) {
+            Ok(()) => self.consumer_stage_cleanup_pending = None,
+            Err(ProjectConsumerError::Busy) => {
+                self.consumer_stage_cleanup_pending = Some(progress);
+            }
+            Err(_) => self.consumer_stage_cleanup_pending = None,
         }
     }
 
@@ -2376,6 +2513,21 @@ impl ControlActor {
         else {
             return;
         };
+        if matches!(
+            &operation,
+            AssetActivationOperation::Stage { .. } | AssetActivationOperation::Commit { .. }
+        ) && self
+            .generation_consumer
+            .as_ref()
+            .is_some_and(|consumer| consumer.is_closed() || consumer.is_stopped())
+        {
+            self.finish_cell(
+                cell,
+                credit,
+                Err(SessionRequestError::AssetActivationUnavailable),
+            );
+            return;
+        }
         if self.preparation_port.is_none() {
             self.finish_cell(
                 cell,
@@ -2458,6 +2610,55 @@ impl ControlActor {
                     return;
                 }
                 let activation = ActivationId::from_parts(session, sequence);
+                let consumer_identity = if self.generation_consumer.is_some() {
+                    let Some(proposed_generation) = expected_active_generation.checked_add(1)
+                    else {
+                        self.finish_cell(
+                            cell,
+                            credit,
+                            Err(SessionRequestError::ProjectGenerationExhausted),
+                        );
+                        return;
+                    };
+                    match ProjectSourceIdentity::candidate(
+                        session,
+                        candidate,
+                        activation,
+                        expected_active_generation,
+                        proposed_generation,
+                        ready.source_digest(),
+                    ) {
+                        Ok(identity) => Some(identity),
+                        Err(_) => {
+                            self.finish_cell(
+                                cell,
+                                credit,
+                                Err(SessionRequestError::AssetActivationUnavailable),
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let consumer_shared = self.generation_consumer.clone();
+                let consumer_stage_guard =
+                    match (consumer_shared.as_ref(), consumer_identity.clone()) {
+                        (Some(consumer), Some(identity)) => {
+                            match consumer.try_stage_guard(identity) {
+                                Ok(guard) => Some(guard),
+                                Err(error) => {
+                                    self.finish_cell(
+                                        cell,
+                                        credit,
+                                        Err(project_consumer_request_error(error)),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
                 let accepted = self
                     .preparation_port
                     .as_ref()
@@ -2466,6 +2667,13 @@ impl ControlActor {
                 if let Err(error) = accepted {
                     self.finish_cell(cell, credit, Err(activation_port_error(error)));
                     return;
+                }
+                if let Some(guard) = consumer_stage_guard {
+                    if let Some(previous) = self.consumer_stage_currentness.take() {
+                        previous.store(false, std::sync::atomic::Ordering::Release);
+                    }
+                    self.consumer_stage_currentness = Some(guard.apply());
+                    self.consumer_stage_cleanup_pending = None;
                 }
                 #[cfg(test)]
                 self.shared
@@ -2484,6 +2692,8 @@ impl ControlActor {
                 self.latest_activation_failure = None;
                 self.staged_project = None;
                 self.deferred_stage_result = None;
+                self.consumer_stage_identity = consumer_identity;
+                self.consumer_close_cancelled = false;
                 // Admission wakes the worker before this handler can publish the new activation.
                 // Keep the result channel intact; the next actor poll consumes both stale and
                 // current results through the sequence/epoch checks in `consume_activation_stage_result`.
@@ -2521,6 +2731,7 @@ impl ControlActor {
                 }
                 let candidate = staged.candidate;
                 let new_digest = staged.project.digest().to_owned();
+                let new_scene_revision = staged.project.scene().revision;
                 let project = Arc::clone(&staged.project);
                 let Some(generation) = self.active_project_generation.checked_add(1) else {
                     self.finish_cell(
@@ -2550,6 +2761,22 @@ impl ControlActor {
                     self.finish_cell(cell, credit, Err(SessionRequestError::ResultTooLarge));
                     return;
                 }
+                let mut consumer_commit_guard =
+                    if let Some(consumer) = self.generation_consumer.as_ref() {
+                        match consumer.try_commit_guard() {
+                            Ok(guard) => Some(guard),
+                            Err(error) => {
+                                self.finish_cell(
+                                    cell,
+                                    credit,
+                                    Err(project_consumer_request_error(error)),
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                 if let Some(active) = self.active_request.as_mut() {
                     active.possible_command_id = Some(command_id);
                 }
@@ -2584,9 +2811,19 @@ impl ControlActor {
                 }
                 // The worker registry still owns the old source; this local drop cannot be its
                 // final large deallocation. Promotion/reclamation occurs on the worker thread.
-                drop(displaced.take());
+                let old_project = displaced.take();
                 self.active_project_generation = generation;
                 self.active_project_digest = new_digest.clone();
+                if let (Some(guard), Some(old_project)) =
+                    (consumer_commit_guard.as_mut(), old_project)
+                {
+                    guard.apply_commit(
+                        generation,
+                        new_digest.clone(),
+                        new_scene_revision,
+                        old_project,
+                    );
+                }
                 self.current_activation = Some(crate::AssetActivationSummary::new(
                     activation,
                     candidate,
@@ -2596,6 +2833,9 @@ impl ControlActor {
                 ));
                 self.latest_activation_failure = None;
                 self.staged_project = None;
+                self.consumer_stage_identity = None;
+                self.consumer_stage_currentness = None;
+                self.consumer_stage_cleanup_pending = None;
                 self.frame_needs_publish = true;
                 AssetActivationCommandOutcome::CommitApplied {
                     activation,
@@ -2640,6 +2880,7 @@ impl ControlActor {
                     self.finish_cell(cell, credit, Err(activation_port_error(error)));
                     return;
                 }
+                self.invalidate_consumer_stage(ProjectConsumerStageProgress::Cancelled);
                 self.staged_project = None;
                 self.drain_stage_results();
                 AssetActivationCommandOutcome::CancelAccepted { activation }
@@ -2729,6 +2970,212 @@ impl ControlActor {
         Ok(())
     }
 
+    fn poll_generation_consumer(&mut self) -> Result<(), String> {
+        let Some(consumer) = self.generation_consumer.clone() else {
+            return Ok(());
+        };
+
+        if consumer.is_closed() && !self.consumer_close_cancelled {
+            match consumer.try_finish_close() {
+                Ok(()) => {}
+                Err(ProjectConsumerError::Busy) => return Ok(()),
+                Err(ProjectConsumerError::Poisoned) => {
+                    return Err("project generation consumer state was poisoned".to_owned());
+                }
+                Err(_) => return Ok(()),
+            }
+
+            let uncommitted_sequence = self
+                .current_activation
+                .as_ref()
+                .filter(|summary| summary.committed_generation().is_none())
+                .map(|summary| summary.id().sequence());
+            if let Some(sequence) = uncommitted_sequence
+                && let Some(port) = self.preparation_port.as_ref()
+            {
+                match port.try_cancel_activation(sequence) {
+                    Ok(())
+                    | Err(ProjectPreparationPortError::NoActiveCandidate)
+                    | Err(ProjectPreparationPortError::Stopped) => {}
+                    Err(ProjectPreparationPortError::Busy) => return Ok(()),
+                    Err(_) => return Ok(()),
+                }
+            }
+            let _ = consumer.try_invalidate_stage(ProjectConsumerStageProgress::Closed);
+            self.staged_project = None;
+            self.consumer_stage_identity = None;
+            if let Some(currentness) = self.consumer_stage_currentness.take() {
+                currentness.store(false, std::sync::atomic::Ordering::Release);
+            }
+            self.consumer_stage_cleanup_pending = None;
+            self.deferred_stage_result = None;
+            self.drain_stage_results();
+            self.consumer_close_cancelled = true;
+            return Ok(());
+        }
+
+        if consumer.is_closed() {
+            return Ok(());
+        }
+
+        if let Some(progress) = self.consumer_stage_cleanup_pending {
+            match consumer.try_invalidate_stage(progress) {
+                Ok(()) => self.consumer_stage_cleanup_pending = None,
+                Err(ProjectConsumerError::Busy) => return Ok(()),
+                Err(ProjectConsumerError::Poisoned) => {
+                    return Err("project generation consumer state was poisoned".to_owned());
+                }
+                Err(_) => self.consumer_stage_cleanup_pending = None,
+            }
+        }
+
+        let pending_stage = match consumer.try_pending_stage_report() {
+            Ok(pending) => pending,
+            Err(ProjectConsumerError::Busy) => None,
+            Err(ProjectConsumerError::Poisoned) => {
+                return Err("project generation consumer state was poisoned".to_owned());
+            }
+            Err(_) => None,
+        };
+        #[cfg(test)]
+        if pending_stage.is_some() {
+            self.shared
+                .pause_after_pending_consumer_stage_report_for_test();
+        }
+        if let Some((identity, outcome)) = pending_stage {
+            let current = self.consumer_stage_identity.as_ref() == Some(&identity)
+                && self.current_activation.as_ref().is_some_and(|summary| {
+                    identity
+                        .activation()
+                        .is_some_and(|activation| summary.id() == activation)
+                        && identity
+                            .preparation()
+                            .is_some_and(|candidate| summary.candidate() == candidate)
+                        && summary.expected_active_generation() == self.active_project_generation
+                });
+            if !current {
+                consumer.try_drop_stale_stage_report(&identity, &outcome);
+            } else {
+                let report_guard = match consumer.try_stage_report_guard(&identity, &outcome) {
+                    Ok(guard) => guard,
+                    Err(ProjectConsumerError::Busy) => {
+                        #[cfg(test)]
+                        self.shared
+                            .consumer_stage_report_busy_observed
+                            .store(true, Ordering::Release);
+                        return Ok(());
+                    }
+                    Err(
+                        ProjectConsumerError::StaleIdentity
+                        | ProjectConsumerError::Closed
+                        | ProjectConsumerError::Stopped,
+                    ) => {
+                        consumer.try_drop_stale_stage_report(&identity, &outcome);
+                        return Ok(());
+                    }
+                    Err(ProjectConsumerError::Poisoned) => {
+                        return Err("project generation consumer state was poisoned".to_owned());
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "invalid project generation stage report: {error:?}"
+                        ));
+                    }
+                };
+                let staged = matches!(outcome, ProjectConsumerStageOutcome::Ready);
+                let port_result = self
+                    .preparation_port
+                    .as_ref()
+                    .map(|port| {
+                        port.mark_stage_result(
+                            identity
+                                .activation()
+                                .expect("candidate activation")
+                                .sequence(),
+                            identity
+                                .preparation()
+                                .expect("candidate preparation")
+                                .epoch(),
+                            staged,
+                        )
+                    })
+                    .unwrap_or(Err(ProjectPreparationPortError::Stopped));
+                match port_result {
+                    Ok(()) => {
+                        report_guard.apply();
+                        match outcome {
+                            ProjectConsumerStageOutcome::Ready => {
+                                self.latest_activation_failure = None;
+                            }
+                            ProjectConsumerStageOutcome::Failed(failure) => {
+                                self.staged_project = None;
+                                if let Some(summary) = self.current_activation.as_ref() {
+                                    self.latest_activation_failure =
+                                        Some(crate::AssetActivationFailure::new(
+                                            summary.id(),
+                                            failure.code().to_owned(),
+                                            failure.message().to_owned(),
+                                            None,
+                                        ));
+                                }
+                            }
+                        }
+                    }
+                    Err(ProjectPreparationPortError::Busy) => drop(report_guard),
+                    Err(
+                        ProjectPreparationPortError::NoActiveCandidate
+                        | ProjectPreparationPortError::Stopped,
+                    ) => {
+                        drop(report_guard);
+                        consumer.try_drop_stale_stage_report(&identity, &outcome);
+                    }
+                    Err(error) => {
+                        drop(report_guard);
+                        return Err(format!(
+                            "preparation worker rejected stage report: {error:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        let pending_present = match consumer.try_pending_present() {
+            Ok(pending) => pending,
+            Err(ProjectConsumerError::Busy) => None,
+            Err(ProjectConsumerError::Poisoned) => {
+                return Err("project generation consumer state was poisoned".to_owned());
+            }
+            Err(_) => None,
+        };
+        if let Some(presented) = pending_present {
+            let publication = presented.publication();
+            let current = publication.session() == self.session.engine().world().session()
+                && publication.project_generation() == self.active_project_generation
+                && publication.source_digest() == self.active_project_digest
+                && publication.scene_revision() == self.session.project().scene().revision
+                && publication.publication_sequence() <= self.last_published_sequence
+                && publication.authority_snapshot_sequence()
+                    <= self.last_authority_snapshot_sequence
+                && publication.tick() <= self.session.engine().clock().current_tick();
+            if !current {
+                consumer.try_drop_stale_present(&presented);
+            } else {
+                match consumer.try_apply_present(&presented) {
+                    Ok(()) => {}
+                    Err(ProjectConsumerError::StaleIdentity) => {
+                        consumer.try_drop_stale_present(&presented);
+                    }
+                    Err(ProjectConsumerError::Busy) => {}
+                    Err(ProjectConsumerError::Poisoned) => {
+                        return Err("project generation consumer state was poisoned".to_owned());
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn drain_stage_results(&mut self) {
         self.deferred_stage_result = None;
         while let Some(result) = self
@@ -2760,10 +3207,20 @@ impl ControlActor {
                     drop(project);
                     return true;
                 }
-                if let Some(port) = self.preparation_port.as_ref() {
-                    match port.mark_stage_result(sequence, epoch, true) {
+                if let Some(consumer) = self.generation_consumer.as_ref() {
+                    let Some(identity) = self.consumer_stage_identity.as_ref() else {
+                        drop(project);
+                        return true;
+                    };
+                    if identity.activation() != Some(activation)
+                        || identity.preparation() != Some(candidate)
+                    {
+                        drop(project);
+                        return true;
+                    }
+                    match consumer.try_publish_candidate(identity, Arc::clone(&project)) {
                         Ok(()) => {}
-                        Err(ProjectPreparationPortError::Busy) => {
+                        Err(ProjectConsumerError::Busy) => {
                             self.deferred_stage_result = Some(StageResult::Ready {
                                 sequence,
                                 epoch,
@@ -2777,8 +3234,26 @@ impl ControlActor {
                         }
                     }
                 } else {
-                    drop(project);
-                    return true;
+                    if let Some(port) = self.preparation_port.as_ref() {
+                        match port.mark_stage_result(sequence, epoch, true) {
+                            Ok(()) => {}
+                            Err(ProjectPreparationPortError::Busy) => {
+                                self.deferred_stage_result = Some(StageResult::Ready {
+                                    sequence,
+                                    epoch,
+                                    project,
+                                });
+                                return false;
+                            }
+                            Err(_) => {
+                                drop(project);
+                                return true;
+                            }
+                        }
+                    } else {
+                        drop(project);
+                        return true;
+                    }
                 }
                 self.latest_activation_failure = None;
                 self.staged_project = Some(StagedProjectCandidate {
@@ -2803,6 +3278,31 @@ impl ControlActor {
                     && epoch == self.last_issued_preparation_epoch
                     && self.cancelled_preparation_epoch != Some(epoch)
                 {
+                    if let Some(consumer) = self.generation_consumer.as_ref()
+                        && let Some(identity) = self.consumer_stage_identity.as_ref()
+                    {
+                        let mut truncated = false;
+                        let message =
+                            bounded_activation_text(&error.to_string(), 2_048, &mut truncated);
+                        let failure = ProjectConsumerStageFailure::new(
+                            ProjectConsumerStageFailurePhase::CpuPrepare,
+                            "incompatible_topology",
+                            message,
+                        );
+                        let Ok(failure) = failure else {
+                            return true;
+                        };
+                        if let Err(ProjectConsumerError::Busy) =
+                            consumer.try_mark_internal_stage_failure(identity, failure)
+                        {
+                            self.deferred_stage_result = Some(StageResult::Incompatible {
+                                sequence,
+                                epoch,
+                                error,
+                            });
+                            return false;
+                        }
+                    }
                     if let Some(port) = self.preparation_port.as_ref() {
                         match port.mark_stage_result(sequence, epoch, false) {
                             Ok(()) => {}
@@ -2842,6 +3342,25 @@ impl ControlActor {
                     && epoch == self.last_issued_preparation_epoch
                     && self.cancelled_preparation_epoch != Some(epoch)
                 {
+                    if let Some(consumer) = self.generation_consumer.as_ref()
+                        && let Some(identity) = self.consumer_stage_identity.as_ref()
+                    {
+                        let failure = ProjectConsumerStageFailure::new(
+                            ProjectConsumerStageFailurePhase::CpuPrepare,
+                            "internal",
+                            "the prepared candidate could not be staged",
+                        );
+                        let Ok(failure) = failure else {
+                            return true;
+                        };
+                        if let Err(ProjectConsumerError::Busy) =
+                            consumer.try_mark_internal_stage_failure(identity, failure)
+                        {
+                            self.deferred_stage_result =
+                                Some(StageResult::Failed { sequence, epoch });
+                            return false;
+                        }
+                    }
                     if let Some(port) = self.preparation_port.as_ref() {
                         match port.mark_stage_result(sequence, epoch, false) {
                             Ok(()) => {}
@@ -2974,9 +3493,11 @@ impl ControlActor {
         if matches!(&operation, AssetPreparationOperation::Prepare { .. }) {
             self.last_issued_preparation_epoch = candidate.epoch();
             self.cancelled_preparation_epoch = None;
+            self.invalidate_consumer_stage(ProjectConsumerStageProgress::Superseded);
             self.drain_stage_results();
         } else {
             self.cancelled_preparation_epoch = Some(candidate.epoch());
+            self.invalidate_consumer_stage(ProjectConsumerStageProgress::Cancelled);
             self.drain_stage_results();
         }
         self.staged_project = None;
@@ -3686,6 +4207,39 @@ impl ControlActor {
             source_scene_revision: prepared.scene().revision,
             snapshot,
         };
+        let consumer_publication = if self.generation_consumer.is_some() {
+            Some(
+                ProjectPublicationIdentity::from_frame(&frame)
+                    .map_err(|error| format!("invalid session presentation identity: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let publication_consumer = self.generation_consumer.clone();
+        let publication_guard = if let (Some(consumer), Some(publication)) =
+            (publication_consumer.as_ref(), consumer_publication)
+        {
+            match consumer.try_publication_guard(publication) {
+                Ok(guard) => Some(guard),
+                Err(ProjectConsumerError::Busy) => {
+                    #[cfg(test)]
+                    self.shared
+                        .consumer_publication_busy_observed
+                        .store(true, Ordering::Release);
+                    self.frame_needs_publish = true;
+                    return Ok(());
+                }
+                Err(ProjectConsumerError::Closed | ProjectConsumerError::Stopped) => None,
+                Err(ProjectConsumerError::Poisoned) => {
+                    return Err("project generation consumer state was poisoned".to_owned());
+                }
+                Err(error) => {
+                    return Err(format!("invalid project generation publication: {error:?}"));
+                }
+            }
+        } else {
+            None
+        };
         let snapshot = Arc::downgrade(&frame.snapshot);
         let entities = Arc::downgrade(&frame.snapshot.entities);
         match self
@@ -3703,6 +4257,9 @@ impl ControlActor {
                 self.last_published_sequence = sequence;
                 self.last_authority_snapshot_sequence = authority_snapshot_sequence;
                 self.frame_needs_publish = false;
+                if let Some(guard) = publication_guard {
+                    guard.apply();
+                }
             }
             Err(MailboxError::Busy | MailboxError::AtCapacity) => {
                 self.frame_needs_publish = true;
@@ -3902,7 +4459,10 @@ mod tests {
         AssetPreparationOperation, AssetPreparationResult, NativeProjectActivationService,
         NativeProjectActivationShutdown, NativeProjectPreparationOptions,
         NativeProjectPreparationService, PreparationId, PreparationState,
-        PreparationWorkerShutdown,
+        PreparationWorkerShutdown, ProjectConsumerReportProgress, ProjectConsumerStageFailure,
+        ProjectConsumerStageFailurePhase, ProjectConsumerStageOutcome,
+        ProjectConsumerStageProgress, ProjectPresentedFrame, ProjectPresentedView,
+        ProjectPublicationIdentity, ProjectSourceLease,
     };
 
     struct ActorCleanupPauseRelease(Arc<super::ControlShared>);
@@ -3965,6 +4525,68 @@ mod tests {
         }
     }
 
+    struct ConsumerStageReportPauseRelease(Arc<super::ControlShared>);
+
+    impl ConsumerStageReportPauseRelease {
+        fn new(shared: Arc<super::ControlShared>) -> Self {
+            shared
+                .release_pending_consumer_stage_report_pause
+                .store(false, Ordering::Release);
+            shared
+                .pending_consumer_stage_report_paused
+                .store(false, Ordering::Release);
+            shared
+                .consumer_stage_report_busy_observed
+                .store(false, Ordering::Release);
+            shared
+                .pause_after_pending_consumer_stage_report
+                .store(true, Ordering::Release);
+            Self(shared)
+        }
+
+        fn wait_until_paused(&self) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !self
+                .0
+                .pending_consumer_stage_report_paused
+                .load(Ordering::Acquire)
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "actor did not pause after copying a queued consumer stage report"
+                );
+                thread::yield_now();
+            }
+        }
+
+        fn release(&self) {
+            self.0
+                .release_pending_consumer_stage_report_pause
+                .store(true, Ordering::Release);
+        }
+
+        fn wait_until_busy_was_observed(&self) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !self
+                .0
+                .consumer_stage_report_busy_observed
+                .load(Ordering::Acquire)
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "actor did not observe the held consumer stage-report lock"
+                );
+                thread::yield_now();
+            }
+        }
+    }
+
+    impl Drop for ConsumerStageReportPauseRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
     const ONE_ENTITY_SCENE: &str = r#"{
         "schema_version": 1,
         "revision": 37,
@@ -3981,6 +4603,18 @@ mod tests {
             }]
         }],
         "assets": []
+    }"#;
+
+    const EMPTY_AUDIO_REVISION_8_SCENE: &str = r#"{
+        "schema_version": 1,
+        "revision": 8,
+        "entities": [],
+        "assets": [{
+            "id": "tone",
+            "kind": "daedalus.audio",
+            "uri": "audio/tone.wav",
+            "metadata": {"schema_version": 1}
+        }]
     }"#;
 
     fn scene_with_entities(count: usize) -> String {
@@ -4127,6 +4761,121 @@ mod tests {
                 "timed out waiting for project frame"
             );
             thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn wait_for_present_applied(
+        port: &crate::ProjectGenerationConsumerPort,
+        present_sequence: u64,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match port.try_status() {
+                Ok(status)
+                    if status
+                        .last_applied_present()
+                        .is_some_and(|present| present.present_sequence() == present_sequence) =>
+                {
+                    return;
+                }
+                Ok(_) | Err(crate::ProjectConsumerError::Busy) => {}
+                Err(error) => panic!("consumer status failed while waiting for present: {error:?}"),
+            }
+            assert!(Instant::now() < deadline, "present ACK was not applied");
+            thread::yield_now();
+        }
+    }
+
+    fn report_frame_presented(
+        port: &crate::ProjectGenerationConsumerPort,
+        frame: &super::SessionFrame,
+        present_sequence: u64,
+    ) {
+        let presented = presented_frame(frame, present_sequence, 640);
+        assert_eq!(
+            consumer_call_after_busy("present report", || {
+                port.try_ack_presented(presented.clone())
+            }),
+            Ok(ProjectConsumerReportProgress::Queued)
+        );
+        wait_for_present_applied(port, present_sequence);
+    }
+
+    fn consumer_call_after_busy<T>(
+        description: &str,
+        mut call: impl FnMut() -> Result<T, crate::ProjectConsumerError>,
+    ) -> Result<T, crate::ProjectConsumerError> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match call() {
+                Err(crate::ProjectConsumerError::Busy) if Instant::now() < deadline => {
+                    thread::yield_now();
+                }
+                Err(crate::ProjectConsumerError::Busy) => {
+                    panic!("consumer {description} remained busy past bounded retry deadline")
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn presented_frame(
+        frame: &super::SessionFrame,
+        present_sequence: u64,
+        physical_width: u32,
+    ) -> ProjectPresentedFrame {
+        let publication = ProjectPublicationIdentity::from_frame(frame)
+            .expect("actor-published frame has a valid publication identity");
+        let view = ProjectPresentedView::new(
+            physical_width,
+            480,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        )
+        .expect("finite view metadata");
+        ProjectPresentedFrame::new(publication, present_sequence, view)
+            .expect("nonzero present sequence")
+    }
+
+    fn wait_for_candidate_lease(port: &crate::ProjectGenerationConsumerPort) -> ProjectSourceLease {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match port.try_take_candidate() {
+                Ok(Some(lease)) => return lease,
+                Ok(None) | Err(crate::ProjectConsumerError::Busy) => {}
+                Err(error) => panic!("candidate lease read failed: {error:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "candidate source lease was not published"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn wait_for_consumer_stage_progress(
+        port: &crate::ProjectGenerationConsumerPort,
+        expected: ProjectConsumerStageProgress,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match port.try_status() {
+                Ok(status)
+                    if status
+                        .stage()
+                        .is_some_and(|stage| stage.progress() == expected) =>
+                {
+                    return;
+                }
+                Ok(_) | Err(crate::ProjectConsumerError::Busy) => {}
+                Err(error) => panic!("consumer stage status failed: {error:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "consumer stage did not reach {expected:?}"
+            );
+            thread::yield_now();
         }
     }
 
@@ -6385,6 +7134,1201 @@ mod tests {
         assert_eq!(active.active_generation(), 2);
 
         drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn stage_report_worker_mark_and_consumer_ready_are_atomic_under_contention() {
+        let session = SessionId::from_raw(89_270);
+        let fixture = PreparationTestProject::with_audio();
+        let mut config = default_config();
+        config.engine.session = session;
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+
+        let initial_frame = wait_for_frame(&client);
+        let initial_lease =
+            consumer_call_after_busy("initial lease take", || port.try_take_initial())
+                .unwrap()
+                .expect("initial lease");
+        report_frame_presented(&port, &initial_frame, 1);
+        drop(initial_lease);
+
+        std::fs::write(
+            fixture.path().join("scene.json"),
+            EMPTY_AUDIO_REVISION_8_SCENE,
+        )
+        .unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_271);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_272, 1);
+        let candidate_lease = wait_for_candidate_lease(&port);
+        let identity = candidate_lease.identity().clone();
+        assert_eq!(identity.activation(), Some(activation));
+
+        let actor_gate =
+            ConsumerStageReportPauseRelease::new(Arc::clone(&service.session().shared));
+        assert_eq!(
+            consumer_call_after_busy("stage Ready report", || {
+                port.try_report_stage(&identity, ProjectConsumerStageOutcome::Ready)
+            }),
+            Ok(ProjectConsumerReportProgress::Queued)
+        );
+        actor_gate.wait_until_paused();
+        let consumer_state = port.hold_state_for_test();
+        actor_gate.release();
+        actor_gate.wait_until_busy_was_observed();
+
+        let status = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Status),
+        )
+        .expect("activation status should remain readable while the consumer lock is held");
+        let SessionRequestResult::AssetActivation(AssetActivationRequestResult::Status(status)) =
+            status
+        else {
+            panic!("activation status returned the wrong result");
+        };
+        assert_eq!(
+            status.state(),
+            AssetActivationState::Staging,
+            "worker Staged must not become visible while the consumer report is still queued"
+        );
+        assert_eq!(
+            port.try_status(),
+            Err(crate::ProjectConsumerError::Busy),
+            "the actor must have declined the consumer-state transaction while it was held"
+        );
+        drop(consumer_state);
+
+        wait_for_consumer_stage_progress(&port, ProjectConsumerStageProgress::ReadyApplied);
+        let staged = wait_for_activation_state(&client, AssetActivationState::Staged);
+        assert_eq!(staged.active_generation(), 1);
+        let committed = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(CommandId::from_raw(89_273)),
+                activation,
+                expected_active_generation: 1,
+            }),
+        )
+        .expect("a report atomically applied as Ready should be committable");
+        assert!(matches!(
+            committed,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(command))
+                if matches!(command.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 2, .. })
+        ));
+        drop(candidate_lease);
+        drop(client);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn consumer_presents_gate_each_commit_and_keep_only_real_source_pins_charged() {
+        let session = SessionId::from_raw(89_320);
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut config = default_config();
+        config.engine.session = session;
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+
+        let initial_frame = wait_for_frame(&client);
+        assert_eq!(initial_frame.project_generation(), 1);
+        assert_eq!(initial_frame.tick(), Tick(0));
+        let initial_present = presented_frame(&initial_frame, 1, 640);
+        assert_eq!(
+            consumer_call_after_busy("pre-lease present report", || {
+                port.try_ack_presented(initial_present.clone())
+            }),
+            Err(crate::ProjectConsumerError::StaleIdentity),
+            "the actual initial frame cannot be acknowledged before its source lease is taken"
+        );
+        let initial_lease =
+            consumer_call_after_busy("initial lease take", || port.try_take_initial())
+                .unwrap()
+                .expect("the initial source is delivered once");
+        let initial_identity = initial_lease.identity();
+        assert_eq!(initial_identity.kind(), crate::ProjectSourceKind::Initial);
+        assert_eq!(initial_identity.session(), session);
+        assert_eq!(initial_identity.generation(), 1);
+        assert_eq!(
+            initial_identity.source_digest(),
+            initial_frame.source_digest()
+        );
+        assert_eq!(initial_identity.expected_generation(), None);
+        assert_eq!(initial_identity.proposed_generation(), None);
+        assert_eq!(
+            initial_lease.with_source(|project| project.digest().to_owned()),
+            initial_frame.source_digest(),
+            "the lease describes the same immutable source that produced the first frame"
+        );
+        assert!(
+            consumer_call_after_busy("duplicate initial lease take", || {
+                port.try_take_initial()
+            })
+            .unwrap()
+            .is_none()
+        );
+        drop(initial_lease);
+
+        // Tokens from a real, different session must not be accepted as this consumer's present
+        // or stage report.
+        let foreign_fixture = PreparationTestProject::with_audio();
+        std::fs::write(foreign_fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut foreign_config = default_config();
+        foreign_config.engine.session = SessionId::from_raw(89_319);
+        let (mut foreign_service, foreign_port) =
+            NativeProjectActivationService::start_with_render_consumer(
+                NativeProjectPreparationOptions::new(foreign_fixture.path()),
+                foreign_config,
+            )
+            .expect("start second actor with an independent consumer");
+        let foreign_client = foreign_service.session().attach().unwrap();
+        let foreign_frame = wait_for_frame(&foreign_client);
+        assert_eq!(
+            consumer_call_after_busy("foreign present report", || {
+                port.try_ack_presented(presented_frame(&foreign_frame, 1, 640))
+            }),
+            Err(crate::ProjectConsumerError::ForeignSession)
+        );
+        std::fs::write(
+            foreign_fixture.path().join("scene.json"),
+            ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38"),
+        )
+        .unwrap();
+        let foreign_candidate = prepare_activation_candidate(&foreign_client, 89_318);
+        wait_for_preparation_state(
+            &foreign_client,
+            PreparationState::CpuPrepared,
+            foreign_candidate.epoch(),
+        );
+        stage_activation_candidate(&foreign_client, foreign_candidate, 89_319, 1);
+        let foreign_candidate_lease = wait_for_candidate_lease(&foreign_port);
+        assert_eq!(
+            consumer_call_after_busy("foreign stage report", || {
+                port.try_report_stage(
+                    foreign_candidate_lease.identity(),
+                    ProjectConsumerStageOutcome::Ready,
+                )
+            }),
+            Err(crate::ProjectConsumerError::ForeignSession)
+        );
+        drop(foreign_candidate_lease);
+        drop(foreign_frame);
+        drop(foreign_client);
+        drop(foreign_port);
+        stop_activation_service(&mut foreign_service);
+
+        // Prepare and make generation 2 renderer-ready before the initial game frame is
+        // presented. CPU/device readiness alone must not permit Commit.
+        std::fs::write(
+            fixture.path().join("scene.json"),
+            ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38"),
+        )
+        .unwrap();
+        let candidate_two = prepare_activation_candidate(&client, 89_321);
+        wait_for_preparation_state(
+            &client,
+            PreparationState::CpuPrepared,
+            candidate_two.epoch(),
+        );
+        let activation_two = stage_activation_candidate(&client, candidate_two, 89_322, 1);
+        let generation_two_lease = wait_for_candidate_lease(&port);
+        let generation_two_identity = generation_two_lease.identity().clone();
+        assert_eq!(
+            generation_two_identity.kind(),
+            crate::ProjectSourceKind::Candidate
+        );
+        assert_eq!(generation_two_identity.session(), session);
+        assert_eq!(generation_two_identity.generation(), 2);
+        assert_eq!(generation_two_identity.preparation(), Some(candidate_two));
+        assert_eq!(generation_two_identity.activation(), Some(activation_two));
+        assert!(
+            consumer_call_after_busy("duplicate candidate lease take", || {
+                port.try_take_candidate()
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            consumer_call_after_busy("candidate Ready report", || {
+                port.try_report_stage(&generation_two_identity, ProjectConsumerStageOutcome::Ready)
+            }),
+            Ok(crate::ProjectConsumerReportProgress::Queued)
+        );
+        wait_for_consumer_stage_progress(&port, ProjectConsumerStageProgress::ReadyApplied);
+        assert_eq!(
+            consumer_call_after_busy("duplicate candidate Ready report", || {
+                port.try_report_stage(&generation_two_identity, ProjectConsumerStageOutcome::Ready)
+            }),
+            Ok(crate::ProjectConsumerReportProgress::Applied),
+            "a duplicate Ready is idempotent after actor application"
+        );
+        let conflicting_failure = ProjectConsumerStageOutcome::Failed(
+            ProjectConsumerStageFailure::new(
+                ProjectConsumerStageFailurePhase::DevicePrepare,
+                "late-failure",
+                "the already-ready identity cannot change outcome",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            consumer_call_after_busy("conflicting stage report", || {
+                port.try_report_stage(&generation_two_identity, conflicting_failure.clone())
+            }),
+            Err(crate::ProjectConsumerError::ConflictingReport)
+        );
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+
+        let commit_two = SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+            command_id: Some(CommandId::from_raw(89_325)),
+            activation: activation_two,
+            expected_active_generation: 1,
+        });
+
+        // Move the existing Engine entity before Commit. Replacing source data must retain its
+        // authority handle, current pose, tick, and exact snapshot publication data. This occurs
+        // before the first ACK so the early Commit below proves the presentation gate directly.
+        let transform = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::GetTransform {
+                target: SessionEntityTarget::StableId(stable_id("entity:hero")),
+            },
+        )
+        .expect("authority entity exists before replacement");
+        let SessionRequestResult::Transform(transform) = transform else {
+            panic!("transform query returned the wrong result");
+        };
+        let entity_handle = transform.entity.handle;
+        let mut set = submit_after_busy(
+            &client,
+            SessionOperation::SetTransform {
+                target: SessionEntityTarget::Handle(entity_handle),
+                command_id: Some(CommandId::from_raw(89_324)),
+                expected_revision: Revision(0),
+                apply_at: Some(Tick(1)),
+                transform: moved(9.0),
+            },
+        );
+        set.wait_for(WaitStage::AuthorityAccepted, Duration::from_secs(2))
+            .unwrap();
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        let step_result = wait_terminal(&step).terminal().unwrap().clone();
+        assert!(matches!(
+            step_result,
+            Ok(SessionRequestResult::Step(reports))
+                if reports.len() == 1 && reports[0].tick == Tick(1)
+        ));
+        assert!(matches!(
+            wait_terminal(&set).terminal().unwrap(),
+            Ok(SessionRequestResult::Command(_))
+        ));
+        set.acknowledge().unwrap();
+        step.acknowledge().unwrap();
+        let frame_before_commit = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = wait_for_frame(&client);
+                if frame.tick() == Tick(1) {
+                    break frame;
+                }
+                drop(frame);
+                assert!(
+                    Instant::now() < deadline,
+                    "tick-one frame was not published"
+                );
+                thread::yield_now();
+            }
+        };
+
+        let mut early_commit = submit_after_busy(&client, commit_two.clone());
+        assert_eq!(
+            wait_terminal(&early_commit).terminal().unwrap(),
+            &Err(SessionRequestError::ActivationBusy),
+            "CPU/device readiness and authority progress do not replace the initial present ACK"
+        );
+        early_commit.acknowledge().unwrap();
+        assert_eq!(
+            wait_for_activation_state(&client, AssetActivationState::Staged).active_generation(),
+            1
+        );
+
+        assert_eq!(
+            consumer_call_after_busy("initial present report", || {
+                port.try_ack_presented(initial_present.clone())
+            }),
+            Ok(crate::ProjectConsumerReportProgress::Queued)
+        );
+        wait_for_present_applied(&port, 1);
+        assert_eq!(
+            consumer_call_after_busy("duplicate initial present report", || {
+                port.try_ack_presented(initial_present.clone())
+            }),
+            Ok(crate::ProjectConsumerReportProgress::Applied),
+            "an exact duplicate present is idempotent"
+        );
+        report_frame_presented(&port, &frame_before_commit, 2);
+        assert_eq!(
+            consumer_call_after_busy("conflicting present report", || {
+                port.try_ack_presented(presented_frame(&frame_before_commit, 2, 800))
+            }),
+            Err(crate::ProjectConsumerError::ConflictingReport),
+            "the same present sequence cannot be reused with another view"
+        );
+        let same_publication_new_view = presented_frame(&frame_before_commit, 3, 800);
+        assert_eq!(
+            consumer_call_after_busy("new-view present report", || {
+                port.try_ack_presented(same_publication_new_view.clone())
+            }),
+            Ok(crate::ProjectConsumerReportProgress::Queued),
+            "a new local presentation may reuse a publication with a new view"
+        );
+        wait_for_present_applied(&port, 3);
+        assert_eq!(
+            consumer_call_after_busy("old duplicate present report", || {
+                port.try_ack_presented(initial_present.clone())
+            }),
+            Ok(crate::ProjectConsumerReportProgress::Applied),
+            "an older duplicate does not regress the latest view"
+        );
+        assert_eq!(
+            consumer_call_after_busy("same-sequence view conflict report", || {
+                port.try_ack_presented(presented_frame(&frame_before_commit, 3, 900))
+            }),
+            Err(crate::ProjectConsumerError::ConflictingReport),
+            "same-publication/same-present-sequence view conflicts are rejected"
+        );
+        assert_eq!(
+            consumer_call_after_busy("stale publication report", || {
+                port.try_ack_presented(presented_frame(&initial_frame, 4, 640))
+            }),
+            Err(crate::ProjectConsumerError::StaleIdentity),
+            "a fresh presentation sequence cannot acknowledge an older publication"
+        );
+        let consumer_status =
+            consumer_call_after_busy("consumer status", || port.try_status()).unwrap();
+        let last_present = consumer_status.last_applied_present().unwrap();
+        assert_eq!(last_present.present_sequence(), 3);
+        assert_eq!(last_present.view().physical_width(), 800);
+
+        let commit_result = terminal_result_after_activation_busy(&client, commit_two)
+            .expect("initial present should unlock the staged generation");
+        assert!(matches!(
+            commit_result,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(command))
+                if matches!(command.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 2, .. })
+        ));
+        let generation_two_pin = generation_two_lease.source_pin();
+        drop(generation_two_lease);
+        let generation_two_frame = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = wait_for_frame(&client);
+                if frame.project_generation() == 2
+                    && frame.sequence() > frame_before_commit.sequence()
+                {
+                    break frame;
+                }
+                drop(frame);
+                assert!(
+                    Instant::now() < deadline,
+                    "generation-two frame was not published"
+                );
+                thread::yield_now();
+            }
+        };
+        assert_eq!(generation_two_frame.tick(), frame_before_commit.tick());
+        assert_eq!(
+            generation_two_frame.authority_snapshot_sequence(),
+            frame_before_commit.authority_snapshot_sequence()
+        );
+        assert_ne!(
+            generation_two_frame.source_digest(),
+            initial_frame.source_digest()
+        );
+        assert_eq!(generation_two_frame.source_scene_revision(), 38);
+        assert_eq!(
+            consumer_call_after_busy("stale generation present report", || {
+                port.try_ack_presented(initial_present.clone())
+            }),
+            Err(crate::ProjectConsumerError::StaleIdentity),
+            "a previous-generation present cannot satisfy generation two"
+        );
+        let after_commit = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::GetTransform {
+                target: SessionEntityTarget::Handle(entity_handle),
+            },
+        )
+        .expect("same authority handle remains queryable after commit");
+        let SessionRequestResult::Transform(after_commit) = after_commit else {
+            panic!("post-commit transform query returned the wrong result");
+        };
+        assert_eq!(after_commit.entity.handle, entity_handle);
+        assert_eq!(after_commit.entity.transform, moved(9.0));
+        assert_eq!(after_commit.entity.revision, Revision(1));
+        drop(frame_before_commit);
+        drop(initial_frame);
+
+        // Prepare generation 3 before generation 2 has an applied actual present. The same
+        // caller ID remains available for retry after that effect-free Commit refusal.
+        std::fs::write(
+            fixture.path().join("scene.json"),
+            ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 39"),
+        )
+        .unwrap();
+        let candidate_three = prepare_activation_candidate(&client, 89_326);
+        wait_for_preparation_state(
+            &client,
+            PreparationState::CpuPrepared,
+            candidate_three.epoch(),
+        );
+        let activation_three = stage_activation_candidate(&client, candidate_three, 89_327, 2);
+        let generation_three_lease = wait_for_candidate_lease(&port);
+        let generation_three_identity = generation_three_lease.identity().clone();
+        assert_eq!(generation_three_identity.generation(), 3);
+        assert_eq!(
+            consumer_call_after_busy("generation-three Ready report", || {
+                port.try_report_stage(
+                    &generation_three_identity,
+                    ProjectConsumerStageOutcome::Ready,
+                )
+            }),
+            Ok(crate::ProjectConsumerReportProgress::Queued)
+        );
+        wait_for_consumer_stage_progress(&port, ProjectConsumerStageProgress::ReadyApplied);
+        wait_for_activation_state(&client, AssetActivationState::Staged);
+        let commit_three = SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+            command_id: Some(CommandId::from_raw(89_328)),
+            activation: activation_three,
+            expected_active_generation: 2,
+        });
+        let mut before_generation_two_present = submit_after_busy(&client, commit_three.clone());
+        assert_eq!(
+            wait_terminal(&before_generation_two_present)
+                .terminal()
+                .unwrap(),
+            &Err(SessionRequestError::ActivationBusy),
+            "generation two must be presented before generation three can commit"
+        );
+        before_generation_two_present.acknowledge().unwrap();
+
+        report_frame_presented(&port, &generation_two_frame, 4);
+        drop(generation_three_lease);
+        let commit_result = terminal_result_after_activation_busy(&client, commit_three)
+            .expect("generation-two present should permit the same Commit ID retry");
+        assert!(matches!(
+            commit_result,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(command))
+                if matches!(command.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 3, .. })
+        ));
+        let generation_three_frame = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = wait_for_frame(&client);
+                if frame.project_generation() == 3
+                    && frame.sequence() > generation_two_frame.sequence()
+                {
+                    break frame;
+                }
+                drop(frame);
+                assert!(
+                    Instant::now() < deadline,
+                    "generation-three frame was not published"
+                );
+                thread::yield_now();
+            }
+        };
+        report_frame_presented(&port, &generation_three_frame, 5);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = wait_for_activation_state(&client, AssetActivationState::Committed);
+            if status.memory().retired_generation_count() == 1 {
+                assert!(status.memory().retired_cooked_accounted_bytes() > 0);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "external source pin did not keep generation two charged"
+            );
+            thread::yield_now();
+        }
+        drop(generation_two_pin);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = wait_for_activation_state(&client, AssetActivationState::Committed);
+            if status.memory().retired_generation_count() == 0 {
+                assert_eq!(status.memory().retired_cooked_accounted_bytes(), 0);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not reclaim old generations after presentation and external pins released"
+            );
+            thread::yield_now();
+        }
+
+        drop(generation_two_frame);
+        drop(generation_three_frame);
+        drop(client);
+        drop(port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn consumer_failed_stage_reports_are_applied_idempotently_and_cannot_commit() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+
+        for (round, phase) in [
+            ProjectConsumerStageFailurePhase::CpuPrepare,
+            ProjectConsumerStageFailurePhase::DevicePrepare,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let revision = 38 + round as u64;
+            let scene =
+                ONE_ENTITY_SCENE.replace("\"revision\": 37", &format!("\"revision\": {revision}"));
+            std::fs::write(fixture.path().join("scene.json"), scene).unwrap();
+            let base_id = 89_341 + (round as u128) * 3;
+            let candidate = prepare_activation_candidate(&client, base_id);
+            wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+            let activation = stage_activation_candidate(&client, candidate, base_id + 1, 1);
+            let lease = wait_for_candidate_lease(&port);
+            let identity = lease.identity().clone();
+            let failure = ProjectConsumerStageFailure::new(
+                phase,
+                format!("phase_{round}"),
+                "candidate could not be prepared for this consumer",
+            )
+            .expect("bounded consumer failure");
+            let failed = ProjectConsumerStageOutcome::Failed(failure);
+            assert_eq!(
+                consumer_call_after_busy("failed stage report", || {
+                    port.try_report_stage(&identity, failed.clone())
+                }),
+                Ok(ProjectConsumerReportProgress::Queued)
+            );
+            wait_for_consumer_stage_progress(&port, ProjectConsumerStageProgress::FailedApplied);
+            assert_eq!(
+                consumer_call_after_busy("duplicate failed stage report", || {
+                    port.try_report_stage(&identity, failed.clone())
+                }),
+                Ok(ProjectConsumerReportProgress::Applied),
+                "an exact duplicate failure remains idempotent after actor application"
+            );
+            assert_eq!(
+                consumer_call_after_busy("failure conflict report", || {
+                    port.try_report_stage(&identity, ProjectConsumerStageOutcome::Ready)
+                }),
+                Err(crate::ProjectConsumerError::ConflictingReport),
+                "a failure report cannot be replaced with Ready"
+            );
+            drop(lease);
+
+            let status = wait_for_activation_state(&client, AssetActivationState::Failed);
+            let latest_failure = status
+                .latest_failure()
+                .expect("the applied consumer failure is visible in activation status");
+            assert_eq!(latest_failure.id(), activation);
+            assert_eq!(latest_failure.code(), format!("phase_{round}"));
+            assert_eq!(status.active_generation(), 1);
+            assert_eq!(
+                terminal_result_after_activation_busy(
+                    &client,
+                    SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                        command_id: Some(CommandId::from_raw(base_id + 2)),
+                        activation,
+                        expected_active_generation: 1,
+                    }),
+                ),
+                Err(SessionRequestError::ActivationNotStaged),
+                "a failed CPU/device candidate never becomes committable"
+            );
+        }
+
+        drop(client);
+        drop(port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn consumer_reports_and_manual_step_progress_with_all_normal_credits_held() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let mut config = default_config();
+        config.limits.max_pending_per_client = 2;
+        config.limits.max_pending_total = 2;
+        config.limits.max_result_bytes_total = 2 * 1024 * 1024;
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start low-capacity actor with source consumer");
+        let client = service.session().attach().unwrap();
+        let initial_frame = wait_for_frame(&client);
+        let initial_lease = port
+            .try_take_initial()
+            .unwrap()
+            .expect("take initial source before its actual present ACK");
+
+        std::fs::write(
+            fixture.path().join("scene.json"),
+            ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38"),
+        )
+        .unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_351);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        stage_activation_candidate(&client, candidate, 89_352, 1);
+        let candidate_lease = wait_for_candidate_lease(&port);
+        let identity = candidate_lease.identity().clone();
+
+        // A terminal, unacknowledged Status holds the only normal result-credit slot. Consumer
+        // reports and the independent reserved Manual Step lane must still make progress.
+        let mut held_status = submit_after_busy(&client, SessionOperation::Status);
+        assert!(wait_terminal(&held_status).terminal().unwrap().is_ok());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match client.try_submit(SessionOperation::Status) {
+                Err(SessionSubmitError::Busy) => {}
+                Err(SessionSubmitError::ResultCapacity) => break,
+                Err(error) => panic!("expected exhausted normal result credits, got {error:?}"),
+                Ok(mut extra) => {
+                    let _ = extra.acknowledge();
+                    panic!("normal Status was admitted while the sole normal credit was held")
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "normal result-credit exhaustion was not observed"
+            );
+            thread::yield_now();
+        }
+
+        assert_eq!(
+            consumer_call_after_busy("credit-test Ready report", || {
+                port.try_report_stage(&identity, ProjectConsumerStageOutcome::Ready)
+            }),
+            Ok(ProjectConsumerReportProgress::Queued)
+        );
+        wait_for_consumer_stage_progress(&port, ProjectConsumerStageProgress::ReadyApplied);
+        assert_eq!(
+            consumer_call_after_busy("credit-test initial present report", || {
+                port.try_ack_presented(presented_frame(&initial_frame, 1, 640))
+            }),
+            Ok(ProjectConsumerReportProgress::Queued)
+        );
+        wait_for_present_applied(&port, 1);
+
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        let terminal = wait_terminal(&step);
+        assert!(matches!(
+            terminal.terminal().unwrap().as_ref(),
+            Ok(SessionRequestResult::Step(reports))
+                if reports.len() == 1 && reports[0].tick == Tick(1)
+        ));
+        step.acknowledge().unwrap();
+        held_status.acknowledge().unwrap();
+        drop(candidate_lease);
+        drop(initial_lease);
+        drop(initial_frame);
+        drop(client);
+        drop(port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn consumer_public_report_constructors_reject_nonfinite_or_unbounded_metadata() {
+        assert!(matches!(
+            ProjectPresentedView::new(0, 480, [0.0; 16]),
+            Err(crate::ProjectConsumerError::InvalidReport)
+        ));
+        assert!(matches!(
+            ProjectPresentedView::new(640, 480, [f32::NAN; 16]),
+            Err(crate::ProjectConsumerError::InvalidReport)
+        ));
+        assert!(matches!(
+            ProjectPresentedView::new(640, 480, [f32::INFINITY; 16]),
+            Err(crate::ProjectConsumerError::InvalidReport)
+        ));
+
+        let max_failure = ProjectConsumerStageFailure::new(
+            ProjectConsumerStageFailurePhase::DevicePrepare,
+            "c".repeat(64),
+            "m".repeat(2_048),
+        )
+        .expect("the documented maximum failure fields are accepted");
+        assert_eq!(max_failure.code().len(), 64);
+        assert_eq!(max_failure.message().len(), 2_048);
+        assert!(matches!(
+            ProjectConsumerStageFailure::new(
+                ProjectConsumerStageFailurePhase::CpuPrepare,
+                "c".repeat(65),
+                "bounded",
+            ),
+            Err(crate::ProjectConsumerError::InvalidReport)
+        ));
+        assert!(matches!(
+            ProjectConsumerStageFailure::new(
+                ProjectConsumerStageFailurePhase::CpuPrepare,
+                "bounded",
+                "m".repeat(2_049),
+            ),
+            Err(crate::ProjectConsumerError::InvalidReport)
+        ));
+    }
+
+    #[test]
+    fn consumer_lock_busy_defers_frame_mailbox_publication_until_identity_can_be_recorded() {
+        let session = SessionId::from_raw(89_280);
+        let mut config = default_config();
+        config.engine.session = session;
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+
+        let initial_frame = wait_for_frame(&client);
+        let initial_lease =
+            consumer_call_after_busy("initial lease take", || port.try_take_initial())
+                .unwrap()
+                .expect("initial lease");
+        report_frame_presented(&port, &initial_frame, 1);
+        drop(initial_lease);
+        service
+            .session()
+            .shared
+            .consumer_publication_busy_observed
+            .store(false, Ordering::Release);
+
+        let consumer_state = port.hold_state_for_test();
+        let mut step = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        let terminal = wait_terminal(&step)
+            .terminal()
+            .expect("manual Step should complete while presentation metadata is busy")
+            .clone();
+        assert!(matches!(terminal, Ok(SessionRequestResult::Step(_))));
+        step.acknowledge().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !service
+            .session()
+            .shared
+            .consumer_publication_busy_observed
+            .load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "actor did not defer frame publication on the held consumer lock"
+            );
+            thread::yield_now();
+        }
+        let still_initial = client
+            .try_latest_frame()
+            .expect("frame mailbox remains readable")
+            .expect("initial frame is retained");
+        assert!(
+            Arc::ptr_eq(&still_initial, &initial_frame),
+            "a frame must not become visible before the matching publication identity is recorded"
+        );
+        drop(consumer_state);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let next_frame = loop {
+            let frame = wait_for_frame(&client);
+            if frame.tick() > initial_frame.tick() {
+                break frame;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "deferred frame was not republished"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(next_frame.tick(), Tick(1));
+        assert!(next_frame.sequence() > initial_frame.sequence());
+        report_frame_presented(&port, &next_frame, 2);
+        let status = consumer_call_after_busy("post-present status", || port.try_status()).unwrap();
+        assert_eq!(
+            status
+                .last_applied_present()
+                .expect("new publication ACK applied")
+                .publication()
+                .publication_sequence(),
+            next_frame.sequence()
+        );
+
+        drop(client);
+        drop(port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn consumer_close_rejects_new_stage_and_commit_without_changing_worker_state() {
+        let session = SessionId::from_raw(89_290);
+        let fixture = PreparationTestProject::with_audio();
+        let mut config = default_config();
+        config.engine.session = session;
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_291);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+
+        port.request_close();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match port.try_status() {
+                Ok(status) if status.is_closed() => break,
+                Ok(_) | Err(crate::ProjectConsumerError::Busy) => {}
+                Err(error) => panic!("consumer close status failed: {error:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "actor did not observe consumer close"
+            );
+            thread::yield_now();
+        }
+
+        assert_eq!(
+            terminal_result_after_activation_busy(
+                &client,
+                SessionOperation::AssetActivation(AssetActivationOperation::Stage {
+                    command_id: Some(CommandId::from_raw(89_292)),
+                    candidate,
+                    expected_active_generation: 1,
+                }),
+            ),
+            Err(SessionRequestError::AssetActivationUnavailable)
+        );
+        assert_eq!(
+            terminal_result_after_activation_busy(
+                &client,
+                SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                    command_id: Some(CommandId::from_raw(89_293)),
+                    activation: ActivationId::from_parts(session, 0),
+                    expected_active_generation: 99,
+                }),
+            ),
+            Err(SessionRequestError::AssetActivationUnavailable),
+            "close is checked before validating a new Commit identity"
+        );
+
+        let preparation = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Status),
+        )
+        .expect("preparation status remains available after consumer close");
+        let SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(preparation)) =
+            preparation
+        else {
+            panic!("preparation status returned the wrong result");
+        };
+        assert_eq!(preparation.state(), PreparationState::CpuPrepared);
+        let activation = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Status),
+        )
+        .expect("activation status remains available after consumer close");
+        let SessionRequestResult::AssetActivation(AssetActivationRequestResult::Status(activation)) =
+            activation
+        else {
+            panic!("activation status returned the wrong result");
+        };
+        assert_eq!(activation.state(), AssetActivationState::Idle);
+
+        drop(client);
+        drop(port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn activation_stop_clears_untaken_initial_and_candidate_leases_while_port_is_retained() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+
+        // Keep the initial source in the consumer slot, then stage a compatible replacement and
+        // leave that candidate in WaitingDevice as well. Neither payload has been handed out.
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_331);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        stage_activation_candidate(&client, candidate, 89_332, 1);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match port.try_status() {
+                Ok(status)
+                    if status.initial() == crate::ProjectConsumerInitialState::Available
+                        && status.stage().is_some_and(|stage| {
+                            stage.progress() == ProjectConsumerStageProgress::WaitingDevice
+                        }) =>
+                {
+                    break;
+                }
+                Ok(_) | Err(crate::ProjectConsumerError::Busy) => {}
+                Err(error) => panic!("consumer status failed before stop: {error:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "initial and candidate source slots were not both populated"
+            );
+            thread::yield_now();
+        }
+
+        // Force request_stop's nonblocking clear to miss the mutex. The worker's owned cleanup
+        // must still reclaim both untaken leases before reporting Stopped, even though this port
+        // remains alive after service shutdown.
+        let consumer_state = port.hold_state_for_test();
+        service.request_stop();
+        drop(consumer_state);
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.try_shutdown() {
+                Ok(NativeProjectActivationShutdown::Stopped) => break,
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "activation stop did not complete"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("activation stop failed: {error}"),
+            }
+        }
+
+        assert!(
+            matches!(
+                consumer_call_after_busy("post-stop initial lease take", || {
+                    port.try_take_initial()
+                }),
+                Err(crate::ProjectConsumerError::Stopped)
+            ),
+            "a retained port cannot take the initial source after shutdown"
+        );
+        assert!(
+            matches!(
+                consumer_call_after_busy("post-stop candidate lease take", || {
+                    port.try_take_candidate()
+                }),
+                Err(crate::ProjectConsumerError::Stopped)
+            ),
+            "a retained port cannot take an untaken candidate after shutdown"
+        );
+        let cache_root = fixture.path().join(".daedalus/cache");
+        let cache = daedalus_content::FileCookCache::open(
+            &cache_root,
+            daedalus_content::CacheLimits::default(),
+        )
+        .expect("worker shutdown reclaims both untaken source leases");
+        drop(cache);
+        drop(port);
+    }
+
+    #[test]
+    fn consumer_worker_panic_clears_untaken_initial_lease_before_shutdown_returns() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            default_config(),
+        )
+        .expect("start actor with source consumer");
+        let panic_gate = service.panic_preparation_for_test(1);
+        let client = service.session().attach().unwrap();
+        let accepted = terminal_result_after_preparation_busy(
+            &client,
+            SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare {
+                command_id: Some(CommandId::from_raw(89_333)),
+            }),
+        )
+        .expect("candidate request should reach the worker panic gate");
+        assert!(matches!(
+            accepted,
+            SessionRequestResult::AssetPreparation(AssetPreparationResult::Command(_))
+        ));
+        panic_gate.wait_until_entered();
+
+        // The worker's panic cleanup must clear the initial unclaimed lease even when the
+        // nonblocking request_stop path cannot acquire consumer metadata. Keep the port alive
+        // through the worker join to make that ownership check observable.
+        let consumer_state = port.hold_state_for_test();
+        panic_gate.release();
+        service.request_stop();
+        assert_eq!(
+            service.try_shutdown(),
+            Ok(NativeProjectActivationShutdown::Stopping),
+            "shutdown remains pending while panic cleanup is blocked by consumer metadata"
+        );
+        drop(consumer_state);
+        drop(client);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match service.try_shutdown() {
+                Err(crate::NativeProjectActivationShutdownError::WorkerPanicked) => break,
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "consumer worker panic cleanup did not finish"
+                    );
+                    thread::yield_now();
+                }
+                other => panic!("unexpected shutdown result after worker panic: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            consumer_call_after_busy("post-panic initial lease take", || {
+                port.try_take_initial()
+            }),
+            Err(crate::ProjectConsumerError::Stopped)
+        ));
+        let cache = daedalus_content::FileCookCache::open(
+            fixture.path().join(".daedalus/cache"),
+            daedalus_content::CacheLimits::default(),
+        )
+        .expect("worker panic cleanup reclaims the untaken initial source");
+        drop(cache);
+        drop(port);
+    }
+
+    #[test]
+    fn cancel_invalidates_taken_candidate_lease_even_while_consumer_metadata_is_locked() {
+        let session = SessionId::from_raw(89_300);
+        let fixture = PreparationTestProject::with_audio();
+        let mut config = default_config();
+        config.engine.session = session;
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+
+        std::fs::write(
+            fixture.path().join("scene.json"),
+            EMPTY_AUDIO_REVISION_8_SCENE,
+        )
+        .unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_301);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_302, 1);
+        let candidate_lease = wait_for_candidate_lease(&port);
+        let identity = candidate_lease.identity().clone();
+        let consumer_state = port.hold_state_for_test();
+
+        let cancelled = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Cancel {
+                command_id: Some(CommandId::from_raw(89_303)),
+                activation,
+            }),
+        )
+        .expect("cancel is independent of the contended consumer metadata lock");
+        assert!(matches!(
+            cancelled,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(command))
+                if matches!(command.outcome(), AssetActivationCommandOutcome::CancelAccepted { .. })
+        ));
+        assert!(
+            !candidate_lease.is_current(),
+            "the actor-owned atomic must invalidate a taken source lease before waiting for metadata cleanup"
+        );
+        drop(consumer_state);
+
+        wait_for_consumer_stage_progress(&port, ProjectConsumerStageProgress::Cancelled);
+        assert_eq!(
+            consumer_call_after_busy("late cancelled Ready report", || {
+                port.try_report_stage(&identity, ProjectConsumerStageOutcome::Ready)
+            }),
+            Err(crate::ProjectConsumerError::StaleIdentity),
+            "a late Ready from the cancelled source must not regain authority"
+        );
+
+        drop(candidate_lease);
+        drop(client);
+        drop(port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn preparation_supersession_invalidates_taken_candidate_lease_under_contention() {
+        let session = SessionId::from_raw(89_310);
+        let fixture = PreparationTestProject::with_audio();
+        let mut config = default_config();
+        config.engine.session = session;
+        let (mut service, port) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(fixture.path()),
+            config,
+        )
+        .expect("start actor with source consumer");
+        let client = service.session().attach().unwrap();
+
+        std::fs::write(
+            fixture.path().join("scene.json"),
+            EMPTY_AUDIO_REVISION_8_SCENE,
+        )
+        .unwrap();
+        let first = prepare_activation_candidate(&client, 89_311);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, first.epoch());
+        let _activation = stage_activation_candidate(&client, first, 89_312, 1);
+        let old_lease = wait_for_candidate_lease(&port);
+        let old_identity = old_lease.identity().clone();
+        let consumer_state = port.hold_state_for_test();
+
+        let next = prepare_activation_candidate(&client, 89_313);
+        assert_eq!(next.epoch(), first.epoch() + 1);
+        assert!(
+            !old_lease.is_current(),
+            "accepted Prepare must invalidate old taken leases even when metadata cleanup is Busy"
+        );
+        // The taken lease is an intentional source pin. Supersession revokes its authority but
+        // cannot reclaim its bytes until the consumer releases it, so drop it before waiting for
+        // the bounded worker to prepare the next epoch.
+        drop(old_lease);
+        drop(consumer_state);
+
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, next.epoch());
+        wait_for_consumer_stage_progress(&port, ProjectConsumerStageProgress::Superseded);
+        assert_eq!(
+            consumer_call_after_busy("late superseded Ready report", || {
+                port.try_report_stage(&old_identity, ProjectConsumerStageOutcome::Ready)
+            }),
+            Err(crate::ProjectConsumerError::StaleIdentity),
+            "a late Ready from the superseded source must remain stale"
+        );
+
+        drop(client);
+        drop(port);
         stop_activation_service(&mut service);
     }
 

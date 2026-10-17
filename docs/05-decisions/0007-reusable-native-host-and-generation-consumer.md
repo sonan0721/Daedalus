@@ -9,11 +9,13 @@ A-041의 반복 연결 최적화와 D1의 공개 엔진 SDK 요구에 따라 CLI
 - runtime은 source/authority를, renderer는 device/cache/실제 표시를 소유한다. 둘을 native host가 조합하며 runtime→renderer 또는 renderer→runtime 의존을 추가하지 않는다.
 - startup에 render consumer를 선언하고 runtime-neutral lease·표준 erased Arc pin·유한 Queued/Applied 보고로 Stage→Commit→present를 연결한다. 기존 headless의 CPU Staged 의미는 보존한다.
 - host는 값싼 typed coordinator와 장수하는 CPU frame/prepare/reclaimer owner 하나를 둔다. 무거운 prepare 때문에 입력/control relay가 멈추지 않게 한다. 기존 TaskPool의 shared completion receiver를 다른 poller가 가져가지 않는다.
-- UI는 Window/Surface와 PacketRenderer를 소유한다. view 종료 뒤 Window/Surface는 같은 thread에서 해제하고 PacketRenderer만 기존 CPU owner에 반환해 nonwaiting completion drain/최종 drop을 맡긴다. per-close janitor thread를 만들지 않는다.
+- UI는 Window/Surface와 device 초기화 owner를 소유한다. view 종료 뒤 Window/Surface는 같은 thread에서 해제하고 PacketRenderer·packet 변환 전 Renderer·부분 초기화 device owner를 구분해 기존 CPU owner에 반환한다. CPU owner가 nonwaiting completion drain/최종 drop을 맡긴다. per-close janitor thread를 만들지 않는다.
 - resource-only 준비와 기존 planner/cache 재사용·bounded chunk+기존 화면의 한 submit을 채택한다. initial GPU 준비는 clear/loading pass와 조합하고 가짜 game packet/ACK를 만들지 않는다.
 - CPU 실제 backing·GPU upload completeness·submission completion·source charge를 구분한다. marker/wrapper refcount만으로 회수를 보고하지 않는다. 숫자와 renderer public API의 최종 동결은 별도 상세 계약에 따른다.
 
 정확한 runtime API는 [consumer 계약](../03-architecture/project-generation-consumer.md), host/renderer 경계는 [host](../03-architecture/native-project-host.md)와 [staged renderer](../03-architecture/staged-render-asset-generation.md)에 둔다. 이 ADR은 구현/성능/제품 인수 증거가 아니다.
+
+2026-10-17 수정: 초기 기록의 PacketRenderer-only 반환은 device 생성 후 packet 변환 실패와 Renderer 내부 초기화 unwind를 다루지 못했다. 위 소유권 요구를 부분 초기화까지 명시하며 정확한 additive constructor/disposition API와 실제 검증은 host 구현의 열린 선행 조건으로 둔다. NoDeviceCreated로 이미 생성된 device를 숨기지 않는다.
 
 ## 대안과 비용
 

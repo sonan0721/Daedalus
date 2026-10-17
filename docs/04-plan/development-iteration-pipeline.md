@@ -217,3 +217,5 @@ runtime source 작성 중에도 별도 renderer/host의 read-only 리뷰를 진�
 PR17에서는 runtime source만 선택 commit해 clean CI가 기존 renderer와 전체 회귀를 검사하도록 했다. local renderer WIP는 보존했다. 실제 Mac 하드웨어 검증에는 CI가 만든 archive를 내려받아 exact checkout/dirty=false·checksum·binary hash를 확인하고 기존 helper를 그대로 썼다. 두 packaged CPU62와 downloaded binary의 native72를 확인했고 local release를 다시 컴파일하지 않았다. source가 다른 WIP 빌드로 검증 대상을 바꾸거나 새 smoke framework를 만드는 반복을 피한 절차이며 시간 절감 배율은 측정하지 않았다.
 
 renderer source 리뷰에서는 미참조 legacy mesh의 불필요 stage 요청과 첫 frame의 expected bind group×draw 탐색을 찾았다. 실제 참조 집합과 private resource-set token으로 공통 CPU 검증을 재사용하는 계약을 먼저 수정했다. token은 작은 연결이며 GPU 초기화 완료 검증을 대신하지 않는다. source 구현·CPU/GPU 검사 전이므로 이를 이미 달성한 프레임 시간 개선으로 보고하지 않는다. 로그 wrapper의 zsh readonly 변수 실수는 AGENTS에 task-specific exit 변수·단일 exclusive descriptor 규칙으로 명시했다.
+
+device production과 실제 GPU 시나리오 테스트를 한 작업자에게 직렬로 몰지 않도록, 새 test module 파일만 별도 Luna가 작성하고 device 담당이 parent 선언/기존 helper의 최소 visibility를 소유하도록 분리했다. CPU 담당의 실제 PreparedProject/validated-frame 경계를 공유하며 forged FrameHandle이나 별도 smoke framework는 만들지 않는다. compile은 관련 source가 모두 동결된 뒤 단일 owner가 맡아 작성 병렬화와 불안정한 동시 빌드를 구분한다. 실제 검증/효과는 후속 기록 대상이다.

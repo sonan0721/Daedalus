@@ -62,6 +62,8 @@ CPU owner의 source는 실제 leaf registry·Weak를 포함한 독립 alias·첫
 
 CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 실제 tuple padding을 누락할 수 있었다. GeometryKey/MeshHandle 같은 실제 pair의 `size_of<(K,V)>`를 쓰고 HashSet은 key layout을 쓰도록 같은 estimator의 prepared/scratch/frame 경로를 수정했다. Weak가 남은 실제 mesh·부분 준비 후 취소·old frame을 보유한 active/candidate 전환 시험 source도 추가했다. 아직 이 renderer source의 Cargo 검증은 하지 않았다. GPU source에는 whole-buffer 대신 whole-record chunk, 후보별 최소 create quota, 추가 stage bookkeeping 예약과 managed slot 갱신의 계약 누락이 있어 수정 중이다.
 
+별도 read-only host 감사에서는 device 생성 후 dimensions/configure/consuming PacketRenderer 변환 실패와 Renderer 내부 post-request_device unwind를 확인했다. 기존 함수가 owner를 반환하지 않으므로 NoDeviceCreated라고 보고할 수 없다. [host 계약](../03-architecture/native-project-host.md)과 ADR-0007을 수정해 initialized/partial owner 반환·app 생존 범위의 unwind 처리·surface/window 선행 해제를 후속 구현의 선행 조건으로 명시했다. 부분 초기화 holder/API·실제 실패/panic 시험은 아직 열려 있으며 현재 renderer staging 작업에 무단으로 구현 범위를 합치지 않는다.
+
 ## runtime source 최종 동결·로컬 검증
 
 마지막 fixture 리뷰에서 nonwaiting port의 정상 호출도 actor와 경합하면 합법적인 Busy를 반환할 수 있음을 확인했다. 테스트의 정상 성공/오류 판정만 기존 방식의 유한 Busy 재시도로 묶고, mutex를 의도적으로 잡고 Busy를 검사하는 assertion은 그대로 유지했다. production·deadline·임의 sleep을 바꾸지 않았다. 이 수정 뒤 runtime source 네 파일을 동결했다.
@@ -89,3 +91,7 @@ Rust run38990034865/job117270161752는 workspace337pass/0fail/ignored12, strict 
 PR metadata raw `p03-consumer-ci-pr-root-attempt01.json`은 SHA-256 `8dda520170c0f9188bf97d698d3777680d0daeb6b7e6a86ddaf3c066229d0cec`, Rust/Mac/Linux job raw는 각각 `d6e9662bed32c69eb8f4fdabce1b65abafcc7a7e9a0b21d2179964ecc9aecadb`, `759717b041ef74ecd736d0a0240c1cbb456a350c7c9b410235e6d9ba79f6ab7b`, `655409756d95e56dacfb06ad20ce1c03cf11042c82714c8a57a4643924182247`이다. Rust의 첫 log 요청은 run 진행 중이라 사용할 수 없었고 빈 attempt01을 보존했다. 실제 완료 로그는 attempt02이며 이를 테스트 실패/재실행으로 세지 않는다.
 
 후속 renderer source 리뷰는 미참조 legacy mesh를 GPU stage 집합에 포함하는 중복과 첫 candidate draw의 expected bind group×draw 중첩 탐색을 확인했다. 실제 참조 binding에서만 stage 집합을 만들고, CPU 검증이 발급한 generation별 private token을 GPU admission/active에 공유하는 작은 계약을 추가했다. 같은 token/identity/limits를 O(1)로 대조하며 actual GPU completeness/serial 검증은 그대로 필요하다. token의 registry/실제 charge/alias 시험도 구현 범위다. 아직 renderer Cargo/실제 GPU 인수는 하지 않았다. 이 runtime slice 인수 후에도 전체 b.3·P03·D1/D2/D3는 계속 미완료다.
+
+병합 뒤 main3bc9274의 docs38990388159·managed38990388158·Rust38990388223·release38990388349도 모두 성공했다. main release의 Linux117271273655/Mac117271273740는 success, Publish117271547194는 skipped다. raw `p03-consumer-main-release-root-attempt01.json`의 SHA-256은 `b328eaad6a07987f6aed406b336bda7b5f6c31d56a87da10f3f0ba1191e14fb9`다. 새 main artifact의 장치 재검사를 수행한 것으로 부르지 않는다.
+
+renderer GPU scenario test source는 Luna A가 새 `packet_renderer/staged_gpu_tests.rs`만 소유하고, Luna C는 production device/staging·parent module 선언·기존 pure tests, Luna D는 CPU/packet/lib를 소유하도록 나눴다. A의 네 실제 GPU 시나리오는 큰 geometry record chunk/odd-width mip, cold/warm quota·inflight1/2, old pose/token/첫 draw, partial cancel/drain/pin이다. 각 source가 동결되기 전에는 Cargo/GPU를 실행하지 않고 한 lease로 집중 검증한다. 이 분담은 작성 중인 계획이며 테스트 통과 수가 아니다.

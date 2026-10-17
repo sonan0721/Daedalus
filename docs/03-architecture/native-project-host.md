@@ -51,7 +51,15 @@ payload 전달은 capacity1의 typed 경계로 초기/후보 StageInput·최신 
 
 managed window의 metadata는 session/generation/digest·publication sequence·authority snapshot sequence·tick·실제 physical dimensions/view와 checked present sequence를 함께 보존한다. UI는 `surface.present()` 경계 뒤에만 presented를 기록한다. Busy로 acquired frame을 버린 시도·bootstrap clear는 actual game present 횟수/ACK에 포함하지 않는다. compact host 결과에는 packet/frame/source Arc를 담지 않는다.
 
-window 내부 finalizer는 성공·초기화 뒤 오류·unwind에서도 작은 결과를 복사한 뒤 UI의 CPU-frame/packet aliases, SurfaceState, Window를 순서대로 해제하고 PacketRenderer만 별도 capacity1 device-disposition 경계로 반환한다. device 생성 전 실패는 NoDeviceCreated를 보낸다. native host의 같은 CPU owner/backstop이 이 반환을 수신해 실제 nonwaiting drain과 CPU registry 회수를 끝내며, UI에서 unfinished worker를 join하지 않는다. public 실패가 발생했다고 초기화된 device를 UI에서 곧바로 최종 drop하는 반환형을 만들지 않는다. 정확한 새 symbol/signature와 source 소유권은 renderer API compile 확인 뒤 착수 전에 동결한다. 이 경계는 source 기반 설계이며 실제 창/오류/panic 검증은 아직 남아 있다.
+window 내부 finalizer는 작은 결과를 복사한 뒤 UI의 CPU-frame/packet aliases, SurfaceState, Window를 순서대로 해제하고 device owner를 별도 capacity1 disposition 경계로 반환한다. 완료된 PacketRenderer뿐 아니라 packet 준비 전의 Renderer와 device 생성 뒤 부분 초기화 owner도 구분해야 한다. NoDeviceCreated는 engine이 실제 device handle을 얻기 전의 실패에만 쓴다. native host의 같은 CPU owner/backstop이 이 반환을 수신해 실제 nonwaiting drain과 CPU registry 회수를 끝내며, UI에서 unfinished worker를 join하지 않는다. public 실패가 발생했다고 초기화된 device를 UI에서 곧바로 최종 drop하는 반환형을 만들지 않는다. 정확한 새 symbol/signature와 source 소유권은 renderer API compile 확인 뒤 host/window 착수 전에 동결한다. 이 경계는 설계 요구이며 아직 구현/실제 창·오류·panic 검증을 통과하지 않았다.
+
+### 초기화 실패 경계의 source 감사
+
+2026-10-17 감사에서 현재 window는 Renderer 생성 뒤 dimensions 검증·surface configure·PacketRenderer 변환을 수행하며, consuming 변환의 오류는 원래 Renderer를 반환하지 않는다는 것을 확인했다. 따라서 PacketRenderer/NoDeviceCreated 두 경우만 있는 반환형으로는 device 생성 후 실패를 정직하게 표현할 수 없다. WindowApp 밖의 catch_unwind도 충분하지 않다. 함수 안의 app이 먼저 unwind되어 device owner를 잃을 수 있기 때문이다.
+
+새 managed 경로는 생성된 Renderer를 즉시 app의 owner slot에 넣고, borrowed packet 준비가 성공한 뒤에만 PacketRenderer로 승격하도록 설계한다. app이 살아 있는 범위에서 오류/unwind를 수집하고 surface/window 해제 뒤 소유권을 반환한다. 기존 consuming public API의 호환성은 보존한다. Renderer::from_adapter 내부에도 request_device 성공 뒤 layouts/pipelines/buffers 생성 구간이 있으므로, 이 구간은 별도의 recoverable partial-init owner가 필요하다. 단순 Device clone만으로 부분 GPU 자원의 마지막 해제 thread까지 보장했다고 하지 않는다.
+
+부분 초기화 holder의 필드·실패 반환형·Send와 finalizer 순서는 코드 착수 전 추가 리뷰 대상이다. engine에 handle이 반환되기 전 backend 내부 실패와 engine이 이미 소유한 handle의 실패를 구분한다. 이 설계가 동결되고 실제 일반 오류/주입 panic·반환/drain 시험을 통과할 때까지 host 종료 소유권 항목은 열린 상태다. 현재 staged-upload 코드 작업의 통과로 이 항목을 닫지 않는다.
 
 ## runtime-neutral consumer port 구체안
 

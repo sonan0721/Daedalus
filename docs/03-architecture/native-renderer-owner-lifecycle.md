@@ -65,10 +65,12 @@ Drop은 stop 요청만 하고 unfinished join을 하지 않는다. CPU worker와
 
 | 하위 gate | 실제로 확인할 것 | 현재 상태 |
 | --- | --- | --- |
-| 3.3a owner | pre-handle request 오류, Device/Queue 직후·각 base/lazy/packet handle 직후 injected panic에도 정확한 phase/handle 보존; Send compile; 지정 worker final drop | 계획 |
+| 3.3a owner | pre-handle request 오류/unwind, Device 보유·base partial layout·lazy layout/shader·packet buffer/group의 서로 다른 소유권 경계에 injected panic; ready 시 고정 handle 전체 보유·치수 오류의 RendererReady 유지; Send compile; 지정 worker final drop | 검증 중 |
 | 3.3a stage | vertex→index, texture→view/default pair 사이 panic에 첫 handle 잔존; incomplete가 Ready/업로드 대상 아님; 정상 stage/legacy 회귀 | 계획 |
 | 3.3b window | bootstrap game ACK=0, Ready 뒤 실제 frame만 ACK, surface configure 실패/내부 panic에서도 항상 owner 반환·Surface/Window 먼저 해제 | 계획 |
 | 3.3c host | 단일 session/import/CPU worker, view-close 뒤 Step/read, Stage/Commit 거부, whole stop·실제 drain·nonwaiting 종료 | 계획 |
 | 3.3d 통합 | public Rust SDK·CLI가 같은 경로, 실제 source edit→Stage→Commit→pixels/pose/present ACK·구 CPU/GPU 회수 | 계획 |
 
 코드 작성은 Luna xhigh만 맡는다. 첫 task는 renderer/packet renderer/staging의 owner와 테스트이며 window/CLI/runtime/manifest는 편집하지 않는다. 공통 export 파일은 이 task가 단독 소유한다. focused CPU → 관련 real GPU → 통합 후 workspace/managed/5 CI/두 package 순서로 검사한다. 이미 통과한 unrelated hardware 검사를 문서만 바뀌었다는 이유로 반복하지 않는다. 이 순서가 모든 future 플랫폼이나 frame-time 성능을 인증하지 않는다.
+
+검증 표의 2026-10-17 리뷰 수정: 최초의 모든 handle 직후 hook을 각각 추가하는 표현을 서로 다른 소유권/전이 경계의 주입과 ready 전체 보유 검사로 구체화했다. 동일한 Option 필드 대입을 반복하는 테스트 대신 실제 holder가 생기는 지점·다음 호출 전 보관·phase 승격·오류 반환을 검사한다. 모든 반환 handle을 즉시 보관하는 구현 요구는 그대로다. 아직 실행하지 않은 request-future unwind와 RendererReady 오류 검사는 통과로 계산하지 않으며 실제 Surface 오류/창 finalizer는 3.3b/c에 남긴다.

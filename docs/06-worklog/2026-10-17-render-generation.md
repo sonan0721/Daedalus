@@ -234,3 +234,7 @@ source `/tmp/daedalus-host-traits-luna-attempt01.rs` SHA-256은 `757bba9247137ed
 코드 소유권은 C(renderer/packet/staging/owner·공통 export), A(window/하위 module), D(새 host source/외부 SDK integration tests)로 나눴다. D는 C/A의 focused compile 동안 manifest/Cargo.lock을 바꾸지 않는다. root가 공개 계약·리뷰·단일 검증 lease를 조정한다. 새 host의 기본 feature는 장치 없이, window는 opt-in이며 serde/별도 transport framework·새 registry dependency는 추가하지 않는 안을 채택했다. 실제 구현/테스트 결과는 뒤에 별도로 기록한다.
 
 source 리뷰로 계약의 두 과도한 표현도 고쳤다. WindowGpuOwner가 감싼 PacketRenderer에는 drain까지 필요한 source/frame pin이 실제로 남고, 일반 cache/stage retirement의 GPU handle drop은 기존 render 호출 thread에서 발생할 수 있다. 이번 작업은 초기화·fatal pair panic·창 종료 반환을 보존하는 범위이며 모든 정상 GPU 해제를 worker로 옮겼다는 주장이 아니다. 또 managed present에 실제 view-projection 행렬을 추가해 host가 camera 수학을 복제하지 않게 했고, CPU owner가 기존 authority frame mailbox를 직접 읽어 큰 snapshot을 coordinator에서 교체/해제하는 새 경로를 줄이는 방향으로 계약을 구체화했다. 실제 성능 개선율과 성공 여부는 미측정이다.
+
+후속 WIP 리뷰는 shared FIFO8/blocking result send가 stop/device drain을 막을 수 있는 초안을 거부하고 lane별 capacity1·관측까지 보유하는 결과 slot으로 고쳤다. 실제 saturation/stop 검증은 후속이다. 또 GPU owner 반환 try-lock 경합을 facade field/mem::forget으로 넘기는 초안 대신 단일 publisher의 one-shot 설치 slot을 계약에 명시했다. code가 이 계약을 만족하고 실제 종료 검사를 통과하기 전 host 인수는 열어둔다. renderer 오류 주입은 동일한 필드 대입마다 hook을 복제하기보다 서로 다른 소유권 전이·전체 고정 handle 보유를 검사하도록 표를 명시적으로 수정했으며 미실행 경계는 구분한다.
+
+S90은 pinned Rust1.94.0 source를 확인해 get 비대기와 set의 경쟁 초기화 시 대기 가능성을 분리했다. host의 private 단일 publisher 전제를 코드로 유지해야 하며 표준 type의 일반 wait-free 보장으로 바꾸지 않는다. 현재 온라인 rustdoc은1.99.1이고 versioned rustdoc 접근 실패도 출처 등록부에 남겼다.

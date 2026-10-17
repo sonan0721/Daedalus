@@ -350,3 +350,22 @@ Luna source를 동결한 뒤 root가 raw completion/footer와 SHA-256을 대조�
 CLI 수정 후 all-feature50/50통과(`p03-host-cli-allfeatures-test-luna-attempt02.log`, SHA-256 `65627f3bc29aa722350c286eb832fc02b95190dc1122eda24b87488458e8d72f`)를 확인했다. 이어진 strict01은 default 생성 뒤 field 재할당 lint로 실패했고 raw hash는 `8eb9e329f384d9ab4f8bc77cf384208cae75adce5b22e096928dc7edec840aad`다. Luna가 같은 값의 struct initializer로 정리한 뒤 all-target/all-feature strict02와 build01이 모두 통과했다. 두 raw `p03-host-cli-allfeatures-{clippy-luna-attempt02,build-luna-attempt01}.log`의 hash는 `ff1b1e23795a540479846e375311960f71b98148f9bd1c6ef3620d4b85853fa6`/`4c53cf7bb5ec4bdef661186ca4665e27d0e0a6f7803bd68520d24b95cf972892`다. 실제 debug CLI hash는 `ac6fcdea7adc9ccc96d3d7b5244fedf7821a432d9e8f63012d4db7e8c330ebcf`이며 새 실제 CLI 교체 smoke/전체 workspace/CI/package 인수는 아직 실행 전이다.
 
 공통 host·manifest·lock·공개 SDK example과 그 집중 근거를 `de92a53`에 별도 commit해 작업 branch에 push했다. CLI adapter/control/Python smoke source는 통합 검증 전 working tree에 남겼다. 엔진 main 인수·전체 P03/D1/D2/D3 완료로 보고하지 않는다. 이 상태 기록은 현재 하위 gate와 제품 목표를 구분해 사용자에게 진행 상황을 설명하기 위한 것이다.
+
+
+## 사용자 요청에 따른 저장소 정리
+
+사용자가 저장소 정리를 요청했다. source·설계·현재 CLI·공개 에셋·기존 성공/실패 증거는 보존하고, 재생성 가능한 오래된 증분 캐시만 정리했다. 사전 조사에서 저장소 약25GiB 중 target이약24GiB였고 증분 캐시는약13GiB였다. `.git`은약3.5MiB이며 생성물/로그는 추적되지 않았다. 다른 프로젝트·전역 Cargo cache·branch/history·release tag는 건드리지 않았다.
+
+활성 compiler/runtime과 작업 agent가 없고 Cargo lease가 반환된 것을 확인한 뒤, 그룹 내부 최신 mtime이24시간보다 오래된 `target/debug/incremental`의274개 그룹을 제거하고189개는 유지했다. 삭제 대상의 파일별 할당량 합계 추정은6,190,133,248byte였으며 공유 block/hardlink와 시스템 활동 때문에 이를 실제 확보 공간으로 계산하지 않는다. `df -k`의 Available은11,586,124→15,987,596KiB로 관측되어 약4.20GiB 늘었다. 삭제 뒤 증분 캐시는7,615,108KiB, target 전체는20,824,980KiB였다. 의존성 object·현재 CLI·release 산출물은 유지했다.
+
+`repo-cleanup-incremental-root-attempt01.log`는 exit0·9.303초·SHA-256 `4d22a75a04fe63fd8c706d2f4e64cf533d2bdff6a1822cfb96ba52fa30e8d71d`다. 원본718개 evidence 파일과259개 추적/미추적 source 파일의 SHA-256, CLI `ac6fcdea7adc9ccc96d3d7b5244fedf7821a432d9e8f63012d4db7e8c330ebcf`, Git porcelain이 정리 전후 모두 같았다. 보존 검사를 통과한 뒤에만 이 Markdown과 관리 기준을 수정했다.
+
+사전 manifest `repo-cleanup-baseline-root-attempt01.json`의 SHA-256은 `6ca775fd1f760259e1e17d4f80a286e96b32ad9dbd56a43f16bc41a134035c35`, 사후 `repo-cleanup-preservation-root-attempt01.json`은 `c0af4d0a835b7c56318636fe6b8f728ce0d1fa0f09f85e9fd3799a932c7eccdf`다. 모두 `dist/project-evidence/`에 있으며 기존 raw를 덮어쓰지 않았다.
+
+
+이전 집중 검사를 통과한 CLI adapter/control·Python smoke6파일은 별도 기능 checkpoint로 보존한다. source hash가 위 성공 근거와 같은지 대조했으며 정리 때문에 전체 Cargo/GPU/audio 검사를 다시 실행하지 않는다. 실제 CLI 에셋 교체 smoke·전체 workspace/CI/package·화면 픽셀/성능·D1/D2/D3 인수는 계속 남아 있다. 이번 완료 대상은 저장소 정리와 변경 보존이다.
+
+
+CLI6파일은 `f16ea4e`의 별도 checkpoint commit으로 보존했다. Luna의 read-only 감사에서도 engine-only 변경 범위와 생성 에셋·비밀·바이너리 미포함을 확인했다. Python 두 파일은72통과 당시 hash와 같고, CLI50통과 뒤 마지막 activation struct initializer만 의미를 유지해 변경했다. 현재 정확한 activation bytes는 그 뒤 strict/build로 확인했으며50개 테스트가 그 마지막 bytes에서 다시 실행됐다고 주장하지 않는다. native SDK 창 실행 근거와 실제 CLI managed-view 교체 smoke는 서로 다른 검사다.
+
+정리 후 문서 검사 `repo-cleanup-docs-root-attempt01.log`와 workspace fmt 검사 `repo-cleanup-fmt-root-attempt01.log`도 exit0이다. SHA-256은 각각 `b2e96accbae47fd7cc58e92d2c73a276b1c17d023cf007050b001ab775182a4f`/`0c8fcef0bb6a707dd0954bfcad3a58509e24398d9e7f61bbfe2b974fa09aedbd`다. 이번 관리 기준은 기존 개발 파이프라인 문서에 추가해 별도 도구나 중복 설계 문서를 늘리지 않았다.

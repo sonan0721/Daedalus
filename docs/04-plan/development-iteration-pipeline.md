@@ -235,3 +235,18 @@ host 구현 검토에서는 기존 digest validator·runtime compact publication
 `python3 scripts/run_logged.py --log dist/project-evidence/<unique>.log -- <program> <args...>`는 파일을 exclusive로 먼저 열고, 이미 존재하거나 열 수 없으면 자식 명령을 시작하지 않는다. parent directory는 caller가 준비한다. shell 없이 argv를 실행하고 stdout/stderr를 같은 열린 파일로 연결하며 stdin은 DEVNULL이다. 시작 metadata와 정상 종료 시 실제 child exit code/elapsed footer를 남기고 닫은 뒤 raw SHA-256·경로·실행 여부·종료 상태를 작은 JSON으로 출력한다. child 실패는 성공으로 바꾸지 않으며 launch 자체 실패는 child 실행 실패와 구분한다. launcher/finalization/report 오류는125, POSIX child signal은 원래 음수 returncode와128+signal의 wrapper status를 구분한다. 환경변수/credential 목록을 덤프하지 않는다. 강제 process kill·디스크 오류 등으로 footer가 없으면 완료 검증 근거가 아니며 원본을 덮어쓰지 않는다.
 
 필수 회귀는 실제 자식 process의 stdout+stderr·비영 종료 보존, 기존 파일 거부 시 child 미실행·기존 bytes 불변, launch 실패의 명시적 상태와 hash 일치다. 자동 재빌드/재시도/병렬화는 없다. Luna xhigh가 두 Python 파일만 구현했고 조정자가 source를 리뷰했다. local focused5개와 실제 docs 명령의 출력/footer/독립 hash 대조가 통과해 noninteractive 검사에 도입한다. 세부 raw는 [작업 기록](../06-worklog/2026-10-17-render-generation.md)에 둔다. 이전 잃은 로그를 재구성하지 않으며 CI/시간 절감 배율·전체 엔진 인수는 이 결과에 포함되지 않는다.
+
+
+## 저장소와 로컬 산출물 관리
+
+| 위치 | 관리 기준 |
+| --- | --- |
+| `crates/`, `managed/`, `docs/`, `scripts/`, `third_party/` | 엔진 소스·SDK·설계·검증 도구·라이선스 자료다. 미커밋 파일도 삭제 대상으로 취급하지 않는다. |
+| `Cargo.lock`, toolchain 파일, `.github/` | 재현 가능한 빌드와 검증에 필요한 추적 파일이다. 디스크 정리를 위해 지우지 않는다. |
+| `target/` | 재생성 가능한 로컬 빌드 산출물이다. 현재 CLI와 의존성 빌드 캐시는 유지하고, 동작 중인 compiler/runtime이 없을 때 오래된 증분 캐시를 선별 정리한다. |
+| `dist/project-evidence/`, `dist/ci-artifacts/` | 성공·실패 원본, hash, CI package와 검증 기록이다. 일반 캐시 정리에 포함하지 않는다. |
+| `dist/local/`, `dist/qa-assets/` | 버전별 로컬 CLI·공개 에셋의 출처와 테스트 입력이다. 검증 근거와 연결되어 있으므로 일괄 삭제하지 않는다. |
+
+현재 정리 기준은 증분 캐시 그룹 내부의 모든 파일·디렉터리 중 가장 최근 변경 시각이24시간보다 오래된 경우다. 그룹 최상위 mtime만으로 판정하지 않는다. 소스 작업·Cargo/장치 검증 소유자가 비어 있는지 먼저 확인하고, 대상 root가 저장소의 `target/debug/incremental`인지 검증한다. 삭제 목록과 전후 측정은 고유 raw에 보존한다. 소스와 기존 증거의 hash, 현재 CLI hash, Git 상태를 정리 전후 대조한다. 이24시간 기준은 이번 로컬 유지보수 판단이며 자동 실행 일정이나 성능 보장이 아니다.
+
+공유 target 전체를 비우거나 `git clean -fdx`로 소스·검증물을 함께 제거하지 않는다. 새 기능의 확인된 소스는 기능별 checkpoint commit으로 보존하고, 통합/제품 인수 전인 사항을 작업 기록에 남긴다. 캐시 정리를 빌드 속도 개선이나 엔진 기능 완성으로 보고하지 않는다. [실제 정리 결과](../06-worklog/2026-10-17-render-generation.md)는 할당 byte 추정과 시스템 여유 공간의 관측값을 구분한다.

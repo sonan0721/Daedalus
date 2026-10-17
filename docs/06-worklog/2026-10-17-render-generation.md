@@ -257,3 +257,5 @@ S90은 pinned Rust1.94.0 source를 확인해 get 비대기와 set의 경쟁 초�
 all-feature no-run 첫 시도는 A 소유 window의 import/borrow/privacy/derive 오류로 실패했다(`p03-owner-allfeatures-luna-attempt01.log`, `b6f0f09afd8cb930965a67a9995962342647b0f18af5f87557f22144bc0e32e7`). 수정 후 두 번째도 test fixture closure의 mutable borrow와 unused mut으로 실패했다(`p03-owner-allfeatures-luna-attempt02.log`, `1b849d5dd6fb5d41b82196d27313e6db04ecd90c96b54c9869b32b54a5cc879b`). A가 두 번째 수정을 마치고 파일을 재동결했다. 후속 성공은 별도 raw로 남긴다. 실패 기록을 덮어쓰지 않았다.
 
 one-shot disposition 계약의 문서 검사 `p03-host-disposition-contract-docs-root-attempt01.log`는 exit0·SHA-256 `d9beddccf1e755199accd39ccce1f77cbaa1cba3aefef1c0586774d87a591224`다. 이는 코드 기능 통과가 아니다.
+
+첫 all-feature CPU 실행은 83통과/1실패였다(`p03-owner-allfeatures-cpu-luna-attempt01.log`, `d74928310fa81b1fe0d612433f411fe5e5d353d595d3f6283fbe454ef6a14a15`). root가 source를 대조한 결과 content의 `sha256:<64hex>` 71바이트 digest를 새 managed identity가 진단 문자열처럼64바이트로 자르는 production 오류였다. 테스트의 identity 비교를 약하게 하지 않고 stage admission/present/summary와 host의 동일한 truncation 경로를 모두 바로잡도록 계약과 Luna 작업을 수정했다. 기존 packet validator의 형식 검증을 재사용한다. 수정 후 성공은 별도로 기록한다.

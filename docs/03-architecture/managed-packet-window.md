@@ -45,6 +45,8 @@ actual-present는 stage와 별도의 latest-only metadata 슬롯이다. 같은 c
 
 present metadata는 key, session, generation, digest, publication sequence, authority snapshot sequence, tick, checked present sequence, physical width/height, **실제 submission RenderView**와 그 view/physical aspect로 기존 renderer 수식이 계산한 view_projection `[f32; 16]`을 포함한다. host는 이 실제 행렬을 runtime ProjectPresentedView에 복사하며 renderer camera 수학을 재구현하거나 표시용 view에서 다른 aspect로 추측하지 않는다. publication과 authority snapshot sequence가 같은 값이라고 가정하지 않는다. WindowInputSink와 기존 local camera/input/report/frame-interval 표본을 재사용한다.
 
+digest는 진단용 message와 달리 원본 그대로 복사하는 식별자다. 현재 content의 canonical 표기는 `sha256:<64 lowercase hex>`로 71바이트이며 기존 renderer는 prefix 없는 hex도 검증한다. UI identity·stage summary·present·host summary에서 64바이트로 잘라서는 안 된다. 허용 형식/길이는 기존 검증 계약으로 제한하고, 실제 PreparedProject/CPU frame에서 metadata까지 정확히 같은 digest가 유지되는지 검사한다.
+
 GPU Busy는 acquired surface frame을 버리고 present/ACK하지 않는다. Timeout은 재시도, Lost/Outdated는 재설정하며 실제 draw/present 전에는 ACK하지 않는다. OOM/device 오류·unwind는 bounded failure와 보존된 owner를 반환한다. stage 실패/취소가 기존 ready generation을 표시 가능한 상태에서 훼손하지 않는다.
 
 ## 종료·오류와 파일 소유권

@@ -16,7 +16,7 @@
 
 ## 하나의 move-only owner
 
-renderer는 `WindowGpuOwner`와 작은 `WindowGpuOwnerPhase`를 공개한다. 내부 필드는 비공개·non-Clone이며 Window/Surface/source/frame/authority를 보유하지 않는다. host는 그 내부를 꺼내거나 두 renderer로 복제하지 않고 worker로 이동한다.
+renderer는 `WindowGpuOwner`와 작은 `WindowGpuOwnerPhase`를 공개한다. 내부 필드는 비공개·non-Clone이며 Window/Surface/authority나 별도 project/CPU registry를 보유하지 않는다. 감싼 PacketRenderer의 미완료 stage/submission은 기존 SourcePin·CpuFrameHandle pin을 drain까지 유지한다. 이를 먼저 버려 자원 수명을 끊지 않는다. host는 내부를 꺼내거나 두 renderer로 복제하지 않고 worker로 이동한다.
 
 | phase | 보유/전이 |
 | --- | --- |
@@ -47,7 +47,9 @@ PacketRenderer 준비는 device/CPU budget·stage ID·size arithmetic·slot stor
 
 StageRecord를 접수·예약한 뒤 create를 시작한다. geometry의 vertex/index, imported texture/view, default texture/view에 유한 partial slot을 둔다. 첫 handle을 slot에 설치한 뒤 두 번째 create를 호출한다. 두 handle과 사전 계산된 metadata가 모두 있어야 기존 complete cache entry로 이동한다. ordinary complete cache type까지 optional로 넓히는 것보다 작은 pending pair slot을 우선한다. 실제 source상 더 단순한 동등 구현이 필요하면 변경 이유를 먼저 리뷰한다.
 
-map/reserve·checked metadata 변환은 handle 생성 전에 수행한다. 미완성 slot은 upload/binding/Ready/promotion 대상이 아니다. 정상 취소·실패·fatal panic은 같은 PacketRenderer owner에 남아 worker drain/drop을 따른다. fatal panic 뒤 stage를 정상 resume하거나 Ready로 보고하지 않는다. counter가 완료 전까지 부분만 갱신된 경우 metadata는 failure/incomplete로 표현하고 성공 create 수를 지어내지 않는다. 유한 pending pair와 retained handle의 비용도 장부에 포함한다.
+map/reserve·checked metadata 변환은 handle 생성 전에 수행한다. 미완성 slot은 upload/binding/Ready/promotion 대상이 아니다. pair 사이 fatal panic은 같은 PacketRenderer owner에 남아 창 실패 반환 뒤 worker drain/drop을 따른다. fatal panic 뒤 stage를 정상 resume하거나 Ready로 보고하지 않는다. counter가 완료 전까지 부분만 갱신된 경우 metadata는 failure/incomplete로 표현하고 성공 create 수를 지어내지 않는다. 유한 pending pair와 retained handle의 비용도 장부에 포함한다.
+
+일반 실행의 취소/세대 회수는 PR19의 기존 nonwaiting serial retirement와 cache 한도를 보존한다. `try_cancel_stage`/`refresh_stage_state`가 완료된 stage/cache handle을 render 호출 thread에서 해제하는 경우까지 이번 초기화/창 종료 계약이 worker로 옮겼다고 하지 않는다. CPU의 큰 공유 backing은 별도 PacketCpuOwner registry가 worker에서 회수한다. 모든 정상 GPU cache 해제의 thread/driver 시간을 바꾸는 새 disposal queue는 이번 slice에 추가하지 않으며 실제 host 반응성/제품 성능 gate에서 별도 평가한다. 생성/해제 호출 수의 상한은 wall-time/144fps 보장이 아니다.
 
 ## managed 창에서의 사용 계약
 

@@ -43,7 +43,7 @@ actual-present는 stage와 별도의 latest-only metadata 슬롯이다. 같은 c
 3. matching key·generation/digest·publication/snapshot sequence·tick을 가진 실제 CpuFrameHandle만 첫/후속 게임 draw로 사용한다. UI는 active latest frame과 candidate stage를 별도로 보유한다. 후보 준비 동안 최신 active pose와 로컬 camera/input 처리를 유지한다.
 4. successful submit 이후 `SurfaceTexture::present()`를 실제 호출한 경계에서만 checked game present sequence/event를 기록한다. bootstrap surface present 수는 별도이며 game ACK는 0이다. scanout/compositor 표시의 증명이라고 하지 않는다.
 
-present metadata는 key, session, generation, digest, publication sequence, authority snapshot sequence, tick, checked present sequence, physical width/height, **실제 submission RenderView**를 포함한다. publication과 authority snapshot sequence가 같은 값이라고 가정하지 않는다. WindowInputSink와 기존 local camera/input/report/frame-interval 표본을 재사용한다.
+present metadata는 key, session, generation, digest, publication sequence, authority snapshot sequence, tick, checked present sequence, physical width/height, **실제 submission RenderView**와 그 view/physical aspect로 기존 renderer 수식이 계산한 view_projection `[f32; 16]`을 포함한다. host는 이 실제 행렬을 runtime ProjectPresentedView에 복사하며 renderer camera 수학을 재구현하거나 표시용 view에서 다른 aspect로 추측하지 않는다. publication과 authority snapshot sequence가 같은 값이라고 가정하지 않는다. WindowInputSink와 기존 local camera/input/report/frame-interval 표본을 재사용한다.
 
 GPU Busy는 acquired surface frame을 버리고 present/ACK하지 않는다. Timeout은 재시도, Lost/Outdated는 재설정하며 실제 draw/present 전에는 ACK하지 않는다. OOM/device 오류·unwind는 bounded failure와 보존된 owner를 반환한다. stage 실패/취소가 기존 ready generation을 표시 가능한 상태에서 훼손하지 않는다.
 

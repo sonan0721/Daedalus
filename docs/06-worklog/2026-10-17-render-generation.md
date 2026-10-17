@@ -64,6 +64,12 @@ CPU 표 장부의 기존 `size_of<K>+size_of<V>`는 bucket마다 발생하는 �
 
 별도 read-only host 감사에서는 device 생성 후 dimensions/configure/consuming PacketRenderer 변환 실패와 Renderer 내부 post-request_device unwind를 확인했다. 기존 함수가 owner를 반환하지 않으므로 NoDeviceCreated라고 보고할 수 없다. [host 계약](../03-architecture/native-project-host.md)과 ADR-0007을 수정해 initialized/partial owner 반환·app 생존 범위의 unwind 처리·surface/window 선행 해제를 후속 구현의 선행 조건으로 명시했다. 부분 초기화 holder/API·실제 실패/panic 시험은 아직 열려 있으며 현재 renderer staging 작업에 무단으로 구현 범위를 합치지 않는다.
 
+첫 managed frame 사전 리뷰에서는 CPU validation이 있다는 이유로 active slot map의 재사용을 강제한 결함도 확인했다. 초기 map은 비어 있으므로 비어 있지 않은 첫 frame을 거부하고, 같은 authored entity라도 expanded model draw 변경을 막을 수 있었다. CPU에서 canonical dense draw slot map을 한 번 준비·장부/registry에 등록하고 candidate first draw에서 사용한 뒤 성공 submit에만 active Arc를 교체하는 계약을 먼저 추가했다. 이 수정의 source·compile·실제 initial/topology GPU 시험은 후속이며 source 발견을 통과로 세지 않는다.
+
+첫 renderer `cargo check -p daedalus-renderer --lib --all-features --locked`의 보존된 attempt02는 exit101이다. CPU backing Result 전파와 camera closure의 오류 type 추론이 남았고 unused import/mut 경고도 있었다. raw `p03-render-device-libcheck-luna-attempt02.log`의 SHA-256은 `6d37f55a17a3918755061f8c311860d7ca37d9da37242053acb7d40362d46046`이다. attempt01 파일은0byte(`e3b0c442…b855`)여서 진단 원본 근거로 쓸 수 없다. 작업자도 다른 원본을 보유하지 않았고 retained evidence로 원인을 확인할 수 없어 출력 유실/원인 불명으로 기록했다. 파일을 덮어쓰거나 과거 진단을 복원하지 않는다.
+
+소유자별 최소 compile 수정 뒤 attempt03은 exit0이다. raw `p03-render-device-libcheck-luna-attempt03.log`의 SHA-256은 `fedcd7631152376d160bddb6b751e0f1a5f308b5483d264011611c88d591a3e9`이며 output/종료 footer가 보존됐다. in-progress API의 dead-code/unused 경고7개가 남아 strict 검사 통과는 아니다. 알려진 slot-map 기능 결함은 이 초기 type-check와 별도 수정 대상이고 아직 renderer CPU/GPU 테스트는 실행하지 않았다. Cargo lease를 반환한 뒤 canonical slot map의 CPU 준비와 GPU 소비를 다시 disjoint source-only 작업으로 배정했다.
+
 ## runtime source 최종 동결·로컬 검증
 
 마지막 fixture 리뷰에서 nonwaiting port의 정상 호출도 actor와 경합하면 합법적인 Busy를 반환할 수 있음을 확인했다. 테스트의 정상 성공/오류 판정만 기존 방식의 유한 Busy 재시도로 묶고, mutex를 의도적으로 잡고 Busy를 검사하는 assertion은 그대로 유지했다. production·deadline·임의 sleep을 바꾸지 않았다. 이 수정 뒤 runtime source 네 파일을 동결했다.

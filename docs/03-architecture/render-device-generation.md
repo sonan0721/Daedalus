@@ -28,6 +28,8 @@ CPU generation의 private canonical resource-set token을 stage admission 때 �
 
 성공한 managed submission은 device-active token도 같은 transaction에서 갱신한다. 이후 같은 generation의 새 pose는 active token·identity·정확한 limits로 O(1) 확인하며 기존 CPU validation으로 slot writes를 만든다. Busy/실패 전에는 active token을 바꾸지 않는다. legacy activation이 실제 ready packet을 교체하면 managed token을 지워 stale 권한을 남기지 않는다. old in-flight의 정확한 CpuFrameHandle pin이 이전 token의 실제 수명을 보존하며 작은 token 비용도 bookkeeping에 포함한다.
 
+CPU에서 준비한 canonical dense draw-ID→slot Arc도 candidate와 active를 구분한다. 첫 candidate draw는 candidate map으로 normal/material/UV row를 preflight하고 기존 O(draw) write/encode를 실행하며, 성공한 submit 뒤에만 active map을 Arc-swap한다. 초기 active map이 비어 있거나 expanded model primitive 수/ID가 바뀌어도 이 경계를 사용한다. 같은 active generation의 pose 갱신은 기존 map을 재사용한다. UI에서 후보 HashMap을 다시 만들지 않는다. map의 실제 backing은 CPU registry가 보유하고 device bookkeeping에는 필요한 공유 필드만 센다. legacy activation은 기존 slot planner 결과를 Arc로 감싸 같은 내부 저장형을 사용하며 public API/검증은 보존한다. Busy/실패는 old map/ready/token을 유지한다.
+
 ## admission·전환·회수
 
 기존 geometry64/128MiB preferred/hard·256/512 mesh, asset128/256MiB working/hard·texture/sampler256/512·bind group1024/2048를 유지한다. 한 후보의 working set과 old-ready+candidate+incomplete-retired union의 hard ceiling을 각각 적용한다. 기존 LRU/victim planner의 protected set이 이 union을 포함해야 한다. 완료된 unpinned cache만 victim이며 pinned shortage는 Busy, 후보 자체의 oversize/unsupported는 영구 오류다.
@@ -56,7 +58,7 @@ wgpu write는 다음 submit과 연결되므로 stage write만 enqueue한 채 다
 
 새 window 경로는 초기 packet 없이 clear/loading으로 시작한다. 실제 frame.present 호출 뒤 game packet/view만 host ACK로 전달한다. bootstrap·queue submit·completion을 game present로 부르지 않는다. 기존 packet-window constructor의 legacy fallback을 새 bootstrap 구현으로 보고하지 않는다.
 
-UI의 Window/Surface를 먼저 같은 thread에서 해제하고 PacketRenderer만 capacity1 disposition으로 기존 CPU owner에 반환한다. 정상/error/초기 device 없음 경로가 모두 disposition을 보낸다. worker는 window 시작 뒤 stop만 보고 먼저 종료하지 않으며 disposition→nonwaiting drain→실제 owner/CPU backing 회수 뒤 종료한다. per-close janitor·UI unfinished join은 없다. 이 window/host 구현은 별도 작업이고 device slice의 drain API만으로 인수하지 않는다.
+UI의 Window/Surface를 먼저 같은 thread에서 해제하고 device owner를 capacity1 disposition으로 기존 CPU owner에 반환한다. 완성된 PacketRenderer·변환 전 Renderer·부분 device 초기화·engine handle 생성 전/결과 불명 실패는 [host 계약](native-project-host.md)의 후속 additive 경계에서 구분한다. worker는 window 시작 뒤 stop만 보고 먼저 종료하지 않으며 disposition→nonwaiting drain→실제 owner/CPU backing 회수 뒤 종료한다. per-close janitor·UI unfinished join은 없다. 이 window/host 구현은 별도 작업이고 device slice의 drain API만으로 인수하지 않는다.
 
 Luna xhigh device 작업자는 `packet_renderer.rs`, 필요 시 그 private submodule, `renderer.rs`의 GPU 생성 helper와 해당 tests만 소유한다. packet/CPU/lib exports 소유자와 projection/export 목록을 먼저 공유한다. runtime/window/CLI/manifest/lock/CI는 수정하지 않는다. 한 Cargo/장치 lease를 유지한다.
 

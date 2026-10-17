@@ -3,6 +3,7 @@
 mod clock;
 pub mod live_session;
 pub mod project;
+mod project_activation;
 #[cfg(feature = "audio")]
 mod project_audio;
 mod project_preparation;
@@ -47,6 +48,12 @@ pub use project::{
     ProjectEntityState, ProjectSession, ProjectSessionCommandError, ProjectSessionReadError,
     ProjectSessionReport, ProjectSessionStartError,
 };
+pub use project_activation::{
+    ActivationId, AssetActivationCommandOutcome, AssetActivationCommandResult,
+    AssetActivationFailure, AssetActivationMemoryStatus, AssetActivationOperation,
+    AssetActivationRequestResult, AssetActivationState, AssetActivationStatus,
+    AssetActivationSummary,
+};
 #[cfg(feature = "audio")]
 pub use project_audio::{
     AudioBankLimits, AudioBankResource, OfflineAudioSummary, SessionAudioBackend,
@@ -58,7 +65,9 @@ pub use project_audio::{
 pub(crate) use project_preparation::MAX_PREPARATION_STATUS_RESULT_BYTES;
 pub use project_preparation::{
     AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
-    AssetPreparationResult, AssetPreparationStatus, NativeProjectPreparationOptions,
+    AssetPreparationResult, AssetPreparationStatus, NativeProjectActivationService,
+    NativeProjectActivationShutdown, NativeProjectActivationShutdownError,
+    NativeProjectActivationStartError, NativeProjectPreparationOptions,
     NativeProjectPreparationService, NativeProjectPreparationStartError,
     PreparationCandidateSummary, PreparationFailure, PreparationId, PreparationState,
     PreparationWorkerShutdown, PreparationWorkerShutdownError, ProjectPreparationPort,

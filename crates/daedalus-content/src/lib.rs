@@ -2,6 +2,7 @@
 //!
 //! This crate deliberately owns no ECS, renderer, I/O runtime, or game-specific rules.
 
+pub mod asset_replacement;
 pub mod assets;
 pub mod navigation;
 pub mod project;
@@ -29,6 +30,11 @@ pub use project::{
     ProjectFileIdentity, ProjectLimits, ProjectManifest, ProjectMaterial, ProjectMesh,
     ProjectPresentation, ProjectTransform, ProjectVertex, load_project, load_project_with_assets,
     load_project_with_limits, prepare_project_from_bytes, prepare_project_with_assets,
+};
+
+pub use asset_replacement::{
+    AssetReplacementCompatibilityError, AssetReplacementMismatch,
+    check_asset_replacement_compatibility,
 };
 
 /// A non-negative monotonically increasing revision used by content snapshots.

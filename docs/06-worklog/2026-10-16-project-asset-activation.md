@@ -1,6 +1,6 @@
 # P03.3b/c 에셋 세대 전환 설계·작업 기록
 
-상태: 선행 P03.3a 인수 후 상세 계약 리뷰 시작·activation source 구현 미착수 · 2026-10-16
+상태: P03.3b.1 로컬 선행 검증·b.2 runtime/CLI/process 구현 중. 실제 generation 전환·b/c 통합 인수 전 · 2026-10-16
 
 ## 문서 목적
 
@@ -10,7 +10,7 @@
 
 [PR14](https://github.com/sonan0721/Daedalus/pull/14)의 head `d766d0dc8abc1bd97b7f7d32ffdc38f86ebd9bff`, CI synthetic merge `ebc93efd8afefa40fec387f79f1602fc8c2f33c7`, 실제 main `275ea360fb53dde3713aca84910781a4c895a8e4`의 tree `8bac52ca92d2df237246a59d554a50a3e318717e`가 같았다. 다섯 CI/두 packaged50·local Rust298/Python61/Metal9/managed·debug/clean package CPU50/native60을 확인해 P03.3a만 인수했다. [준비 작업 기록](2026-10-16-project-asset-preparation.md)이 근거다.
 
-현재 branch는 `feat/project-asset-activation`이다. engine repository에 게임을 추가하지 않으며 D1→별도 D2→별도 D3의 전체 목표는 진행 중이다.
+초기 설계/cache branch `feat/project-asset-activation`은 PR15로 인수했다. 후속 구현 branch는 `feat/project-asset-generation`이며 기준 main은 `c2283cb686ff7eb5589d6e38f66d5e357993531e`다. engine repository에 게임을 추가하지 않으며 D1→별도 D2→별도 D3의 전체 목표는 진행 중이다.
 
 ## 확인한 구현 gap
 
@@ -35,3 +35,199 @@ Luna에게는 `.github/workflows/release.yml` 한 파일의 main push trigger �
 Luna의 read-only 리뷰는 source상 세 가지 선행 gap을 확인했다. runtime worker는 renderer에 의존하지 않아 renderer CPU prepare를 직접 맡길 수 없고, renderer 쪽 staging owner가 필요하다. service/port/CLI의 초기 project Arc가 남아 actor 교체만으로 첫 세대를 회수하지 못한다. worker의 active cooked bytes도 현재 startup 값으로 고정돼 commit/retire의 generation-wide 장부 갱신이 필요하다.
 
 move-only opaque project lease·single handoff slot·off-actor retirement owner를 후보로 제안받았다. candidate의 폐기 요청과 실제 backing release/charge 반환을 구분하고 retirement slot 포화의 pre-commit 처리를 동결해야 한다. 제안한 source getter·crate-private take API는 cross-crate visibility/Clone 노출 문제를 검토한 뒤 확정한다. prepared CPU128MiB/16MiB·audio aggregate256MiB/4MiB도 수치 제안이며 실행 검증/채택 완료가 아니다. actor/consumer handshake와 audio backing 리뷰는 진행 중이다.
+
+추가 renderer source 리뷰는 asset-only commit이 같은 Engine snapshot을 사용할 때의 순서 충돌을 확인했다. 현재 extract는 snapshot.sequence를 packet sequence로 복사하고 renderer transition은 다음 packet의 sequence가 엄격히 증가해야 한다. tick/transform을 유지한 채 asset generation만 바꾸려면 authority snapshot identity와 별도 presentation 순번을 명시하거나 동등한 엄격한 ordering 규칙을 설계해야 한다. generation 검사만 풀어 같은 snapshot을 다시 보내는 수정은 허용하지 않는다.
+
+PR15의 실제 cache restore·compile 구간·기존 packaged50·다섯 CI/main 동일 tree까지 확인했다. [개발 반복 기록](../04-plan/development-iteration-pipeline.md)에 exact identity와 raw log를 둔다. 새 main push 실행은 진행 중이며 activation code가 추가된 것으로 계산하지 않는다.
+
+후속 자동 main push run38909669190도 두 실제 package/staged50·cache restore·Publish skipped를 확인했다. 이 좁은 개발 pipeline 개선은 인수했으며 새 activation source의 근거와 분리한다.
+
+## P03.3b.1 공통 비교기부터 구현
+
+소비자마다 중복 비교를 만들지 않도록 [호환성 상세 계약](../03-architecture/asset-replacement-compatibility.md)을 먼저 동결했다. manifest/asset metadata·entity/component 관계와 authored data는 보존하고, source payload/URI/hash·scene revision/배열 순서의 허용 범위를 명시했다. 큰 JSON을 복사하지 않는4MiB logical reference-index 상한과 deterministic bounded 오류를 둔다. 아직 구현 통과로 체크하지 않는다.
+
+Luna project 담당에게 content 새 module·lib re-export·필요한 기존 project test 최소 변경만 배정했다. 단독 Cargo/shared-target lease와 고유 `p03-compatibility-*-luna-attemptNN.log`를 사용해 focused→content 전체→strict Clippy→content Wasm/fmt를 검사한다. 다른 Luna 두 명은 additive consuming native owner/retirement, 실제 audio Frame backing 회수 seam을 각각 read-only로 조사한다. renderer/runtime/audio의 dependent source는 API를 동결하기 전 수정하지 않는다.
+
+focused attempt01은8개 중6개 통과·2개 실패였다. 하나는 기존 loader가 parent/hierarchy를 거부해 valid PreparedProject fixture를 만들 수 없는 사례였고 허위 입력으로 비교기 지원을 증명하지 않는다. 다른 하나는 entity mismatch를 기대하면서 asset set도 다른 fixture여서 deterministic 우선순위상 AssetSet이 올바르게 먼저 반환된 test 구성 오류였다. 작업자는 같은 asset set의 valid 입력으로 수정 중이며 최초 raw를 보존했다. 아직 최종 통과가 아니다.
+
+후속 focused10/content84·strict content Clippy·content Wasm/scoped fmt는 통과했다. 조정자 review는 동시에 살아 있는 asset/entity/component index 합산·entity마다 반환·checked overflow와 실제 legacy mesh 변경의 source identity를 보강하도록 요청했다. 마지막 review에서 immutability test가 실제 비교한 changed 대신 무관한 candidate의 불변성을 assert하는 빈틈을 발견해 해당 test만 수정/집중 재검증하도록 배정했다. production 비교기 오류로 보고하지 않으며 최종 source hash/로컬 선행 인수는 수정 뒤 기록한다.
+
+수정 후 실제 입력 active/changed의 source digest/files 불변 assertion을 조정자가 확인했다. final focused attempt05는10/10·0.01초로 통과했고 scoped fmt attempt03/diff도 확인했다. module SHA-256 `2398f756a9ee09295d9aaf3310df8e6110d9f74b500c0f048792453882ab14ab`, lib re-export `62137e4082e610b73cf71f105a78ad9ba5568128ea37bdd1d87003e211097662`다. 전체 content84/5.76초·strict Clippy·Wasm은 test-only 마지막 assertion 수정 전 attempt02이며 production 함수는 변경하지 않았다. source review와 이 로컬 선행 근거로 b.1을 다음 runtime 구현의 입력으로 사용한다. PR/main·실제 activation·b/c 전체 인수는 계속 열려 있다.
+
+raw는 `p03-compatibility-focused-luna-attempt01..05.log`, `...content-luna-attempt01..02.log`, `...clippy-luna-attempt01..02.log`, `...wasm-luna-attempt01..02.log`, `...fmt-luna-attempt01..03.log`다. 최초6/8을 포함한 실패를 보존했다. unsupported hierarchy/scene schema branch는 valid loader test로 증명하지 않았고 실제 같은 engine의 activation은 이 단계에서 실행하지 않았다.
+
+## P03.3b.2 다음 소유권 계약
+
+[headless CPU 세대 계약](../03-architecture/headless-asset-generation.md)을 작성했다. 공통 Stage/Commit/Cancel/Status·consuming owner·worker reclamation Arc·같은 snapshot의 새 frame sequence를 명시했다. renderer/audio를 지원한 것으로 우회하지 않고 CPU identity/수명을 먼저 검사하는 b의 내부 단계다. b.1 검증/source 리뷰와 다음 계약의 구현 가능성 확인을 마친 뒤 runtime 코드를 배정한다.
+
+runtime read-only 재검토는 동일 worker/cache·기존 public API 보존과 새 headless factory가 구현 가능함을 확인했다. 같은 후보의 두 번째 다른 Stage는 effect-free Busy, 같은 CommandId는 공통 replay로 고정했다. operation/result/outcome/status/getter·오류 unit variant·inspect/mutate 권한·단조 frame/authority snapshot sequence·CLI decimal wire도 먼저 공유했다. CLI는 기존 네 capability 조합의 base7 반복을 bounded extension composer로 줄이는 좁은 개선을 함께 구현할 계획이다. source 구현/실제 process 통과는 아직 아니다.
+
+b.1 source와 다음 public API/CLI 계약은 `ddcec71`로 branch에 commit/push했다. main에 새 activation이 들어간 것으로 보고하지 않는다. b.1 로컬 선행 검증 뒤 Luna runtime 담당에게 worker/actor/source swap/lib 전체를 함께 맡겨 private handoff를 서로 추측하며 병렬 구현하지 않도록 했다. 별도 CLI 담당은 고정 public API를 사용하는 CLI Rust/DTO/tests만, process 담당은 기존 Python helper/tests만 수정한다. 파일 소유권은 disjoint이고 runtime 담당 한 명만 shared-target Cargo를 사용한다. 나머지는 source-only이며 Python/process 검사는 다음 별도 lease 뒤 실행한다. 조정자는 MD·API/코드 review·통합/실제 artifact/Git을 맡는다.
+
+병행 root renderer read-only 감사는 stage-only의 추가 선행 조건을 찾았다. 현재 resource planner는 같은 제출에서 active를 바꾸므로 geometry `no_active`/새 texture requested set으로 old completed 자원을 victim으로 삼을 수 있다. stage-only에서 active+staged pin/회수를 바꾸지 않으면 last-good을 보존하지 못한다. 전체 upload/draw가 한 submission인 현재 구조도 pump별 진행/예산으로 나누어야 한다. source는 `packet_renderer.rs::plan_resources/submit_packet_frame/commit_resources`, `window.rs::redraw`이며 renderer source를 변경하거나 장치 검사를 실행하지 않았다. 후속 render 상세 동결 때 사용할 gap으로 기록했다.
+
+## b.2 source 분담과 첫 검증 도구 리뷰
+
+공개 API를 먼저 고정한 뒤 CLI는 activation 전용 protocol을 새로 만들지 않고 기존 protocol2 stdio loop를 공유하도록 소스를 작성했다. composer는 기존 base7·audio5·preparation3·activation4 이름을 조합한다. runtime·실제 CLI 연결은 아직 검증 전이다. 구현 body를 기다리느라 adapter source까지 멈추지 않도록, 동결한 factory/getter/outcome을 기준으로 source-only 작업을 진행하고 실제 compile은 provider와 통합 후 수행한다.
+
+runtime source 작업 중 Cargo를 잠깐 명시적으로 보류하고 Python 담당에게 한정 lease를 주었다. fake subprocess/transport/ACK/deadline 검사28개가6.894초에 통과했다. raw `p03-generation-python-luna-attempt01.log` SHA-256은 `66f4cb35716fe1dd91adaea80c386d8f61b314faacf954ef6d591c360e5149c8`다. 검사 뒤 Cargo를 runtime 담당에게 돌려줬다. 실제 engine/CLI 세대 전환은 실행하지 않았으며 stub의 고정 응답을 그 근거로 사용하지 않는다. source-only와 짧은 Python 검사를 겹친 실행 순서의 이전 대비 절감 시간은 측정하지 않았다.
+
+root 후속 source 리뷰는 실제 multi-commit helper의 명령 ID 오류를 찾았다. 첫 Prepare930001→Stage940001→Commit940002 다음에 Prepare930002를 쓰므로 공통 caller high-water보다 작아진다. 실제 CLI 실패를 실행한 것은 아니며 소스와 기존 ledger 계약의 충돌이다. 기능별 번호대 대신 세션 하나의 증가 issuer를 initial transform부터 사용하도록 수정했다. 새 명령은930001~930018 순서이며 replay·stale-generation 오류 뒤 같은 ID 재시도만 의도적으로 재사용한다. owner 종료도 exit0만 보지 않고 실제 `asset_activation_owner=stopped` stderr를 요구한다. 수정 source SHA-256은 smoke `f82180635164046e58a4ee332fd089fbe028b4ecbf4036f9f714d492c8b27edd`, tests `87bd9e399ba29f4817785bac0fac8b83e0a7f3020fab193df8e5bdb582baaa78`다. diff check만 통과했고 이 수정 뒤 Python/실제 CLI는 다음 lease 대기다.
+
+worker 구현에는 commit metadata→pending promotion과 다음 Prepare의 순서도 review 대상으로 공유했다. committed 후보를 stale ready처럼 지우지 않도록 promotion을 먼저 처리하고, handed-off/cancelled candidate의 실제 final backing release 전 quota를 돌려주지 않는다. 이 순서의 테스트 통과는 아직 기록하지 않는다.
+
+CLI adapter source는 고정한 public API 기준으로 먼저 완성해 scoped rustfmt/diff를 통과했다. 기존 stdio pump·capability composer를 공유하고 실제 service를 쓰는 stage→commit→status/frame test를 추가했지만, runtime actor integration/Cargo 검증은 아직 대기다. root는 worker Stop에서 candidate reclamation Arc를 먼저 비우는 경로도 발견해 수정/지연 reader 테스트를 요청했다. 종료 요청이나 actor 종료만으로 worker final drop을 증명하지 않는다.
+
+CLI 담당의 read-only 교차 검토는 helper wire/tags·ACK/retry·단일 issuer와 controller 사이 충돌을 찾지 않았다. 다만 staged/committed summary 자체의 source digest 일치 검사가 빠져 두 assertion을 보강했다. 최종 smoke source SHA-256은 `53c5a3c86d77551eaf764c14626ad62cb64f5e96e926957c53969e534d3b0256`이며 Python 재검증 전이다. renderer 후속 리뷰는 runtime-neutral lease의 신뢰 경계·stage-only completion ledger 재사용·현재 부재한 live presentation ACK를 위 명세에 반영했다. token/callback 새 API는 제안이며 source로 배정하지 않았다.
+
+S86은 최신 웹 문서를 pinned API의 증거로 대신하지 않고 로컬 Cargo registry의 wgpu27.0.1 원본도 읽었다. `src/api/queue.rs` SHA-256은 `a7f918a08db2b084343a6973eae999e5b92ae862f1d0e4515d16fa78179ed993`, `device.rs`는 `02d3a6be80612a669ace9a27d9f90691547989e8b41c69ed903ff25484dcf8f0`다. callback의 thread/비용·write staging·Wait/WebGPU poll 차이를 확인했으며 렌더러 source나 dependency를 변경하지 않았다.
+
+## b.2 첫 compile과 수정본 도구 검사
+
+`cargo check -p daedalus-runtime --all-features --locked` attempt01은 cfg expression 배치·staged borrow를 replay-slot mutable 예약까지 유지한 문제로3개 error와4개 warning을 보고했다. cfg block과 borrow 수명·미사용 항목을 수정한 attempt02는2.27초에 통과했다. 이는 library compile이며 새 activation의 동작 테스트가 아니다. raw는 `p03-generation-focused-luna-attempt01..02.log`이고 attempt02 SHA-256은 `ef59d1f36c49037047f0abd7235e72e45095eaceff8fdfaf3c4ca4062d1a68dd`다.
+
+검증 소유권을 또 넘기는 대신 같은 Luna Cargo 담당자가 완료된 명령 사이에 frozen Python suite를 순차 실행했다. 수정본28/28이7.172초에 통과했다. raw `p03-generation-python-luna-attempt02.log` SHA-256은 `f3eff65ccbc2b8c4cb65173dbd4541f31adf9fb463eaeae62e590cb13bec069b`이며 smoke/tests source는 위 최종 hash와 같았다. 이 suite는 transport/stub 회귀다. 실제 headless actor의 첫 Stage/Commit/replay/frame test와 실제 CLI 실행은 아직 대기다. 취소·stale·retained reader/한도·종료/panic을 포함한 b.2 인수로 확대 해석하지 않는다.
+
+첫 실제 headless test는 all-feature focused attempt03의1/1·0.03초로 통과했다. scene authored revision37→38 준비를 worker gate로 지연하고 Stage의 효과 전 Busy 뒤 같은 caller ID 재시도·실제 Staged/Commit·entity handle/position9/revision1 보존·같은 tick/authority snapshot sequence의 새 generation2/frame·cross-kind world 요청의 activation receipt replay를 검사한다. 네 포맷 payload/실제 renderer/audio 전환 테스트는 아니다. raw `p03-generation-focused-luna-attempt03.log` SHA-256은 `4f413ef6f5496002d5aba73f8f9d7f0861de7b2f28796feebd19779cbc176db1`이다.
+
+그 source의 runtime 전체 all-feature attempt04도 unit90/0.77초·integration2(0.00/0.02초)를 통과했다. raw `p03-generation-allfeatures-luna-attempt04.log` SHA-256은 `d043a8b9cba1459b33d8b98a5ce249a857fabd4b846c40eeda2c9c405038ef47`이다. test import warning1개가 남았고 strict Clippy/default/실제 CLI는 아직 실행 전이다. 후속 review는 취소를 가로지른 stale failure·state/summary 일치와 worker panic join 후 Stopped ledger가0이 되지 않는 경로를 발견했다. 해당 수정과 취소/retirement/panic stress 후 최종 검증이 남아 있으므로 이 중간90/2를 최종 b.2 인수로 쓰지 않는다.
+
+실제 CLI adapter focused attempt01은 strict decimal/unknown field·service-backed stage/commit/frame2개가0.02초에 통과했다(compile11.90초). debug all-feature build는4.00초였고 binary SHA-256은 `84d9b50ae451863a9a6847170b57ff81c1abdf0a598df2f514f78459b7f7bfc0`이다. 이때 test-only unused-mut warning이 있었고 현재 사용을 확인한 뒤 해당 mut만 제거했다. tests source SHA-256은 `18ca8feb051d0ecfb73b5e4febe436143684a91752e30fd6e350f54a42ab39a1`이며 그 수정 뒤 집중 재검증은 대기다.
+
+해당 binary의 실제 `smoke_project.py --asset-activation` attempt01은 initial ProjectInfo에 없는 asset_count를 helper가 요구해 실패했다. 실제 응답의 entity1·예상 source9·digest는 정상이고 ProjectInfo 계약에는 asset_count가 없다. engine field를 추가하지 않고 잘못된 helper assertion만 제거했다. 실제 ready-candidate summary의 기존 asset_count6 검사를 유지한다. 수정 smoke SHA-256은 `c9ceb2b6d0d74bc296eb2c440c1c18e1d47fb596d6ded7466172f28837c0658e`다. Python assertion-only 변경이라 같은 binary로 실제 process를 재검증하며 Cargo rebuild/도구28 전체를 이 수정만으로 반복하지 않는다.
+
+raw는 `p03-generation-cli-{activation,build,smoke}-luna-attempt01.log`다. focused log SHA-256은 `e9bd4ee78038ca89a66c26b0c20f70665628386498914a3cf9000fe0186b89e1`, 실패 smoke는 `df56b6aae5d6431cca3b35386ec6b3e14b0388c535a4dde6e4a1a5722fc664cd`이며 최초 실패를 보존한다. 아직 네 포맷 연속 commit이 통과한 것으로 기록하지 않는다.
+
+같은 binary와 수정 helper의 actual smoke attempt02는28/28(CPU18+activation10)·1.005974초에 통과했다. source PNG→model node→atlas→WAV를 같은 session1에서 순서대로 commit해 generation2/3/4/5와 frame3/4/5/6을 관찰했다. authority tick1·기존 handle/transform/revision·authority snapshot sequence를 보존하고 replay·stale expected-generation 같은 ID 재시도·실제 Staged 취소·entity-set incompatibility의 last-good·owner Stopped도 검사했다. 최종 active cooked21038 + 실패 candidate21056 = 논리적42094bytes, retired0이었다. 이 CPU 결과를 GPU 픽셀/실제 audio 전환으로 보고하지 않는다.
+
+raw `p03-generation-cli-smoke-luna-attempt02.log` SHA-256은 `4b6c9ed0bc3022c1459ff1711b32dd805f6790639c47452282ef47a350fe4ad9`이며 조정자가 JSON·binary identity·증가 caller ID930001~930018과 실제 commit/status를 독립 확인했다. Python-only 수정 뒤 동일 binary를 사용해 불필요한 rebuild를 피한 실제 사례다. 시간 개선 배율은 측정하지 않았다. 취소 경계의 지연 결과·held reader/retirement 포화·panic ledger와 반복 shutdown의 최종 regression을 다음으로 남겨 b.2/전체 b/c를 아직 체크하지 않는다.
+
+## 중간 source checkpoint
+
+이후 focused test에 worker shared-state 잠금으로 Commit Busy를 유발했다. Busy 뒤 과거에 사용하지 않은 caller88009가 기존 high-water88012와 함께 ReplayWindowExpired로 거부되고 같은 Commit88013 재시도는 성공한다. 이는 거부된 ID의 재사용뿐 아니라 기존 watermark를 잃지 않는지도 검사한다. all-feature focused attempt07은1/1·0.02초, SHA-256 `33bef6e4311f1ce48b25b908de8fe89815fcad187db682d19232a96309e3a2b3`다. legacy preparation worker-panic test도 반복 WorkerPanicked와 join 뒤 byte/count0·cache reopen assertion을 보강해 attempt06의1/1·0.01초로 통과했다. 해당 raw SHA-256은 `fb6b7776a541b33fc1f997fe29fd3c8f68e206de52fa453a01c953eaba711931`이다. consuming activation owner의 panic/held reader 검증까지 대신하지 않는다.
+
+default-feature focused attempt01은 gate release/wait helper가 audio feature에 잘못 묶여2개 compile error를 보고했다. test-only cfg로 바로잡은 attempt02는1/1·0.02초로 통과했다(compile3.56초). raw `p03-generation-default-luna-attempt01..02.log`를 보존했고 pass log SHA-256은 `57a7c563008f12cbba38f05992bdff4eb0155fd2a2238f5ee95f89328450c7cf`다. 전체 default suite·post-edit all-feature 전체·strict Clippy는 아직 대기다.
+
+작업자는 runtime 다섯 파일의 scoped rustfmt/diff 뒤 source를 잠시 동결했다. 이 동작 가능한 일반 경로와 adapter/helper·검증 기록을 중간 feature commit으로 남기고 lifecycle/stress를 이어 간다. b.2 체크/PR/main 인수나 전체 목표 완료를 뜻하지 않는다. renderer/audio 세대 전환·SDK/MCP/제품 인수는 그대로 남는다.
+
+중간 feature source는 `66f190c`로 commit/push했고 clean tree를 확인한 뒤 runtime 담당에게 edit/Cargo lease를 돌려줬다. 별도 renderer GPU 상세 조사 두 명은 read-only로 진행했다. [b.3 상세 초안](../03-architecture/staged-render-asset-generation.md)은 whole-record/texture-row upload 단위·old-ready/staged pin·source token과 별도 CPU 복사본·final window outcome을 유지한 join의 순환 대기 위험을 정리한다. 공통 planner/ledger를 확장하고 새 renderer를 만들지 않기 위한 문서다. API/수치와 b.2 predecessor 인수 전이라 source를 배정하지 않는다. S87 공식 자료 확인으로 auto-trait-only Arc에 공유 marker trait가 문법상 필수라는 리뷰 가정도 바로잡았다. pinned1.94 구현 검증은 후속이다.
+
+## b.2 lifecycle 집중 검증 계속
+
+실제 worker가 current 확인과 StageResult 계산을 마친 뒤 send 직전에 test-only gate로 멈추게 했다. Cancel을 가로지른 Ready가 다시 staged되지 않고, 새 Prepare를 가로지른 incompatible 오류가 최신 failure를 덮지 않으며 epoch2가 실제 CpuPrepared/Staged에 도달한다. attempt01 delayed2/2·0.03초, raw `p03-generation-focused-lifecycle-luna-attempt01.log` SHA-256 `6a8043bdc4281cd941af1d50b277b0b08833d54488d932b8e56744b7d19890b0`다. 고정 Staged 응답이나 가짜 worker로 대체하지 않았다.
+
+Commit source/counter 효과 뒤 result cache 전에 actor panic을 넣은 실제 service test는 ticket의 해당 caller OutcomeUnknown·worker cleanup 완료·반복 ActorFailed를 확인했다. attempt02의1/1·0.01초, raw SHA-256 `679b6edc9e1e5f9033402b3a9044076df6318e06469e8013af488f35bf01ac52`다. applied 효과를 unapplied로 보고하거나 rollback하지 않는다.
+
+낮춘 catalog ceiling을 initial cooked bytes의 정확한2배로 둔 test는 pending promotion 동안 Prepare Busy→promotion 뒤 held old source의 retired charge 때문에 Capacity→reader Arc release/worker 실제 회수 뒤 같은 Prepare ID의 epoch2 성공을 확인했다. attempt03은 이 test의 borrowed Result assertion 두 곳 타입 불일치로 compile 실패했다. assertion 형식을 수정한 attempt04는1/1·0.04초로 통과했고 raw SHA-256 `8a669236b893b90893cc5faf2399c6d902df289915d7ece0611ca7c58dfb6562`다. 모든 attempt raw를 보존하며 전체 post-edit/default/CI 통과로 확대하지 않는다.
+
+activation consuming owner 자체의 worker-panic test는 attempt05에서 종료한 actor에 Status를 다시 제출하려다 Stopped로 실패했다. attempt06은 actor 종료가 반드시 worker-panic EngineError라고 가정해 실패했다. owner try_shutdown의 Stop 요청과 actor의 panic 감지 중 먼저 진행한 경로에 따라 StopRequested도 정상이다. attempt07은 통과했으나 반대 순서를 가정한 assertion이 남은 것을 root가 발견했다. 두 정당한 termination만 허용하고 EngineError의 원인 문자열을 확인하는 attempt09는1/1·0.05초로 통과했다. 외부 owner의 오류는 어느 순서든 반복 WorkerPanicked를 유지한다. 이들은 test 관찰 조건의 수정이며 임의 termination을 허용해 실패를 숨기지 않는다.
+
+owner Drop을 import gate 동안 실행한 attempt08도1/1로 통과했다. Drop은 join하지 않고 반환했고 실제 worker가 gate/정리를 마치기 전 cache lock은 Busy, 이후 reopen은 성공했다. raw SHA-256은 `ae5fd7880cf68bb51336641936e1f11fb870c3c13f2c848b293868e24af2b0b8`다. 이어 runtime default84+integration2·all-feature96+integration2·strict all-target Clippy가 통과했지만 held frame/held source의 종료 검사를 추가 중이므로 최종 source 인수가 아니다. raw는 `p03-generation-runtime-{default,allfeatures,clippy}-luna-attemptNN.log`다.
+
+audio read-only 리뷰도 마쳤다. pinned Kira0.12.5의 render-owned sound가 실제 Frame Arc를 잡고 있고 handle reap은 이를 증명하지 않는다. weak observer만으로 callback의 마지막 큰 free를 막을 수 없어 실제 leaf 공유 store·generation alias/voice·cleanup strong sentinel과 정확한 owner baseline이 필요하다. project-audio/service source map은 명세에 반영했으며 audio 새 API·multibank/실제 회수는 아직 구현하지 않았다. 리뷰 담당은 source 수정과 tests를 실행하지 않았다.
+
+## b.2 retained reader 검증 checkpoint
+
+held-frame test는 retained-frame 한도를1로 둔 실제 service에서 CommitApplied 뒤에도 기존 generation1 frame이 남는 것을 확인했다. 그 reader를 해제하면 추가 Step 없이 같은 tick·authority snapshot sequence로 generation2/frame을 게시한다. lifecycle attempt10은1/1 통과했고 raw SHA-256은 `2dde9efb1af7eb7f5fc55c6101f5ee5745248b5cdbf39cf62ae7b15d2d352c03`이다. 이는 headless publication이며 화면 표시 성공이 아니다.
+
+실제 retired PreparedProject Arc를 private test reader가 유지한 attempt11도1/1 통과했다. actor shutdown report가 생겨도 worker owner는 Stopping을 유지했고 source reader를 해제한 뒤에만 Stopped에 도달했다. raw SHA-256은 `7d033ae6e42fbfd93d18ccfb6b128f0e0f59938f706e3e60668fd64c13fc1579`다. test assertion이 panic해도 held Arc가 worker를 영구 보류하지 않도록 test-only mutex-backed RAII guard를 사용했다. 기존 promotion/budget/retry test의 guard 변경 뒤 attempt12도1/1 통과했고 SHA-256은 `7b49cda730e900de292756caf82211a7b20f724e2f53099fbce3d4af232de821`이다.
+
+이 checkpoint의 default runtime은86 unit+2 integration, all-feature는98 unit+2 integration, strict all-target/all-feature Clippy가 통과했다. 각각 `p03-generation-runtime-default-luna-attempt03.log` (`d4827329c4f71b84a550d8520def6ef22718e46b857569f46731eed4b68eca97`), `...allfeatures-luna-attempt02.log` (`7734d9013317672d689056ae92987be3d1d63b3d46380337c2b8c73576de39f2`), `...clippy-luna-attempt02.log` (`054625d27774ac2534699c2977b175205d5cbfaf04e412fdae313fdad0cfe32c`)다. 조정자가 raw의 counts/hash와 production에 노출되지 않는 hooks를 대조했다. 이 source를 다음 중간 commit으로 보존한다.
+
+계약 대조는 exact activation ID 오류·legacy unavailable·실제 staged/pending 중 stop·session startup 실패의 cache cleanup·status 상한의 독립 검증이 아직 없음을 드러냈다. 이 필수 경계의 최소 검증을 기존 service/helpers로 보완한 뒤 CLI/통합/clean package/PR로 확장한다. 위98/86은 해당 checkpoint의 근거이며 후속 source의 최종 인수로 재사용하지 않는다. u64 증가와 Commit capacity의 경계는 source path 및 재현 가능성을 함께 검토한다. b.2·전체 b/c·D1/D2/D3는 계속 미완료다.
+
+## b.2 마지막 로컬 경계와 기록 수정
+
+default/preparation-only factory의 activation unavailable·실제 actor의 foreign/zero/future/expired preparation/activation ID·거부된 caller ID의 정상 재사용을 검사했다. Staging worker와 실제 Staged source를 보유한 actor의 stop은 Stopping을 유지한 뒤 실제 해제/종료한다. invalid session config의 startup 실패 뒤에는 cache lock을 즉시 다시 열 수 있다. actual incompatible topology Failed의 code/message/StableId와 logical status footprint/32KiB accounting도 검사했다. boundary attempt01은 ID1건, attempt02는 activation10건, attempt03/04는 각각 default unavailable·preparation replay1건을 통과했다. raw는 `p03-generation-boundary-luna-attempt01..04.log`다.
+
+최종 runtime은 default90 unit+integration2, all-feature102 unit+integration2를 통과했다. 이후 actor pause guard를 submit/wait 전에 생성하도록 test-only RAII 순서만 보강했고 stop-focused attempt05의1/1 및 최종 strict Clippy/fmt를 확인했다. source hash는 session_control `2cb892b7a09b8a749f8ebdf898096683d3dae5f3b21a4ddb82f70ed06a1dae0d`, project_preparation `17fcaa120b5a7a7cbedc8fe95491c9abbc3c4cffc4ca7c8ad7f2cbf339850d1b`다. upcoming workspace all-feature 회귀는 이 최종 test source를 포함한다. exact StagePending stop은 worker loop의 Stop 우선 순서를 source-review했고, u64 checked-add exhaustion은 실행으로 강제하지 않았다. Commit은 aggregate charge를 재분배하므로 별도 Capacity branch가 없으며 retained retirement는 효과 전 Busy다. 이 둘을 실행한 경계 시험으로 부풀리지 않는다.
+
+**원본 로그 손실 정정:** 마지막 작업자가 runtime default/allfeatures/clippy의 기존 attempt 번호를 재사용했다. 조정자가 앞서 확인한98/86 checkpoint의 Clippy attempt02(`054625...`)와 이전84/96의 일부 raw가 덮어써졌다. 과거 통과 관찰/hash 기록은 유지하지만 해당 원본 파일이 현재 남아 있다고 주장하지 않는다. root는 새 raw를 `p03-generation-boundary-runtime-default-luna-attempt01.log` (`29817569f2af0b0a36cd6a844a6b00a35d2c4e34a8b003cf7b6d15c718b03f13`), `...allfeatures-luna-attempt01.log` (`3b58ac07adb93481c29f91bb991de514952a8b1fa2ebf17ed5e9664da48ff77e`), `...clippy-luna-attempt01.log` (constant-assertion lint 실패), `...clippy-luna-attempt02.log` (`96914465c88c145ad6ef22626c2980763d35f8557013533bb7f9b5a5c02d40e4`, 통과)로 옮겨 보존했다. 재실행 결과를 과거 원본으로 재구성하지 않는다. 이후 task별 고유 prefix와 exclusive/noclobber 생성을 필수로 해 충돌 때 먼저 실패시킨다.
+
+CPU helper에는 protocol1/activation+audio 실제 사전 옵션 거부를 추가했다. 동일 timeout/process 유틸리티를 쓰고 예상 오류·nonzero·stdout 없음·directory/cache 미생성을 함께 검사한다. wrong diagnostic/path 생성/zero exit/가짜 service stdout을 허용하지 않는 stub 회귀도 둔다. CLI의 `main -> Result`/boxed StringError Debug는 고정 로컬 Rust std source를 대조해 quoted stderr로 맞췄다. actual CLI는 다음 단계에서 확인한다. Python 전체 discovery는 변경 전64/10.060초(root attempt01), 변경 후65/11.257초(Luna attempt01)를 통과했다. 새 suite raw `p03-generation-python-discovery-luna-attempt01.log` SHA-256은 `d81ebc4fd2a32d6cd45cd8f07fe52fa1b584e2818163f294e8f7d0f344507175`다. 두 시간은 검사 범위가 달라 속도 비교가 아니다.
+
+## ee64850 통합 첫 실행
+
+위 source를 `ee64850`에 commit/push하고 clean tree에서 CLI 담당에게 단독 검증 lease를 넘겼다. CLI default34건과 strict Clippy, workspace fmt·all-feature check·strict all-target/all-feature Clippy가 통과했다. all-feature CLI test/Clippy는 별도 중복 수행하지 않고 workspace 검사에 포함한다. CLI test attempt01/02는 기존 이름 충돌을 exclusive 생성이 거부해 Cargo가 실행되지 않았다. 빈 파일을 재사용하지 않고 attempt03에서 실제34건을 실행했다.
+
+`final-workspace-test-attempt01.log`는 runtime101/102로 실패했다. `native_worker_reuses_one_cache_coalesces_to_latest_and_releases_owner_on_shutdown`의 `port.try_prepare(2).unwrap()`가 정상적으로 가능한 효과 전 Busy를 처리하지 못했다. 실패 raw SHA-256은 `06b9c1195f2199ac70ec181f3926afe3ebc12c07e2ed304d62b19e7035af58ab`다. production port를 blocking으로 바꾸거나 직렬 test 실행으로 실패를 숨기지 않는다. runtime 담당이 해당 test 모듈의 같은 가정을 점검하고 Busy만 유한 재시도하는 test helper로 보완한 뒤 runtime/전체 workspace 회귀를 다시 실행한다. 아직 actual combined CLI·managed·GPU/native·clean package·CI 인수는 실행 전이다.
+
+첫 통합의 check/Clippy raw는 `final-workspace-check-attempt01.log` (`a77f796b505b4a6b626ce70722f00aa652d21ac0fb589fe15df42e045bd2003f`), `final-workspace-clippy-attempt01.log` (`bb176bf0657621ca588031da426cfb5880ba89ea90f6f7284aae0036fd42166c`)다. CLI default raw `p03-generation-final-cli-test-attempt03.log` SHA-256은 `339b25c7e3c5798d556b0ab21d53f29ba554788e2d1ac344eac60e63fa4035a6`, Clippy는 `731a5f01d508d21bf746b5f0a0d0070e68ab98388e3d84f7fd6270aa43cce904`다. 통과한 compile/lint를 실패한 전체 test의 대체 근거로 사용하지 않는다.
+
+Busy 수정은 `project_preparation.rs`의 cfg(test) 모듈에만 적용했다. 공통 helper는 Busy만 yield/5초 deadline 안에 재시도하고 나머지 Result는 원래 assertion에 돌려준다. 해당 모듈의 기대 성공/typed error 호출을 함께 보완해 같은 비동기 가정을 반복 수정하지 않도록 했고, blocking startup bind와 production 구현은 그대로다. formerly failing focused1·default90+2·all-feature102+2·strict runtime all-target Clippy/fmt가 통과했다. source SHA-256은 `72a919aee255751cc8fddc10bfe0100d965804cd0b4e12510eeec91e7ceeeca2`다.
+
+고유/exclusive raw는 `p03-generation-portbusy-{focused,default,allfeatures,clippy}-luna-attempt01.log`다. all-feature SHA-256은 `4610583ac6b5a4105de91be0b3c552dc33e78764b8ab4261bc8f4ea060e20ba2`, Clippy는 `531f1679cab9e747a306c36395bf58dbef0cffff1017c9aacb2ec8575fdf2fbd`다. 다음 workspace test는 중간 실패로 실행되지 못한 나머지 crate까지 포함해 다시 수행한다. 앞서 통과한 workspace check/Clippy를 반복하는 대신 변경한 runtime test source의 strict Clippy와 최종 전체 test를 대조한다.
+
+## 9952b7f 최종 CPU·managed 통합
+
+test-only 수정/source review를 `9952b7fde8710b396a24ace45f3783dc45ff7678`에 commit/push하고 clean tree에서 재검증했다. 전체 workspace all-feature test는325 passed/0 failed/10 ignored로 통과했다. 장치 ignored10은 별도 실행 전이다. raw `p03-generation-integration-workspace-test-attempt01.log` SHA-256은 `a7e95c12ccc5944bfdda625fc75aa814bb2e786627132d1b6b9cc36e63aae7e1`다.
+
+fresh all-feature CLI build는3.83초였고 binary SHA-256은 `dc713f90e275ea44a5e87bd25ed92c889355c1657f28e95dfb4ec08636958064`다. 실제 `--assets --audio --asset-preparation --asset-activation` helper는62/62·1.882661초로 통과했고 report의 binary hash도 일치했다. 기존 preparation/offline audio와 headless activation은 서로 다른 지원 조합의 sub-smoke다. activation 안에서는 같은 session의 PNG/model/atlas/WAV commit 네 번·generation2~5·authority/live entity 보존과 추가 pre-I/O 옵션 거부2개를 확인했다. raw JSON `p03-generation-integration-smoke-attempt01.json` SHA-256은 `5b0168b00d9107c48f0d52cdf7276aa58205dcdfe6384832362c81c9f9f36e55`다.
+
+all-feature view의 실제 잘못된 옵션도 고유 nonexistent path에 실행했다. exit1·stdout0·예상 generation-consumer 오류·directory/cache 미생성을 확인했고 창/GPU는 만들지 않았다. 첫 verifier가 Rust Error/quote wrapper를 기대값에서 빼먹어 실패했으나 원래 product 출력은 정상이었다. 보존한 원래 stderr를 verifier attempt02로 재검사했으며 제품을 다시 실행하지 않았다. raw는 `p03-generation-integration-preio-attempt01.*`, `...preio-verify-attempt02.log`다.
+
+locked native bridge build 뒤 기본 PATH의 구 SDK6/7 선택으로 managed build가 시작되지 않았다(`final-managed-dotnet-build-attempt01.log`). 사용자에게 재설치를 요청하거나 global.json을 낮추지 않았다. root는 이미 설치된 `$HOME/.dotnet/sdk/10.0.402`와 executable을 확인했고 해당 DOTNET_ROOT/실행 경로로만 재시도했다. SDK10.0.402/Host10.0.13/osx-arm64의 Release build는3.16초·경고0/오류0, actual Rust self-test ABI1, native round-trip/module lifecycle2 scenario가 통과했다. 이는 기존 transform/module 교체 SDK의 회귀이며 project activation managed binding을 새로 지원한 것은 아니다.
+
+raw `p03-generation-managed-pinned-{build,selftest,integration}-attempt01.log` SHA-256은 각각 `b26c81706c24e74002ed3d79b029b523e9cb74c19c3618eabef04e4a1a275419`, `42f005ef0be582805f855df467f61b8c8502be01a8b60a94f69cea62a913e297`, `c8d3f1bf7cc40103b5de5fa7d5892d913c2825920e530d43fe66cbc52e9b776f`다. actual bridge dylib은 `619f81f8a80b326d4287722ac844a280a1e3e9d4359a93b360b13ceedc678b6f`다. C# 경로 재시도 때문에 이미 통과한 Rust/CLI 검사를 반복하지 않았다.
+
+이 근거 뒤에만 기존 CI staged step에 activation flag를 추가하도록 Luna에게 배정했다. YAML/문서 동결→clean local package→실제 Metal/추출 binary의 combined CPU/native 검사→두 staged CI/다섯 체크/main tree 인수는 아직 남아 있다. 기존 package backend·단일 helper를 재사용하고 새로운 job/tag/공개 Release는 만들지 않는다.
+
+## 73f0a69 배포/장치와 PR16의 인수 실패
+
+Luna의 CI 변경은 기존 step 이름과 activation flag 추가뿐이다. Ruby Psych/diff 검증 뒤 `73f0a696dcf1d2f38b363c110e4c75af13f9bac0`에 commit/push했고 clean local package를 만들었다. release compile15.57초, build ID `20261016T153410Z-0f7b501b51a844139c742c2635abcd67`, manifest dirty=false·해당 exact_commit을 확인했다. archive SHA-256은 `a224860e3b5718fc3593916e6bd75ed19894276de729b047c263aaeb363efcad`, extracted binary는 manifest와 같은 `62c082a900017035e208f53965bd4743f7db266e733131cf34c7afdf9e880e4f`다. raw package log는 `p03-generation-package-root-attempt01.log`다.
+
+Apple M3 Pro/Metal의 실제 ignored renderer8+capture1=9건이 통과했다. raw `p03-generation-metal-root-attempt01.log` SHA-256은 `7a02d591b027e1a1a404f16fab7b1630f1dd17ddb2b1dbd4324f3da70c1b4fd9`다. 같은 archive에서 실제 추출한 CLI의 `--assets --view --models --sprites --audio --audio-native --asset-preparation --asset-activation` 한 helper invocation은72/72·21.427757초, stderr0으로 통과했다. 지원 조합별 별도 sub-smoke이며 native 화면/audio와 headless activation 동시 서비스가 아니다. native voice는 backend Ended를 관찰했고 speaker loopback을 측정하지 않았다. raw JSON `p03-generation-extracted-smoke-root-attempt01.json` SHA-256은 `0b3c0d2533f150a9f1f9ac83fa4961f902e238b506574761602b3586b47c7b2c`다.
+
+동결 source의 로컬 package/장치 QA와 독립 원격 CI를 겹치기 위해 [초안 PR16](https://github.com/sonan0721/Daedalus/pull/16)을 만들었다. CI synthetic `a547b879794f08d1bae81fe7cc785dfa5275ed0f`와 head의 tree는 `b4c68058fc25fa1b836ec31109ef26842989fc57`로 같다. docs/managed/두 package는 성공, 양쪽 새 staged CPU62·Linux linkage·Publish skipped도 확인했다. macOS binary `eedf3014f5896de0e5329dcaed8158c5dfb8ad6e0d1a8288a4075ac55cf191e3`, Linux `2b638b54216bf5c1ac43c8361c1f4baf618738272af5c69ac4debf9374631408`이고 각62-check 시간은4.586456/1.018233초다. runner/범위가 달라 local 실행과 속도 비교하지 않는다. raw는 `p03-generation-pr16-{release-jobs,macos,linux,managed}-root-attempt01.*`다.
+
+**PR 인수는 실패했고 병합하지 않았다.** Rust run38925079796은 actor ID boundary test에서 Staged 대기5초 뒤 actual Staging으로 실패했다. raw `p03-generation-pr16-rust-root-attempt01.log`를 보존했다. root source review는 Stage의 `try_stage`가 worker를 깨운 뒤 `drain_stage_results`로 전부 버리는 순서에서 새 valid 결과도 사라질 수 있음을 찾았다. runtime 담당에게 실제 worker 결과가 actor cleanup보다 먼저 queued되도록 강제하는 regression→원인 확인→최소 수정과 재검증을 배정했다. timeout 증가/직렬 test/단순 CI 재실행으로 넘기지 않는다. 효과 전 Busy와 stale 결과 처리도 유지해야 한다. 원인 재현·수정 source/package/CI는 아직 미검증이며 b.2/b/c/D1/D2/D3는 미완료다. PR은 조사 중 draft로 돌린다.
+
+## Stage 결과 유실의 결정적 재현과 최소 수정
+
+실제 actor를 성공한 Stage admission 직후, 실제 worker를 `SyncSender::send` 성공 직후 멈추는 cfg(test) rendezvous를 추가했다. worker Ready가 capacity-one 채널에 실제로 들어간 상태에서 actor를 재개한다. 기존 drain을 둔 regression은 같은 Staging 상태로5.01초 뒤 실패했다. `p03-generation-stagehandoff-red-attempt01.log` SHA-256은 `3e7d935a5ae0a5f1b45fcee0f2e7b88dc9856e5191ff66f5851727ff3a144746`이다. 관측된 CI 실패를 단순한 test flake로 처리하지 않았다.
+
+production의 핵심 수정은 성공한 Stage 뒤 무조건 drain 한 곳의 제거다. 기존 poll/consume의 sequence/epoch/current/cancel 검사로 새 결과를 처리한다. Prepare/Cancel은 먼저 기존 작업을 무효화하므로 그 cleanup은 유지했다. 별도 read-only 리뷰도 다른 reachable valid-result 유실을 찾지 못했고 deferred Ready·candidate charge·actor→worker 종료 순서를 대조했다. 새로운 generic consumer/filter framework·public API·dependency를 추가하지 않았다.
+
+같은 regression은 수정 뒤 실제 Staged→같은 session의 CommitApplied generation2까지 통과했다. focused attempt01은 그 이후 정상적인 Commit Busy를 즉시 성공으로 기대해 실패했고 기존 bounded helper로 수정했다. Stage admission 자체도 ActivationBusy/PreparationBusy만 같은 ID로 재시도하고 매 반복에 deadline을 확인한다. guard는 실패 시 두 rendezvous를 해제한다. final focused attempt04 SHA-256은 `8a7a365775d0882d633aa434f8d1fab177222dd2febbc4be73a453712508e401`이다. 최초 repro attempt01은 exact-filter 실수로0건이어서 재현 근거로 세지 않는다.
+
+default91+integration2, all-feature103+integration2·strict runtime Clippy/fmt가 통과했다. default 전체는 마지막 test-only retry refinement 전이며 이후 all-feature 전체/strict Clippy가 최종 source를 포함한다. raw는 `p03-generation-stagehandoff-runtime-{default,allfeatures,clippy}-attempt01.log`다. all-feature SHA-256은 `0a2ebc36db9ccab9d45d097789acb9bdab90fa0ea2ab41af6ae6316553106447`, Clippy는 `6d2bba2797d2417514bda964bb0624493de6c5984a20c05a8703aeeff1119424`다. final source hash는 session_control `b05bd0e2046fc215705a699b33d07aff7d28eb1b40f02687f57d5092df1e7570`, project_preparation `c59b24e8844969f264d98eb966ed8d0b3745f2165baea60ce90a69a2f8631865`이며 조정자가 source/원본 로그를 독립 대조했다. 다음은 새 source의 전체 workspace·실제 CLI·clean package·CI 재검증이며 이전73f0a69 artifact를 수정본 인수로 사용하지 않는다.
+
+수정 source를 `3543ded`에 먼저 local commit하고 전체 workspace를 다시 실행했다.326 passed/0 failed/10 device ignored로 통과했고 raw `p03-generation-handoff-final-workspace-root-attempt01.log` SHA-256은 `87f514f21d3dd58e687d054f66e1acf5a83cde29e2bc6b960aea8cc3d56ab7b6`이다. fresh all-feature CLI와 실제 combined CPU62도4.408874초에 통과했다. binary SHA-256 `0a117b44de44d404d940201759e42c41344c9c5443ae4ad0fc618e0b7050801e`를 report와 독립 대조했다. raw `p03-generation-handoff-final-cli-smoke-root-attempt01.json` SHA-256은 `db92bfbfd742017d316a6355d35588a4bdbefce8f164e646c181aaeb86a5dbfa`다. 이 결과를 문서 commit으로 보존한 뒤 한 번 push해 새 CI와 local clean release를 진행한다. 이전 Python/content/renderer source는 바뀌지 않았으므로 그 독립 suite는 중복하지 않고 새 release의 combined CPU/native 실행으로 실제 배포 경로를 다시 확인한다.
+
+## 23479b5의 CI 성공과 native audio 회귀 보류
+
+수정본의 clean release는 exact commit `23479b549c8e0abc37e36d2e059795462fad9ea8`, build ID `20261016T160833Z-c1ce3d5dfa5440ffbefb4e0deb3edf3a`다. compile42.07초, package backend의 archive/hash/license/BOM/CPU·offline audio 검증은 성공했다. archive SHA-256 `a0b84b07aef41a6693cfa93e0c17c75f075a1e4b90185cbae4ba4f33df94bb4c`, binary `b6ab0afc72d6c82a2eeab8116a9b877f9fcadd24e5fe381e7db5f7cc4f098596`, inventory `cfe1f5f8a92f386edae105d92bab4fbb9f8be2668e247f6f00188d8ce9657b1d`, notices `e68748af37dd976144bb81a0982887922ed9b9876e5f1829b895972abf67bf7f`다. 추출한 CLI도 같은 binary hash를 확인했다. package raw는 `p03-generation-handoff-package-root-attempt01.log`다.
+
+원격 CI의 docs38929592458·rust38929592560·managed38929593060·release38929592894가 모두 성공했다. 실제 regression이 Rust CI에서 실행됐고 workspace326 통과, managed는 warning/error0 및 실제 bridge 시나리오2건을 확인했다. 두 package staged smoke는 macOS62/4.837283초, Linux62/1.002517초이며 binary SHA-256은 각각 `71b6940b12a7a5fac2e803f0654facc8e401c59b633941c0a68d2c12cc20b8eb`, `8abc8112392ff48fe7a147c492444b86c3f0d34e8a9161086588d957550b7350`다. Linux linkage 성공·Publish skipped도 확인했다. head와 synthetic merge `68f8e36871a68735244524a35c7aded483f7a742`는 tree `f3e970f041cad8c7c9838d031a8e676cc3611acf`로 같다. raw는 `p03-generation-pr16-handoff-{release-jobs,macos,linux,rust,managed}-root-attempt01.*`다. main에는 병합하지 않았다.
+
+**실제 배포 CLI의 native audio 인수는 실패했다.** full combined helper는 마지막 native finite voice가 10초 뒤에도 Playing이어서 exit1이었다. stdout은 비어 있어 최종72-check report를 얻지 못했다. 이전73f0a69의72-pass를 이 수정본 성공으로 재사용하지 않는다. raw `p03-generation-handoff-extracted-smoke-root-attempt01.stderr.log`는159 polls를 기록한다. 같은 extracted CLI에 기존 `--audio-native`만 지정한 분리 진단도10.654초·158 polls 뒤 같은 실패였다(`p03-generation-nativeaudio-diagnostic-attempt01.stderr.log`). timeout과 Ended assertion을 변경하지 않았다.
+
+failure context의 `status.active_voice_count=0`은 **Play 이전** 응답이다. 조정자가 처음 후속 상태로 잘못 읽은 해석을 정정했다. 이후 query와의 모순이나 성공 근거가 아니다. service reconcile/reap과 unique query ID를 source 대조했지만 renderer 진행 여부는 관측하지 못했다. default-device ignored probe는 실제1건 실행돼 MacBook Pro 스피커/48kHz/stereo를 보고했다(`p03-generation-nativeaudio-device-test-attempt01.log`); 이 probe는 stream/callback 진행 검사가 아니다.
+
+PR16은 계속 draft다. [별도 native 진행 진단 계약](../03-architecture/native-audio-progress-diagnostics.md)에 따라 test-only position/state·CPAL error/CPU 표본으로 원인을 좁힌다. OS/device 조작·timeout 증가·CI green만으로 우회하지 않는다. 기존 helper의 native-only 분리로 window/assets 전체를 다시 돌리지 않은 것이 이번 반복 비용 감소의 실제 적용이다. 시간 개선율은 측정하지 않았다. b.2/b/c/D1/D2/D3와 현재 product gate는 계속 미완료다.
+
+## 실제 native 진행 관측
+
+Luna xhigh는 audio crate의 test-only ignored diagnostic만 추가했다. production/API/dependency/CLI helper는 그대로다. fixture는 기존 WAV와 같은8kHz mono2000frames·440Hz·i16 peak12000/32768, service도 CLI의 default128 voices/128 internal frames다. 첫 두 attempt는 각각 import/formatting과 남은 formatting 오류로 compile 실패했으며 보존했다. 세 번째는 정확히1개 ignored test를 실제 실행했다.
+
+`p03-generation-nativeprogress-luna-attempt03.log` SHA-256 `bea7b4a70f2a2fd541469ab0d801ed7cebc73fc0ca819bc9c66077e7896f84d6`에서 startup3190ms는 성공했지만 이후10000ms/183표본 모두Playing·position0.000ms였다. Kira CPU usage 표본은0, discarded error count는Some(0), popped CPAL 오류는 `A buffer underrun or overrun occurred.` 1건이었다. Stopped/reap을 관찰하지 못했고 progress assertion이 실패했다. 이는 설계상 기대한 성공이 아니라 실제 장치 실패다. [S88](../02-research/source-register.md)의 CoreAudio overload notification은 callback과 별도 경로이므로 해당 오류만으로 data callback 부재를 단정하지 않는다. 관측은 공통 Kira/CPAL 경로로 조사 범위를 좁히며 근본 원인은 미확정이다.
+
+test source SHA-256 `e653ef53623a78c6a13e866ebedb6cf63a60e35bbcf2388dd0daa87678c6b723`를 조정자가 대조했다. default CPU6/6, native CPU6/ignored2, strict audio all-target Clippy·scopedfmt·diff와 docs checker는 통과했다. raw는 `p03-generation-nativeprogress-{default-cpu,native-cpu,clippy}-attempt01.log`이며 SHA-256은 각각 `dc813f84227efe1eed0c7f33ea1b9984f8e000aacbc8f6ecb553418bd8774428`, `eeacdde06970234e1fe6d5cc5e0796d8a58eed3377498f46fd4afa5a9d78e774`, `adc62578fe45f958fe0d5391cd8300ccd3e87123b43f9e63fe55328f37da76b8`다. 이 subset 성공을 실패한 hardware/native package 인수로 바꾸지 않는다.
+
+독립 source review는 runtime actor에서 manager를 생성해도 실제 CPAL stream은 Kira의 별도 manager thread에서 만들어짐을 확인했다. 그 출력 경로에 caller/main runloop pump 요구는 발견하지 못했다. Kira Drop은 stop flag만 보내고500ms loop의 detached manager를 join하지 않는 기존 한계가 있다. 다만 helper는 native server를 별도 child로 실행하고 exit/terminate 뒤 reap하므로 이전 helper의 thread가 다음 프로세스에 남는 설명은 성립하지 않는다. 모든 외부 system audio client까지 확인했다는 뜻은 아니다.
+
+조정자는 과거 성공한73f0a69의 보존 extracted binary도 unchanged helper로 native-only 한 번 비교했다. 실행 전 SHA-256 `62c082a900017035e208f53965bd4743f7db266e733131cf34c7afdf9e880e4f`를 확인했으며 현재는 그 binary도10초/159 polls 뒤Playing으로 실패했다. raw는 `p03-generation-nativeaudio-oldbaseline-root-attempt01.stderr.log`이고 stdout report는 비어 있다. 이는 현재 관측을 CPU Stage 수정만의 회귀로 설명하기 어렵게 하지만 backend/system 원인을 확정하지 않는다. 과거72-pass 로그는 그대로 보존하며 비교 실패를 덮어쓰지 않는다. 다음은 pinned CPAL 오류 발생 경로와 별도 최소 callback probe의 필요성을 source로 검토한다.
+
+직접 CPAL 비교도 실제1건 실행됐지만 실패했다. Kira를 제외하고 같은 default CoreAudio device의48kHz/stereo/F32·Default buffer·f32 silence stream을 사용했다. build3722ms/play31ms는 성공했으나 약10008ms/183표본의 **직접 atomic data callback0/frame0**, error 분류5종 모두0이었다. `p03-generation-directcpal-luna-attempt01.log` SHA-256은 `a8016a085befd5d80bb433a9a4dc038f141bf348482ca45368b3e55a4dc6f19d`다. 오류 없음으로 정상 처리하지 않았고 callback 진행 assertion이 실패했다. raw와 조정자 source 대조로 project/runtime/Kira wrapper를 제외한 공통 출력 경로에서도 문제를 확인했다. OS 원인은 여전히 확정하지 않았다. CLI의 Playing 응답에는 position field가 없고, position0은 별도 Kira test에서만 관찰했다.
+
+마지막 deadline 앞 관측 검사·desktop-only cfg를 보강한 test source는 `f1a8fb087af3517c70e4318d087f4c6b64abec0d5d6ff59cd9a2ed1a7690fb74`다. 이 보강 때문에 hardware를 반복하지 않았으며 단조 deadline에 도달한 뒤 OS scheduling/logging의8ms를 숨기거나 hard real-time 보장으로 바꾸지 않았다. default6/native6(ignored3)·strict Clippy/fmt/diff는 최종 source에서 통과했다. 각 raw SHA-256은 `9e0753d368925f0a4603f453a1e4c1d492cd9b595f9bc9632fcc3b277389e117`, `9e121e8be0ccb356eff1f18574e14b6712d3e94fa91cba96e52563e3b6ee9c60`, `24896d0ccb4df1e750ab2608d87ba5fd2d7ea042ed92d94ef8dd48e7f8761dd2`다. 기존 default 경로는 그대로 보존하고 다음 같은physical UID의 열거 handle/HAL-pinned 경로만 비교하도록 계약을 추가했다. 계측 helper를 재사용해 같은 callback/오류/관측 로직을 복제하지 않는다. product gate는 계속 보류다.
+
+## 같은 physical HAL과 macOS 기본 utility 비교
+
+새 HAL test는 default/열거 handle의 `coreaudio:BuiltInSpeakerDevice` ID 일치·matching1개·직전 default 불변·같은48kHz/stereo/F32/Default config를 확인했다. build2492ms/play72ms 성공 뒤10.007초의 callback0/frame0, Xrun1/다른 오류0으로 실제 실패했다. raw `p03-generation-explicit-hal-luna-attempt02.log` SHA-256은 `e38e7b5ddf59e7c37096bd674043a423b818568b4357caff63ca9f6fab896e8b`다. attempt01은 format 인자/trait import compile 실패로 hardware를 실행하지 않았고 원본을 보존했다. 이 비교는 이름·다른 출력 장치·OS default 변경 없이 private monitor를 재사용한다. production 선택 정책을 HAL로 바꾸지 않았다.
+
+최종 test-only source SHA-256은 `967faa304f42aa04991c460100c2ba1d3bd211171a2c54be8f9d52ef0544017d`다. `p03-generation-audio-{default,native,clippy}-luna-attempt01.log`에서 default6/6, native6/ignored4, strict Clippy를 통과했다. 각 raw SHA-256은 `4f0258c79ed4885b72ab87fd7537b11368fac1f924d97c5302f1cd31bcf46ef4`, `92de191b3bf177233f260ba0aaf03081751b2645dfd6c747e9e37f02f98b3c94`, `caee1f89778dbfaeed23822a708e8f3773acea6bb4bb6d9b5afbc0aa5939217c`이며 scopedfmt/diff도 통과했다. 조정자가 source와 로그를 독립 대조했다. 테스트가 진단용이라는 이유로 예상 정상 callback 진행의 실제 실패를 성공/의도된 실패로 부르지 않는다.
+
+엔진 밖 비교는 macOS26.6.2/build25G83에서 기존 `/System/Library/Sounds/Tink.aiff`를 `/usr/bin/afplay -v 0`로 실행했다. 전역 volume과 device 설정은 그대로다. 첫 시도는10초 대기 뒤 Ctrl-C를 요청했지만 도구 왕복 동안15.30초가 지났고 AudioQueueStart(-66681)/exit1을 얻었다. signal/자연 오류의 선후가 불명확해 무중단 실패 근거로 사용하지 않는다. 이를 분리하기 위해 두 번째는20초 연속 관측으로 **신호를 전혀 보내지 않았으며**15.25초 뒤 같은 오류/exit1을 얻었다. raw `p03-generation-nativeaudio-afplay-root-attempt02.log` SHA-256은 `505061d33ae32ebc36bcd13acd2d0fbc6554c64ea6bfe12064400636e37bb750`다. [S89](../02-research/source-register.md)의 로컬 SDK header에서 이 status가 CannotStart임을 대조했다. engine의10초 Ended 조건을 늘린 실행이 아니다.
+
+최근5분 coreaudiod error/fault의 read-only 조회는6줄이며 invalid object·processor overload를 기록했다. raw `p03-generation-nativeaudio-coreaudio-root-attempt01.log` SHA-256은 `bf8a0511873d57505183728ebb01f25998fb5974ee656b5a830b5dc45a730c5f`다. 외부 기본 utility도 실패하므로 엔진 밖의 현재 출력 경로에도 문제가 관측됐지만 hardware/driver/daemon의 근본 원인은 확정하지 않았다. 사용자에게 다른 앱의 실제 오디오 상태를 물었으며 아직 답이 없다. CoreAudio 재시작/OS 설정 변경은 하지 않았다. PR16은 draft 유지, source/API 우회 변경과 b.2/b/c/D1/D2/D3 인수는 보류한다.

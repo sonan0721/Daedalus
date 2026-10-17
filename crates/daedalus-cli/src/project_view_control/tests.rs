@@ -12,10 +12,10 @@ use daedalus_content::project::{PreparedProject, ProjectLimits, prepare_project_
 use daedalus_content::scene::StableId;
 use daedalus_core::{Revision, Tick};
 use daedalus_runtime::{
-    EngineConfig, NativeProjectPreparationOptions, NativeProjectPreparationService,
-    PreparationWorkerShutdown, RequestTicket, SessionClockMode, SessionControlClient,
-    SessionControlConfig, SessionControlService, SessionEntityTarget, SessionOperation,
-    SessionRequestResult, SessionSubmitError, WaitStage,
+    EngineConfig, NativeProjectActivationService, NativeProjectPreparationOptions,
+    NativeProjectPreparationService, PreparationWorkerShutdown, RequestTicket, SessionClockMode,
+    SessionControlClient, SessionControlConfig, SessionControlService, SessionEntityTarget,
+    SessionOperation, SessionRequestResult, SessionSubmitError, WaitStage,
 };
 use serde_json::{Value, json};
 
@@ -54,6 +54,7 @@ struct Harness {
     controller: ProtocolController,
     service: Option<SessionControlService>,
     preparation_owner: Option<NativeProjectPreparationService>,
+    activation_owner: Option<NativeProjectActivationService>,
     preparation_root: Option<PathBuf>,
 }
 
@@ -80,6 +81,26 @@ impl Drop for Harness {
                         break;
                     }
                     Ok(PreparationWorkerShutdown::Stopping) => thread::yield_now(),
+                }
+            }
+            if stopped && let Some(root) = self.preparation_root.take() {
+                let _ = fs::remove_dir_all(root);
+            }
+        }
+        if let Some(mut owner) = self.activation_owner.take() {
+            owner.request_stop();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stopped = false;
+            while Instant::now() < deadline {
+                match owner.try_shutdown() {
+                    Ok(daedalus_runtime::NativeProjectActivationShutdown::Stopped) => {
+                        stopped = true;
+                        break;
+                    }
+                    Ok(daedalus_runtime::NativeProjectActivationShutdown::Stopping) => {
+                        thread::yield_now();
+                    }
+                    Err(_) => break,
                 }
             }
             if stopped && let Some(root) = self.preparation_root.take() {
@@ -124,6 +145,16 @@ fn harness_for_service(
     audio_enabled: bool,
 ) -> HarnessParts {
     let client = service.attach().expect("attach protocol client");
+    harness_for_client(client, Some(service), clock, output_capacity, audio_enabled)
+}
+
+fn harness_for_client(
+    client: SessionControlClient,
+    service: Option<SessionControlService>,
+    clock: SessionClockMode,
+    output_capacity: usize,
+    audio_enabled: bool,
+) -> HarnessParts {
     let (request_sender, requests) = mpsc::sync_channel(MAX_PROTOCOL_QUEUE);
     let (response_sender, responses) = mpsc::sync_channel(output_capacity);
     let transport = StdioTransport {
@@ -143,14 +174,55 @@ fn harness_for_service(
     (
         Harness {
             controller,
-            service: Some(service),
+            service,
             preparation_owner: None,
+            activation_owner: None,
             preparation_root: None,
         },
         request_sender,
         responses,
         response_sender,
     )
+}
+
+fn activation_harness(output_capacity: usize) -> HarnessParts {
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+    let root = std::env::temp_dir().join(format!(
+        "daedalus-cli-activation-wire-{}-{}",
+        std::process::id(),
+        NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("create unique activation fixture root");
+    fs::write(
+        root.join("daedalus.project.json"),
+        br#"{"schema_version":1,"name":"wire activation","scene":"scene.json"}"#,
+    )
+    .expect("write activation manifest");
+    fs::write(root.join("scene.json"), ONE_ENTITY_SCENE).expect("write activation scene");
+
+    let owner = NativeProjectActivationService::start_headless(
+        NativeProjectPreparationOptions::new(&root),
+        SessionControlConfig {
+            engine: EngineConfig::default(),
+            clock_mode: SessionClockMode::Manual,
+            ..SessionControlConfig::default()
+        },
+    )
+    .expect("start headless activation owner");
+    let client = owner
+        .session()
+        .attach()
+        .expect("attach activation protocol client");
+    let (mut harness, input, output, response_sender) = harness_for_client(
+        client,
+        None,
+        SessionClockMode::Manual,
+        output_capacity,
+        false,
+    );
+    harness.activation_owner = Some(owner);
+    harness.preparation_root = Some(root);
+    (harness, input, output, response_sender)
 }
 
 fn preparation_harness(output_capacity: usize) -> HarnessParts {
@@ -294,12 +366,12 @@ fn poll_until_terminal(
     poll_until_phase(harness, input, output, ticket, "terminal")
 }
 
-/// Retry a terminal preparation `busy` result without changing its caller command ID.
+/// Retry a terminal `busy` result without changing its caller command ID.
 ///
 /// A fresh protocol request ID is required for each terminal attempt because the server retains
 /// submit request IDs. Every terminal ticket is acknowledged before retrying or returning so a
 /// transient result cannot consume the bounded result-credit budget.
-fn preparation_submit_until_terminal(
+fn submit_until_terminal_with_busy_retry(
     harness: &mut Harness,
     input: &SyncSender<Vec<u8>>,
     output: &Receiver<Vec<u8>>,
@@ -326,7 +398,7 @@ fn preparation_submit_until_terminal(
         }
         assert_eq!(
             terminal_result["ok"], true,
-            "preparation request failed terminally: {terminal}"
+            "request failed terminally: {terminal}"
         );
         return terminal;
     }
@@ -1010,6 +1082,10 @@ fn audio_operation_is_explicitly_unavailable_when_session_audio_is_disabled() {
         capabilities["result"]["data"]["asset_preparation_enabled"],
         false
     );
+    assert_eq!(
+        capabilities["result"]["data"]["asset_activation_enabled"],
+        false
+    );
     assert!(
         !capabilities["result"]["data"]["operations"]
             .as_array()
@@ -1039,6 +1115,94 @@ fn audio_operation_is_explicitly_unavailable_when_session_audio_is_disabled() {
         prep_response["error"]["code"],
         "asset_preparation_unavailable"
     );
+    let activation_response = request(
+        &mut harness,
+        &input,
+        &output,
+        "activation-disabled",
+        json!({"op":"submit", "operation":{"op":"asset_activation_status"}}),
+    );
+    assert_eq!(activation_response["ok"], false);
+    assert_eq!(
+        activation_response["error"]["code"],
+        "asset_activation_unavailable"
+    );
+}
+
+#[test]
+fn operation_composer_keeps_existing_orders_and_bounds_all_extensions() {
+    let base = vec![
+        "project_info",
+        "get_transform",
+        "list_transforms",
+        "set_transform",
+        "spawn_transform",
+        "step",
+        "status",
+    ];
+    let audio = vec![
+        "audio_status",
+        "audio_clips",
+        "audio_voice",
+        "audio_voices",
+        "audio_command",
+    ];
+    let preparation = vec![
+        "asset_preparation_status",
+        "asset_preparation_prepare",
+        "asset_preparation_cancel",
+    ];
+    let activation = vec![
+        "asset_activation_status",
+        "asset_activation_stage",
+        "asset_activation_commit",
+        "asset_activation_cancel",
+    ];
+    assert_eq!(operation_names(false, false, false), base);
+    assert_eq!(
+        operation_names(true, false, false),
+        [base.clone(), audio.clone()].concat()
+    );
+    assert_eq!(
+        operation_names(false, true, false),
+        [base.clone(), preparation.clone()].concat()
+    );
+    assert_eq!(
+        operation_names(true, true, false),
+        [base.clone(), audio.clone(), preparation.clone()].concat()
+    );
+    let combined = operation_names(true, true, true);
+    assert_eq!(combined, [base, audio, preparation, activation].concat());
+    assert_eq!(combined.len(), 19);
+}
+
+#[test]
+fn activation_wire_ids_require_decimal_strings_and_reject_unknown_fields() {
+    let valid: WireOperation = serde_json::from_value(json!({
+        "op":"asset_activation_commit",
+        "activation":{"session":"7","sequence":"9"},
+        "expected_active_generation":"3",
+        "command_id":"18446744073709551617"
+    }))
+    .unwrap();
+    assert!(matches!(valid, WireOperation::AssetActivationCommit { .. }));
+    assert!(
+        serde_json::from_value::<WireOperation>(json!({
+            "op":"asset_activation_commit",
+            "activation":{"session":7,"sequence":"9"},
+            "expected_active_generation":"3"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<WireOperation>(json!({
+            "op":"asset_activation_stage",
+            "candidate":{"session":"7","epoch":"9"},
+            "expected_active_generation":"3",
+            "unrecognized":true
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -1063,7 +1227,7 @@ fn preparation_protocol_reports_decimal_ids_and_typed_receipts() {
             .any(|operation| operation == "asset_preparation_status")
     );
 
-    let status = preparation_submit_until_terminal(
+    let status = submit_until_terminal_with_busy_retry(
         &mut harness,
         &input,
         &output,
@@ -1077,7 +1241,7 @@ fn preparation_protocol_reports_decimal_ids_and_typed_receipts() {
     assert_eq!(status_result["data"]["data"]["active_generation"], "1");
     assert_eq!(status_result["data"]["data"]["state"], "idle");
     let caller_command_id = "9223372036854775809";
-    let prepared = preparation_submit_until_terminal(
+    let prepared = submit_until_terminal_with_busy_retry(
         &mut harness,
         &input,
         &output,
@@ -1100,7 +1264,7 @@ fn preparation_protocol_reports_decimal_ids_and_typed_receipts() {
         candidate["session"],
         status_result["data"]["data"]["session"]
     );
-    let cancelled = preparation_submit_until_terminal(
+    let cancelled = submit_until_terminal_with_busy_retry(
         &mut harness,
         &input,
         &output,
@@ -1117,6 +1281,247 @@ fn preparation_protocol_reports_decimal_ids_and_typed_receipts() {
         cancel_result["data"]["data"]["outcome"]["kind"],
         "cancel_accepted"
     );
+}
+
+#[test]
+fn activation_protocol_stages_commits_and_republishes_without_changing_authority() {
+    let (mut harness, input, output, _) = activation_harness(8);
+    let capabilities = request(
+        &mut harness,
+        &input,
+        &output,
+        "activation-capabilities",
+        json!({"op":"capabilities"}),
+    );
+    assert_eq!(
+        capabilities["result"]["data"]["asset_activation_enabled"],
+        true
+    );
+    assert_eq!(
+        capabilities["result"]["data"]["asset_preparation_enabled"],
+        true
+    );
+    let operations = capabilities["result"]["data"]["operations"]
+        .as_array()
+        .unwrap();
+    for operation in [
+        "asset_preparation_prepare",
+        "asset_activation_status",
+        "asset_activation_stage",
+        "asset_activation_commit",
+        "asset_activation_cancel",
+    ] {
+        assert!(operations.iter().any(|value| value == operation));
+    }
+
+    let initial_frame = request(
+        &mut harness,
+        &input,
+        &output,
+        "activation-initial-frame",
+        json!({"op":"latest_frame"}),
+    );
+    assert_eq!(initial_frame["ok"], true, "initial frame: {initial_frame}");
+    assert_eq!(initial_frame["result"]["data"]["tick"], "0");
+    assert_eq!(initial_frame["result"]["data"]["project_generation"], "1");
+    assert_eq!(
+        initial_frame["result"]["data"]["authority_snapshot_sequence"],
+        "1"
+    );
+    let initial_frame_sequence = initial_frame["result"]["data"]["sequence"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let initial_source_digest = initial_frame["result"]["data"]["source_digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let activation_status = submit_until_terminal_with_busy_retry(
+        &mut harness,
+        &input,
+        &output,
+        "activation-status-initial",
+        json!({"op":"asset_activation_status"}),
+    );
+    let status_terminal = &activation_status["result"]["data"]["terminal"]["result"];
+    assert_eq!(status_terminal["kind"], "asset_activation");
+    assert_eq!(status_terminal["data"]["kind"], "status");
+    let status = &status_terminal["data"]["data"];
+    assert_eq!(
+        status["session"],
+        initial_frame["result"]["data"]["session"]
+    );
+    assert_eq!(status["state"], "idle");
+    assert_eq!(status["active_generation"], "1");
+    let active_accounted_bytes = status["memory"]["active_cooked_accounted_bytes"]
+        .as_u64()
+        .expect("active cooked-byte summary is numeric");
+    let max_accounted_bytes = status["memory"]["max_cooked_accounted_bytes"]
+        .as_u64()
+        .expect("maximum cooked-byte summary is numeric");
+    assert!(active_accounted_bytes <= max_accounted_bytes);
+
+    let prepare = submit_until_terminal_with_busy_retry(
+        &mut harness,
+        &input,
+        &output,
+        "activation-prepare",
+        json!({
+            "op":"asset_preparation_prepare",
+            "command_id":"18446744073709553000"
+        }),
+    );
+    let prepare_terminal = &prepare["result"]["data"]["terminal"]["result"];
+    assert_eq!(prepare_terminal["kind"], "asset_preparation");
+    let candidate = prepare_terminal["data"]["data"]["outcome"]["data"]["candidate"].clone();
+    assert_eq!(candidate["session"], status["session"]);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut ready_candidate = None;
+    let mut poll_index = 0_u32;
+    while Instant::now() < deadline {
+        poll_index += 1;
+        let ready = submit_until_terminal_with_busy_retry(
+            &mut harness,
+            &input,
+            &output,
+            &format!("activation-ready-{poll_index}"),
+            json!({"op":"asset_preparation_status"}),
+        );
+        let result = &ready["result"]["data"]["terminal"]["result"]["data"]["data"];
+        if result["ready_candidate"]["id"] == candidate {
+            ready_candidate = Some(candidate.clone());
+            break;
+        }
+        thread::yield_now();
+    }
+    let candidate = ready_candidate.expect("preparation worker publishes the accepted candidate");
+
+    let stage = submit_until_terminal_with_busy_retry(
+        &mut harness,
+        &input,
+        &output,
+        "activation-stage",
+        json!({
+            "op":"asset_activation_stage",
+            "command_id":"18446744073709553001",
+            "candidate":candidate,
+            "expected_active_generation":"1"
+        }),
+    );
+    let stage_terminal = &stage["result"]["data"]["terminal"]["result"];
+    assert_eq!(stage_terminal["kind"], "asset_activation");
+    assert_eq!(
+        stage_terminal["data"]["data"]["outcome"]["kind"],
+        "stage_accepted"
+    );
+    let activation = stage_terminal["data"]["data"]["outcome"]["data"]["activation"].clone();
+    assert_eq!(activation["session"], status["session"]);
+    assert_eq!(activation["sequence"], "1");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut staged = false;
+    let mut poll_index = 0_u32;
+    while Instant::now() < deadline {
+        poll_index += 1;
+        let current = submit_until_terminal_with_busy_retry(
+            &mut harness,
+            &input,
+            &output,
+            &format!("activation-stage-status-{poll_index}"),
+            json!({"op":"asset_activation_status"}),
+        );
+        let current_status = &current["result"]["data"]["terminal"]["result"]["data"]["data"];
+        if current_status["state"] == "staged"
+            && current_status["current_activation"]["id"] == activation
+        {
+            staged = true;
+            break;
+        }
+        assert_ne!(
+            current_status["state"], "failed",
+            "staging failed: {current}"
+        );
+        thread::yield_now();
+    }
+    assert!(
+        staged,
+        "activation did not reach Staged before the deadline"
+    );
+
+    let commit = submit_until_terminal_with_busy_retry(
+        &mut harness,
+        &input,
+        &output,
+        "activation-commit",
+        json!({
+            "op":"asset_activation_commit",
+            "command_id":"18446744073709553002",
+            "activation":activation,
+            "expected_active_generation":"1"
+        }),
+    );
+    let commit_terminal = &commit["result"]["data"]["terminal"]["result"];
+    assert_eq!(commit_terminal["kind"], "asset_activation");
+    assert_eq!(
+        commit_terminal["data"]["data"]["outcome"]["kind"],
+        "commit_applied"
+    );
+    assert_eq!(
+        commit_terminal["data"]["data"]["outcome"]["data"]["generation"],
+        "2"
+    );
+
+    let committed_status = submit_until_terminal_with_busy_retry(
+        &mut harness,
+        &input,
+        &output,
+        "activation-status-committed",
+        json!({"op":"asset_activation_status"}),
+    );
+    let committed_status =
+        &committed_status["result"]["data"]["terminal"]["result"]["data"]["data"];
+    assert_eq!(committed_status["state"], "committed");
+    assert_eq!(committed_status["active_generation"], "2");
+    assert_eq!(
+        committed_status["active_source_digest"],
+        initial_source_digest
+    );
+    assert_eq!(
+        committed_status["current_activation"]["committed_generation"],
+        "2"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let latest_frame = loop {
+        let latest = request(
+            &mut harness,
+            &input,
+            &output,
+            "activation-latest-frame",
+            json!({"op":"latest_frame"}),
+        );
+        if latest["error"]["code"] == "busy" && Instant::now() < deadline {
+            thread::yield_now();
+            continue;
+        }
+        assert_eq!(latest["ok"], true, "latest frame: {latest}");
+        if latest["result"]["data"]["project_generation"] == "2" {
+            break latest;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "committed generation was not published"
+        );
+        thread::yield_now();
+    };
+    let frame = &latest_frame["result"]["data"];
+    assert_eq!(frame["tick"], "0");
+    assert!(frame["sequence"].as_str().unwrap().parse::<u64>().unwrap() > initial_frame_sequence);
+    assert_eq!(frame["authority_snapshot_sequence"], "1");
+    assert_eq!(frame["source_digest"], initial_source_digest);
 }
 
 #[cfg(feature = "audio")]

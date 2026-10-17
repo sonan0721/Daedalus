@@ -50,6 +50,14 @@ PR14에서 두 새 combined50 step·Linux linkage·다섯 CI와 main 동일 tree
 
 초기 main manual run은 두 package/staged50 성공·Publish skipped, 실제 main-scoped cache 두 개 생성을 확인했다. Luna가 main push trigger 두 줄을 구현했고 YAML/기존 package14를 통과했지만 자동 trigger·다음 PR cache hit의 실제 인수는 아직 남았다. 새 job이나 별도 packaging backend는 추가하지 않는다.
 
+후속 [PR15](https://github.com/sonan0721/Daedalus/pull/15)는 두 primary-key cache restore·두 staged50·다섯 CI·Publish skipped를 확인해 main `c2283cb`에 인수했다. head `9c7e271`·CI synthetic `a4fd018`·main의 tree `9d484f6be44d7ea1b4359eeb6328e675e6a28388`도 같았다. 새 main push의 release workflow가 실제 시작했으며 최종 결과와 compile 시간의 범위는 [개발 반복 기록](development-iteration-pipeline.md)에 이어 기록한다. 이 workflow 이름의 실행 자체가 공개 Release 발행을 뜻하지 않는다.
+
+그 뒤 자동 main push run38909669190도 두 cache restore·두 package/staged50·Linux linkage 성공과 Publish skipped를 확인했다. manual→PR→main 경로의 좁은 cache 개선만 인수했고 전체 DEV06/07·P03·D1의 완료로 계산하지 않는다.
+
+P03.3b.2에서는 [headless 계약](../03-architecture/headless-asset-generation.md)의 local runtime/CLI 검증 뒤 기존 staged-binary step에 activation flag를 더했다. 한 helper가 지원 조합의 별도 sub-smoke를 순차 실행하며 activation+audio 동시 지원으로 보고하지 않는다. 새 job/backend/장치 의존성을 추가하지 않았다. [PR16/30d910b 작업 기록](../06-worklog/2026-10-17-native-host-design.md)에서 두 실제 packaged CPU62·Publish skipped·다섯 check·head/synthetic tree 일치를 확인했다. 로컬 native 출력이 실패해 draft를 유지하며 merge/main 동일 tree와 b.2 인수는 보류다. CI 성공이 장치 실패를 면제하지 않는다.
+
+그 뒤676f93f도 다섯 CI를 통과했고, A-042 사용자 출력 보고 이후 같은 보존 extracted CLI의 native-only19건이 실제 Ended로 통과했다. 현재 회복 결과는 과거 실패를 지우거나 근본 원인을 확정하지 않는다. 최신 clean source/package의 combined 장치 검사와 새 head CI를 확인한 뒤 PR ready/정확한 head의 squash/main 동일 tree를 처리한다. 반복 비용을 줄이기 위해 보존 binary에 전체 suite를 먼저 돌린 뒤 새 package에서 다시 반복하지 않는다.
+
 기여 문서의 구조는 Bevy·Godot의 공식 기여 입구를 참고하되 대규모 팀 규칙을 그대로 복제하지 않았다. [Bevy](https://github.com/bevyengine/bevy/blob/main/CONTRIBUTING.md), [Godot](https://raw.githubusercontent.com/godotengine/godot/master/CONTRIBUTING.md)
 
 ## 개발·CI 파이프라인 최적화

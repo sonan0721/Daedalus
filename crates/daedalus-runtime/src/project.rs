@@ -195,6 +195,16 @@ impl ProjectSession {
         self.project.as_ref()
     }
 
+    /// Replaces only the immutable source binding while preserving the live Engine and entity map.
+    /// The caller must have completed compatibility checks and reserved worker retirement before
+    /// invoking this transaction.
+    pub(crate) fn replace_project_source(
+        &mut self,
+        project: Arc<PreparedProject>,
+    ) -> Arc<PreparedProject> {
+        std::mem::replace(&mut self.project, project)
+    }
+
     #[must_use]
     pub fn entity_handle(&self, stable_id: &StableId) -> Option<EntityHandle> {
         self.entity_handles.get(stable_id).copied()

@@ -1,6 +1,6 @@
 # 개발 반복 작업의 공통화와 자동화
 
-상태: 실제 중복 감사·적용 진행 중 · 2026-10-16 · A-039/A-041
+상태: 실제 중복 감사·적용 진행 중 · 2026-10-17 · A-039/A-041
 
 ## 목적
 
@@ -14,14 +14,28 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1과 model/sprite/audio 소비 인수. warm decode/leaf cook0, read/parse는 남음. P03.3a persistent CPU 후보 구현·검증 중, 실행 중 교체 후속 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1·model/sprite/audio·P03.3a persistent CPU 후보를 PR14까지 인수. warm decode/leaf cook0, read/parse는 남음. b.2 CPU 교체·combined72 검증, test-only wait 경계 수정 후 최종 인수 대기. render/audio 전환 후속 |
 | DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite·audio 실제 소비 인수. 실행 중 patch 후속 |
-| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | 외부 project CPU18과 opt-in native4 smoke를 같은 backend에서 재사용. 통합 환경 진단/전체 gate 자동화 후속 |
+| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | assets/audio/preparation/activation CPU62·양 package CI 확인. A-042 뒤 native-only19/clean package combined72 회복. 새 CI의 test wait 가정 수정 후 최종 CI/PR 대기. 통합 환경 진단/전체 gate 자동화 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
-| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh handle·native GPU cache·dirty instance/material 검증, cook/reload·texture/skin 후속 |
+| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh·model texture/sprite·native GPU cache·dirty instance/material 검증. 실행 중 세대 전환·skin 후속 |
 
 위 표는 backlog다. `제안/미구현`을 기존 기능으로 홍보하지 않는다. 현재 코드 근거와 우선순위는 readiness 감사에 보완한다.
+
+### 실패 뒤 반복 범위 줄이기
+
+P03.3b.2의 실제 native audio 실패에서는 이미 생성·검증한 archive의 같은 extracted CLI/hash를 유지하고 기존 helper의 `--audio-native`만 분리 실행했다. 전체 assets/window/prepare/activation을 다시 실행하지 않고 같은 10초 종료 실패를 재현했다. 다음은 [test-only native 진행 진단](../03-architecture/native-audio-progress-diagnostics.md)으로 position/state·stream 오류를 관측한다. 원인을 모른 채 전체 suite/CI를 반복하거나 timeout을 늘리지 않는다. production 변경이 생기면 영향받는 통합·배포 경로를 다시 검증하며 이전 binary의 결과를 새 binary에 전용하지 않는다. 이는 실제 반복 범위 감소이며 wall-time 개선 배율이나 전체 DEV06 완료는 아니다.
+
+### CLI의 연결을 SDK에서 재사용하기
+
+source 감사 결과 project_view가 입력·snapshot 추출·window·actor의 조합을 직접 소유한다. [native project host](../03-architecture/native-project-host.md)는 이 조합을 공개 engine library로 옮기고 CLI/추후 MCP를 adapter로 만드는 구체안이다. [staged renderer](../03-architecture/staged-render-asset-generation.md)는 실제 entity binding의 resource-only 입력을 기존 planner에 투영하고, 작은 업로드와 기존 화면을 한 submit으로 조합하는 안이다. game/CLI마다 별도 lifecycle·cache·staging planner를 다시 작성하지 않게 한다. 아직 구현/속도 향상 결과는 아니다.
+
+기존 Rust type의 설계 probe에서는 renderer를 공유 cache로 한 번 빌드하고 누락 assertion 보완은 같은 rlib에 rustc --test를 직접 적용했다. 새 cold workspace/Cargo rebuild 없이 실제3건을 다시 확인했다. [작업 기록](../06-worklog/2026-10-17-native-host-design.md)에 source/hash·실패 상태·근거 한계를 보존한다. 이 일회성 probe를 새 상시 smoke framework로 늘리지 않는다.
+
+A-042 사용자 가청 보고 뒤에는 보존 binary/hash를 유지한 native-only19건으로 먼저 회복을 확인했다. 전체 combined72는 최신 clean archive의 extracted binary에서 한 번 수행할 계획이다. 기존 binary의 전체 suite→문서 commit→새 package의 전체 suite라는 중복을 만들지 않는다. 이 선택은 검사 대상 source/artifact의 정확성을 유지하는 실행 순서 개선이며 아직 전체 장치 인수나 속도 개선율을 뜻하지 않는다.
+
+그 계획의 c9f5dee clean archive는 실제 combined72를 통과했다. 동시에 CI는 audio/world duplicate replay 테스트의 잘못된 대기 가정을 찾았다. AuthorityAccepted snapshot에 Terminal이 이미 있다고 가정하지 않고, 각 assertion이 요구하는 phase를 기존 bounded wait helper로 명시한다. production 상태 전이를 합쳐 테스트에 맞추거나 CI를 무조건 재시도하지 않는다. test-only 수정 뒤에는 runtime/workspace·정확한 source의 CI를 확인하고, native 검증 재사용은 production/helper/에셋 미변경과 새 clean package의 실행 bytes·notice/inventory hash 일치를 먼저 증명한 경우에만 검토한다. source 이름만 같거나 과거 성공했다는 이유로 다른 bytes의 인수를 생략하지 않는다.
 
 ## 이번 코드 감사에서 확인한 반복
 
@@ -173,3 +187,21 @@ worker와 actor가 같은 runtime crate를 공유하는 점도 build 순서에 �
 후속 실제 결과: 해당 manual run은 macOS/Linux package와 각 staged CPU50이 모두 성공했고 Publish는 skipped였다. cache API에서 `refs/heads/main`의 macOS ID9050680369/249,846,600bytes, Linux ID9050710266/313,614,043bytes 생성을 확인했다. 두 binary hash는 PR14와 같았다. raw는 ignored `p03-preparation-main-seed-*-01.log`, `...main-cache-after-seed-01.json`, `...main-seed-jobs-01.json`이다. 아직 다음 PR의 실제 restore/compile 감소를 주장하지 않는다.
 
 Luna의 workflow diff는 `push.branches`의 main 두 줄만 추가한다. 기존 Publish의 `push && refs/tags/v` 조건·read-only build·모든 job/검증은 그대로다. Ruby Psych YAML syntax·package unit14개/2.594초·diff check가 통과했다. PyYAML이 없어 이미 설치된 parser를 썼고 dependency를 추가하지 않았다. 이 세 검사의 raw 파일은 저장되지 않아 작업자 tool 응답의 관찰로 기록하며 사후 raw를 재현해 최초 run인 것처럼 쓰지 않는다. 현재 자동 main trigger 변경은 다음 PR 인수 전이다.
+
+[PR15](https://github.com/sonan0721/Daedalus/pull/15)의 실제 후속 package 두 개가 main cache를 primary key로 복원했다. macOS release compile은37.16초, Linux는31.45초였으며 두 staged CPU50은 각각1.951949초/0.457183초에 통과했다. binary SHA-256도 PR14·main 초기 공급과 각각 동일했다. 직전 cache miss의167초/126초와 비교 가능한 compile 구간을 기록하지만 runner/image 변동을 통제한 반복 실험은 아니므로 일반적인 속도 개선율로 해석하지 않는다. cache restore 자체의 비용도 job 총시간에 포함된다. raw는 ignored `p03-preparation-cache-pr15-macos-01.log`, `...linux-01.log`다.
+
+PR15의 다섯 체크 성공·Publish skipped를 확인했다. head `9c7e27103309840a99546baac8778dd54f42c128`, CI synthetic merge `a4fd0183bb5b3f65b23a7e15b80b7b40d8aac66c`, squash main `c2283cb686ff7eb5589d6e38f66d5e357993531e`의 tree는 `9d484f6be44d7ea1b4359eeb6328e675e6a28388`로 같다. main push가 실제 [run38909669190](https://github.com/sonan0721/Daedalus/actions/runs/38909669190)을 시작했으며 결과는 별도로 확인한다. source가 바뀌지 않은 doc/YAML 개선에 local Rust/Metal/package 전체를 중복 실행하지 않았고 실제 CI의 locked build/smoke는 유지했다. DEV06/07 전체와 엔진 제품 gate는 계속 열려 있다.
+
+그 main push run도 두 package·두 staged CPU50·Linux linkage를 통과했고 Publish는 skipped였다. 양쪽 로그에서 실제 primary-key main cache restore를 확인했다. 따라서 이번 좁은 개선의 manual 초기 공급→후속 PR 복원→자동 main 실행은 검증했다. raw는 ignored `p03-preparation-cache-main-push-{jobs,macos,linux}-01.*`다. 공개 tag/Release는 만들지 않았다. 이후 dependency/toolchain key가 바뀌면 새 main 공급이 필요하며 cache eviction/runner 부하에 관계없이 항상 같은 시간을 얻는다는 보장은 없다.
+
+## P03.3b에서 공통화할 반복
+
+[호환성 계약](../03-architecture/asset-replacement-compatibility.md)은 content의 단일 비교기를 두고 consumer마다 authored field 판단·정렬/진단을 중복 구현하지 않도록 한다. 이 b.1 비교기는 content 로컬 검증을 통과했다. [headless 세대 계약](../03-architecture/headless-asset-generation.md)은 새 session 생성 대신 기존 worker·actor/replay·현재 Engine을 이어 쓰며 source 변경→Stage/Commit→같은 상태 조회를 한 실행에서 검증한다. authored topology 비교의 reference index만 한도 내에 만들고 payload 재복사/해시/parse는 하지 않는다. b.2 CPU 전환의 실제 첫 process 검증은 통과했으나 최종 통합/package 인수와 renderer/audio 전환은 남아 있다. 개발 시간 개선율을 주장하지 않는다.
+
+CLI adapter는 실제 네 capability 배열의 base7 반복을 base/extension composer로 제거한다. 기존 feature-off 오류·네 조합의 operation 순서·새 headless-only 지원 경계를 함께 검사한 뒤에만 구현 결과로 기록한다. 범용 schema generator를 이번 선행 작업에 끼워 넣지 않고 source에서 확인한 작은 중복만 제거한다. runtime public type/getter·wire decimal ID를 먼저 고정해 별도 작업자가 private source를 추측하며 재작성하는 반복도 줄인다. compile/test 소유권과 focused→통합 순서는 유지한다.
+
+첫 b.2 process-helper review는 feature별 수동 command-ID 번호대가 공통 high-water와 충돌하는 반복을 발견했다. 새 helper는 한 세션의 단일 증가 issuer와 명시적 replay ID 재사용으로 바꿨다. 실제 엔진 오류가 나기 전 source review에서 찾은 문제이며 최종 actual CLI 검증은 대기다. provider body를 기다리는 adapter source 대기도 줄여 동결한 공개 API로 먼저 작성하게 하고, 한정한 Python stub lease는 runtime source 작업 중 실행한 뒤 Cargo에 돌려줬다. Python28 통과는 transport 회귀 근거일 뿐 실제 세대 전환·개발 시간 개선율이 아니다. 구체 source/raw/수정 전후 범위는 [activation 작업 기록](../06-worklog/2026-10-16-project-asset-activation.md)을 따른다.
+
+이후 실제 CLI opt-in은28개(CPU18+activation10)를 통과했다. PNG/model/atlas/WAV를 같은 session에서 순서대로 commit하고 현재 handle/pose/tick을 유지했다. helper의 잘못된 ProjectInfo 필드 assertion만 고친 재시도는 기존 binary를 그대로 사용해 불필요한 Cargo rebuild를 피했다. runtime source 변경 뒤에는 해당 runtime 검사만 먼저 수행하고, source freeze 후 CLI/전체 통합/장치/package를 순서대로 수행한다. 단순 raw/count/hash는 위 작업 기록을 기준으로 하고 설계·TESTING·체크리스트에 중복 복사하지 않는다. 서로 다른 범위의 실행 시간을 속도 향상으로 비교하지 않는다.
+
+마지막 경계 검증에서는 한 작업자가 기존 runtime attempt 번호를 재사용해 앞선 raw 일부를 덮어썼다. 현재 raw를 다른 고유 prefix로 보존하고 손실 범위를 작업 기록에 명시했다. 이후 로그 생성은 고유 이름뿐 아니라 exclusive/noclobber로 기존 파일을 거부한다. 통과한 과거 검사를 다시 실행해 과거 원본처럼 보관하지 않는다. CLI 모든 기능 test/Clippy는 다음 workspace 모든 기능 검사에 이미 포함되므로 별도로 중복 실행하지 않고, default feature 경계는 별도 유지한다.

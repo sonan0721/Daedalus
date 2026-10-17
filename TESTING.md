@@ -107,7 +107,7 @@ The Wasm command requires the pinned toolchain's `wasm32-unknown-unknown` standa
 
 The opt-in `--assets` mode reuses the existing subprocess, temporary-project, timeout, binary-hash, and cleanup helpers. It adds offline glTF/GLB, PNG, atlas, and WAV preparation; same-geometry sharing; warm zero-decode/zero-cook behavior; external/embedded PNG, node, material, geometry, atlas, and WAV edits; payload/header cache corruption recovery; a cache-root override; and typed unsupported-extension diagnostics. It needs no GPU, audio device, network download, or extra Cargo build. Default CPU18 and native `--view` meanings remain unchanged. CPU catalog success does not establish textured rendering, sprite playback, audio output, reload, or P03/D1 acceptance.
 
-The macOS/Linux package workflow is configured to run `--assets --audio --asset-preparation` in one combined step against its staged binary after the shared package backend succeeds. The preparation change's actual CI outcome is recorded separately in its worklog. Archive verification also uses the CPU lifecycle and imported offline-audio checks; it requires no output device. Locally, run the same helper against an extracted binary to verify the new CPU asset path in that archive. Original public assets are tested separately with [revision/license/hash provenance](docs/02-research/asset-validation-provenance.md); they are not downloaded in CI or bundled with the engine.
+The macOS/Linux package workflow is configured to run `--assets --audio --asset-preparation --asset-activation` in one combined step against its staged binary after the shared package backend succeeds. The activation change's actual CI outcome is recorded separately in its worklog. The helper runs supported combinations in separate sub-smokes; it does not attach audio to the headless activation service. Archive verification also uses the CPU lifecycle and imported offline-audio checks; it requires no output device. Locally, run the same helper against an extracted binary to verify the new CPU asset path in that archive. Original public assets are tested separately with [revision/license/hash provenance](docs/02-research/asset-validation-provenance.md); they are not downloaded in CI or bundled with the engine.
 
 An optional GPU CLI build is explicit:
 
@@ -251,6 +251,23 @@ The opt-in preparation mode adds twelve CPU checks using one persistent service/
 
 The coordinator's local runs passed 30 checks with preparation alone, 50 combined CPU checks, and 60 full native checks. The same preparation actor produced 256 frames of finite nonzero PCM, retained the authority tick, and reaped the voice after Stop and another 64 frames. Its native view subsequently presented the same session/source at authority tick 1. The separate native audio check reached backend-reported Ended. Python discovery passed 61 tests; clean archive and CI acceptance are recorded separately in the preparation worklog.
 
+## Native headless source-generation activation
+
+The opt-in CPU path uses one existing Engine and preparation/cache worker:
+
+```sh
+cargo test -p daedalus-runtime --all-features --locked headless_activation
+cargo test -p daedalus-cli --all-features --locked project_view_control::tests::activation_
+cargo build -p daedalus-cli --all-features --locked
+target/debug/daedalus project serve /path/to/project --protocol 2 --asset-activation
+python3 scripts/smoke_project.py --cli target/debug/daedalus --asset-activation
+python3 scripts/smoke_project.py --cli target/debug/daedalus --assets --audio --asset-preparation --asset-activation
+```
+
+`--asset-activation` includes CPU preparation. Protocol 1, native viewing, and audio attached to that service are rejected before project/cache/device startup. The helper needs no GPU, output device, or network assets. It edits PNG, model-node, atlas, and WAV source data in one session, waits for actual Staged before Commit, and checks generation/source/frame identity while preserving the live handle, transform, revision, and authority tick. Replay, stale-generation retry, staged cancellation, incompatible topology, and fully stopped owner are also checked. The first actual CLI run passed 28 checks (CPU18 plus activation10) in 1.005974 seconds.
+
+This is CPU source activation. It does not update displayed pixels or an audio bank. `latest_frame.sequence` is the publication sequence; `authority_snapshot_sequence` identifies the underlying simulation snapshot. A deterministic actual-worker regression reproduced a Stage-result loss found by CI; the fix passed the corrected workspace (326 tests), CPU CLI smoke (62 checks), and all five PR checks including both packaged CPU smokes. The corrected clean macOS archive then failed the actual-device finite-audio completion check twice. PR acceptance remains held while the [native progress diagnostic](docs/03-architecture/native-audio-progress-diagnostics.md) separates playback progress from state completion; the earlier archive's 72-check success does not establish this artifact's native acceptance. The helper also checks actual invalid-option rejection before filesystem effects. See the [headless contract](docs/03-architecture/headless-asset-generation.md) and [activation worklog](docs/06-worklog/2026-10-16-project-asset-activation.md) for exact identities, coverage limits, and intermediate failures.
+
 ## Physics/audio integration
 
 The initial physics/audio adapters can be checked independently:
@@ -258,9 +275,14 @@ The initial physics/audio adapters can be checked independently:
 ```sh
 cargo test -p daedalus-physics -p daedalus-audio --locked -- --nocapture
 cargo test -p daedalus-audio --features native inspect_native_default_output_device_without_playback --locked -- --ignored --nocapture
+cargo test -p daedalus-audio --features native --locked service::tests::native_cpal_voice_progress_and_completion_diagnostic -- --ignored --exact --nocapture
+cargo test -p daedalus-audio --features native --locked service::tests::direct_cpal_default_stream_callback_progress_diagnostic -- --ignored --exact --nocapture
+cargo test -p daedalus-audio --features native --locked service::tests::direct_cpal_same_device_hal_callback_progress_diagnostic -- --ignored --exact --nocapture
 ```
 
 The coordinator verified 7 physics and 3 audio tests, plus the separately requested hardware probe on this Mac (48 kHz stereo). The probe does not open a stream or play audio. These tests exercise actual Jolt/Rapier bodies and Kira PCM, not completed character, terrain-collider, audio streaming, or ECS integration. See the [E06 record](docs/06-worklog/2026-10-15-e06-physics-audio.md). Native dependencies and source-build requirements are in the [dependency baseline](docs/02-research/implementation-dependency-baseline.md); Linux CPAL builds need ALSA development headers.
+
+The separate ignored Kira progress diagnostic opens the actual CPAL backend and plays the same finite 0.25-second tone used by the native project smoke. It records bounded position/state/error/CPU samples and requires real Stopped plus reap within the existing 10-second observation window. It failed: position stayed zero, no Kira CPU samples were observed, and one underrun/overrun was reported. Two silent direct-CPAL diagnostics reuse one atomic callback monitor: default output, and macOS-only same-DeviceId enumerated HAL output. Each actual run also failed with zero callbacks/frames. Default and native-feature CPU suites passed six tests each (native ignores four device checks). The OS `afplay` comparison independently failed AudioQueueStart(-66681) without interruption. Root cause and native acceptance remain unresolved; these failures do not pass an engine gate. See the [diagnostic contract](docs/03-architecture/native-audio-progress-diagnostics.md).
 
 ## Evidence and remaining coverage
 

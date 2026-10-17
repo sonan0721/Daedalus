@@ -58,6 +58,9 @@ pub(super) struct ProjectViewArgs {
     /// Enable the native bounded live asset-preparation worker (requires --stdio-control).
     #[arg(long)]
     pub asset_preparation: bool,
+    /// Reserved for native headless serve; project view does not yet attach the generation consumer.
+    #[arg(long)]
+    pub asset_activation: bool,
     /// Stable entity ID controlled by the arrow-key diagnostic action.
     #[arg(long)]
     pub controlled_entity: Option<String>,
@@ -195,6 +198,12 @@ fn session_termination_error(termination: &SessionTermination) -> Option<String>
 }
 
 fn validate_args(args: &ProjectViewArgs) -> Result<(), Box<dyn Error>> {
+    if args.asset_activation {
+        return Err(
+            "--asset-activation is supported only by `project serve --protocol 2`; project view has no generation consumer"
+                .into(),
+        );
+    }
     if args.asset_preparation && !args.stdio_control {
         return Err("--asset-preparation requires --stdio-control for project view".into());
     }
@@ -891,7 +900,7 @@ mod tests {
     use daedalus_renderer::PacketWindowMessage;
     use daedalus_runtime::SessionTermination;
 
-    use super::{send_pending_close, session_termination_error};
+    use super::{ProjectViewArgs, send_pending_close, session_termination_error, validate_args};
 
     #[test]
     fn normal_session_stop_succeeds_but_engine_failure_and_panic_fail_closed() {
@@ -907,6 +916,26 @@ mod tests {
             session_termination_error(&SessionTermination::Panicked("boom".into()))
                 .is_some_and(|error| error.contains("boom"))
         );
+    }
+
+    #[test]
+    fn asset_activation_is_rejected_by_view_before_project_io() {
+        let args = ProjectViewArgs {
+            directory: std::path::PathBuf::from("/definitely/not/a/project"),
+            clock: crate::project::ProjectClockArg::Realtime,
+            audio: None,
+            stdio_control: false,
+            asset_preparation: false,
+            asset_activation: true,
+            controlled_entity: None,
+            width: 1280,
+            height: 720,
+            seconds: None,
+            frames: None,
+            report: None,
+        };
+        let error = validate_args(&args).unwrap_err().to_string();
+        assert!(error.contains("project serve --protocol 2"));
     }
 
     #[test]

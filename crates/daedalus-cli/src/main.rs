@@ -120,6 +120,9 @@ enum ProjectCommands {
         /// Enable the native bounded live asset-preparation worker (protocol 2 only).
         #[arg(long)]
         asset_preparation: bool,
+        /// Enable native headless project-generation staging and commit (protocol 2 only).
+        #[arg(long)]
+        asset_activation: bool,
     },
     /// Open the external project with a native window and optional protocol-2 control.
     #[cfg(feature = "window")]

@@ -87,37 +87,36 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             clock,
             audio,
             asset_preparation,
-        } => match protocol {
-            1 => {
-                if clock.is_some() || audio.is_some() || asset_preparation {
-                    return Err(
-                        "--clock, --audio, and --asset-preparation require `project serve --protocol 2`"
-                            .into(),
-                    );
+            asset_activation,
+        } => {
+            validate_serve_options(protocol, clock, audio, asset_preparation, asset_activation)?;
+            match protocol {
+                1 => {
+                    let mut session = ProjectSession::new(
+                        super::project_assets::load_project_runtime(&directory)?,
+                        EngineConfig::default(),
+                    )?;
+                    let info = project_info(&session);
+                    let stdin = std::io::stdin();
+                    let stdout = std::io::stdout();
+                    super::control::serve_project_jsonl(
+                        session.engine_mut(),
+                        stdin.lock(),
+                        stdout.lock(),
+                        super::control::ControlLimits::default(),
+                        info,
+                    )?;
                 }
-                let mut session = ProjectSession::new(
-                    super::project_assets::load_project_runtime(&directory)?,
-                    EngineConfig::default(),
-                )?;
-                let info = project_info(&session);
-                let stdin = std::io::stdin();
-                let stdout = std::io::stdout();
-                super::control::serve_project_jsonl(
-                    session.engine_mut(),
-                    stdin.lock(),
-                    stdout.lock(),
-                    super::control::ControlLimits::default(),
-                    info,
-                )?;
+                2 => serve_project_protocol2(
+                    &directory,
+                    clock.unwrap_or(ProjectClockArg::Manual),
+                    audio,
+                    asset_preparation,
+                    asset_activation,
+                )?,
+                _ => unreachable!("Clap constrains project serve protocol to 1 or 2"),
             }
-            2 => serve_project_protocol2(
-                &directory,
-                clock.unwrap_or(ProjectClockArg::Manual),
-                audio,
-                asset_preparation,
-            )?,
-            _ => unreachable!("Clap constrains project serve protocol to 1 or 2"),
-        },
+        }
         #[cfg(feature = "window")]
         ProjectCommands::View(args) => super::project_view::run(args)?,
         #[cfg(feature = "capture")]
@@ -128,6 +127,27 @@ pub(super) fn run(command: ProjectCommands) -> Result<(), Box<dyn Error>> {
             height,
             ticks,
         } => capture_project(&directory, output, width, height, ticks)?,
+    }
+    Ok(())
+}
+
+fn validate_serve_options(
+    protocol: u8,
+    clock: Option<ProjectClockArg>,
+    audio: Option<ProjectAudioArg>,
+    asset_preparation: bool,
+    asset_activation: bool,
+) -> Result<(), Box<dyn Error>> {
+    if protocol == 1
+        && (clock.is_some() || audio.is_some() || asset_preparation || asset_activation)
+    {
+        return Err(
+            "--clock, --audio, --asset-preparation, and --asset-activation require `project serve --protocol 2`"
+                .into(),
+        );
+    }
+    if protocol == 2 && asset_activation && audio.is_some() {
+        return Err("--asset-activation cannot be combined with --audio".into());
     }
     Ok(())
 }
@@ -284,10 +304,19 @@ fn serve_project_protocol2(
     clock: ProjectClockArg,
     audio: Option<ProjectAudioArg>,
     asset_preparation: bool,
+    asset_activation: bool,
 ) -> Result<(), Box<dyn Error>> {
-    use std::thread;
-    use std::time::Duration;
-
+    // Reject unsupported combinations before opening project files, cache roots, or native
+    // workers. The activation owner includes the preparation worker itself.
+    if asset_activation {
+        if audio.is_some() {
+            return Err("--asset-activation cannot be combined with --audio".into());
+        }
+        if cfg!(target_family = "wasm") {
+            return Err("native asset activation is unavailable on this target".into());
+        }
+        return serve_project_protocol2_activation(directory, clock);
+    }
     validate_session_feature_options(audio, asset_preparation)?;
     let mut preparation_owner = if asset_preparation {
         Some(NativeProjectPreparationService::start(
@@ -331,28 +360,108 @@ fn serve_project_protocol2(
             return Err(error);
         }
     };
-    let client = match service.attach_with_capabilities(SessionCapabilities::trusted_local()) {
-        Ok(client) => client,
-        Err(error) => {
-            let _ = service.shutdown();
-            let _ = stop_preparation_worker(&mut preparation_owner);
-            return Err(Box::new(error));
+    let loop_result = serve_project_protocol2_stdio(&service, clock, limits, audio.is_some());
+    service.request_stop();
+    let shutdown = service.shutdown();
+    let worker_shutdown = stop_preparation_worker(&mut preparation_owner)?;
+    if let Some(status) = worker_shutdown {
+        eprintln!(
+            "asset_preparation_worker={}",
+            preparation_shutdown_name(status)
+        );
+    }
+    let actor_stopped_before_owner_exit = loop_result?;
+    if actor_stopped_before_owner_exit || shutdown.termination != SessionTermination::StopRequested
+    {
+        return Err(format!(
+            "project protocol-2 session terminated abnormally: {:?}",
+            shutdown.termination
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn serve_project_protocol2_activation(
+    directory: &Path,
+    clock: ProjectClockArg,
+) -> Result<(), Box<dyn Error>> {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let limits = SessionControlLimits::default();
+    let config = SessionControlConfig {
+        engine: EngineConfig::default(),
+        clock_mode: clock.runtime(),
+        limits,
+    };
+    let mut owner = daedalus_runtime::NativeProjectActivationService::start_headless(
+        NativeProjectPreparationOptions::new(directory),
+        config,
+    )?;
+    let loop_result = serve_project_protocol2_stdio(owner.session(), clock, limits, false);
+    owner.request_stop();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let stopped = loop {
+        match owner.try_shutdown() {
+            Err(error) => {
+                eprintln!("asset_activation_owner=failed error={error}");
+                return Err(Box::new(error));
+            }
+            Ok(daedalus_runtime::NativeProjectActivationShutdown::Stopped) => {
+                eprintln!("asset_activation_owner=stopped");
+                break true;
+            }
+            Ok(daedalus_runtime::NativeProjectActivationShutdown::Stopping)
+                if Instant::now() >= deadline =>
+            {
+                eprintln!("asset_activation_owner=stopping");
+                break false;
+            }
+            Ok(daedalus_runtime::NativeProjectActivationShutdown::Stopping) => {
+                thread::sleep(Duration::from_millis(10));
+            }
         }
     };
-    let transport = match super::project_view_control::StdioTransport::start() {
-        Ok(transport) => transport,
-        Err(error) => {
-            let _ = service.shutdown();
-            let _ = stop_preparation_worker(&mut preparation_owner);
-            return Err(Box::new(error));
+    let actor_stopped_before_owner_exit = loop_result?;
+    if stopped {
+        let report = owner
+            .shutdown_report()
+            .ok_or("activation owner stopped without an actor shutdown report")?;
+        eprintln!("project_actor=stopped termination={:?}", report.termination);
+        eprintln!("asset_generation_worker=stopped");
+        if report.termination != SessionTermination::StopRequested {
+            return Err(format!(
+                "project protocol-2 activation session terminated abnormally: {:?}",
+                report.termination
+            )
+            .into());
         }
-    };
+    }
+    if actor_stopped_before_owner_exit {
+        return Err("project protocol-2 activation actor stopped before owner exit".into());
+    }
+    Ok(())
+}
+
+fn serve_project_protocol2_stdio(
+    service: &SessionControlService,
+    clock: ProjectClockArg,
+    limits: SessionControlLimits,
+    audio_enabled: bool,
+) -> Result<bool, Box<dyn Error>> {
+    use std::thread;
+    use std::time::Duration;
+
+    let client = service.attach_with_capabilities(SessionCapabilities::trusted_local())?;
+    let transport = super::project_view_control::StdioTransport::start()?;
     let mut controller = super::project_view_control::ProtocolController::new(
         transport,
         client,
         clock.runtime(),
         limits,
-        audio.is_some(),
+        audio_enabled,
     );
     while controller.detach_reason().is_none()
         && !controller.closing()
@@ -371,24 +480,7 @@ fn serve_project_protocol2(
         && controller.detach_reason().is_none()
         && !controller.closing();
     drop(controller);
-    service.request_stop();
-    let shutdown = service.shutdown();
-    let worker_shutdown = stop_preparation_worker(&mut preparation_owner)?;
-    if let Some(status) = worker_shutdown {
-        eprintln!(
-            "asset_preparation_worker={}",
-            preparation_shutdown_name(status)
-        );
-    }
-    if actor_stopped_before_owner_exit || shutdown.termination != SessionTermination::StopRequested
-    {
-        return Err(format!(
-            "project protocol-2 session terminated abnormally: {:?}",
-            shutdown.termination
-        )
-        .into());
-    }
-    Ok(())
+    Ok(actor_stopped_before_owner_exit)
 }
 
 pub(super) const fn preparation_shutdown_name(status: PreparationWorkerShutdown) -> &'static str {
@@ -684,7 +776,10 @@ mod tests {
     use clap::Parser;
     use daedalus_content::project::{ProjectError, load_project};
 
-    use super::{ProjectCommands, create_empty_project};
+    use super::{
+        ProjectAudioArg, ProjectClockArg, ProjectCommands, create_empty_project,
+        validate_serve_options,
+    };
     use crate::Args;
 
     fn temporary_directory(label: &str) -> std::path::PathBuf {
@@ -774,6 +869,43 @@ mod tests {
                 command: ProjectCommands::Init { .. }
             }
         ));
+        let activation_serve = Args::try_parse_from([
+            "daedalus",
+            "project",
+            "serve",
+            "/tmp/new",
+            "--protocol",
+            "2",
+            "--asset-activation",
+            "--asset-preparation",
+        ])
+        .unwrap();
+        assert!(matches!(
+            activation_serve.command,
+            super::super::Commands::Project {
+                command: ProjectCommands::Serve {
+                    protocol: 2,
+                    asset_activation: true,
+                    asset_preparation: true,
+                    ..
+                }
+            }
+        ));
+        assert!(
+            Args::try_parse_from([
+                "daedalus",
+                "project",
+                "serve",
+                "/tmp/missing",
+                "--asset-activation"
+            ])
+            .is_ok()
+        );
+        assert!(validate_serve_options(1, None, None, false, true).is_err());
+        assert!(
+            validate_serve_options(2, None, Some(ProjectAudioArg::Offline), false, true).is_err()
+        );
+        assert!(validate_serve_options(2, Some(ProjectClockArg::Manual), None, true, true).is_ok());
         assert!(matches!(
             Args::try_parse_from([
                 "daedalus",

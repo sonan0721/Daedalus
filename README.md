@@ -72,7 +72,15 @@ An opt-in native worker can prepare CPU asset candidates while the same project 
 cargo run -p daedalus-cli -- project serve /path/to/project --protocol 2 --asset-preparation
 ```
 
-Protocol 2 exposes `asset_preparation_prepare`, `asset_preparation_status`, and `asset_preparation_cancel` through the existing submit/poll/ack tickets. One worker owns the cache and coalesces requests to the latest candidate; status includes bounded source, memory, and cook metrics. The [preparation contract](docs/03-architecture/project-asset-preparation.md) defines cancellation, replay, and shutdown. This prepares candidates only: it does not replace the active scene, GPU resources, or audio bank. Native viewing uses the same option together with `--stdio-control`; automatic file watching and activation remain unfinished.
+Protocol 2 exposes `asset_preparation_prepare`, `asset_preparation_status`, and `asset_preparation_cancel` through the existing submit/poll/ack tickets. One worker owns the cache and coalesces requests to the latest candidate; status includes bounded source, memory, and cook metrics. The [preparation contract](docs/03-architecture/project-asset-preparation.md) defines cancellation, replay, and shutdown. This option prepares candidates only. Native viewing uses it together with `--stdio-control`; automatic file watching and live renderer/audio activation remain unfinished.
+
+A native headless session can also enable CPU source activation:
+
+```sh
+cargo run -p daedalus-cli -- project serve /path/to/project --protocol 2 --asset-activation
+```
+
+This includes preparation and adds `asset_activation_status`, `asset_activation_stage`, `asset_activation_commit`, and `asset_activation_cancel` to the same ticket/replay service. A compatible candidate can replace the source while retaining the Engine, entity handles, live transforms, and authority tick. Stage acceptance precedes actual staging; clients wait for Staged before Commit. Previous CPU backing remains accounted until the worker reclaims it. The [headless activation contract](docs/03-architecture/headless-asset-generation.md) defines IDs, errors, bounds, and shutdown. This mode rejects attached audio and native viewing; successful CPU commit does not mean new pixels were displayed or an audio bank changed.
 
 ## Build a local CLI package
 

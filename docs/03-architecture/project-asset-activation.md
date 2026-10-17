@@ -1,12 +1,16 @@
 # P03.3b/c 에셋 세대의 staged activation과 회수
 
-상태: 선행 P03.3a 인수·source 감사 기반 설계 초안. public API/consumer handshake/세부 한도 리뷰 전, 구현 미착수 · 2026-10-16
+상태: P03.3b.1 로컬 선행 검증·b.2 headless 계약 동결/구현 중. render/audio handshake·전체 b/c 인수 전 · 2026-10-16
 
 ## 목적과 선행 조건
 
 [P03.3a](project-asset-preparation.md)는 같은 session에서 다음 CPU 후보를 준비한다. 이 문서는 그 후보를 기존 entity·현재 gameplay state를 유지하며 실제 render/audio consumer에 적용하는 다음 계약이다. [PR14](https://github.com/sonan0721/Daedalus/pull/14)의 verified main `275ea360fb53dde3713aca84910781a4c895a8e4`를 출발점으로 삼는다. CPU 준비, actor commit, device 자원 준비, 실제 표시와 backing 회수는 서로 다른 관찰 지점이다.
 
 이번 경로는 **scene entity/component topology를 보존하는 에셋 교체**다. 일반 scene patch·entity 추가/제거·reparent·게임플레이 module reload·watcher는 별도 계약이다. 전체 P03/D1/D2/D3는 열려 있다. 이 초안이나 이름 있는 API만으로 구현을 체크하지 않는다.
+
+현재 구체 구현 범위는 [authored 비교기](asset-replacement-compatibility.md)와 그 다음 [headless CPU 세대 계약](headless-asset-generation.md)이다. headless의 같은 Engine commit/worker 회수를 먼저 검증하고, 실제 renderer/audio consumer의 장치 준비·표시·voice 수명을 이어서 연결한다. 아래 render/audio 상세 미결을 headless factory가 지원한 것으로 우회하지 않는다.
+
+renderer의 source 확인·작업 단위·pin/종료 owner graph와 미결 API는 [b.3 상세 초안](staged-render-asset-generation.md)에 모았다. b.2 인수와 상세 동결 전에는 renderer/consumer 코드를 배정하지 않는다.
 
 ## 확인한 현재 경계
 
@@ -32,6 +36,8 @@
 7. 모든 retained owner는 예산을 유지한다. 새 준비를 위해 아직 사용 중인 packet·looping voice·callback backing을 해제된 것으로 계산하지 않는다.
 
 ## 첫 asset-only 호환성 규칙
+
+이 경계의 상세 field·revision/order·오류·index 한도·Rust API는 [P03.3b.1 호환성 계약](asset-replacement-compatibility.md)으로 먼저 동결했다. 아래 표의 초기 방향보다 상세 계약을 우선한다. 이 CPU 선행 구현의 완료가 뒤의 lease/commit/presentation/audio 계약을 동결하거나 구현한 뜻은 아니다.
 
 초기 activation은 보수적인 semantic 비교를 사용한다. 비교·정렬/해시는 off-actor에서 수행하고, actor commit은 검증된 identity·현재 generation·작은 handle 정보를 확인한다. fingerprint만으로 소유권·현재 state 검증을 대체하지 않는다.
 
@@ -63,6 +69,8 @@ P03.3a의 worker-local payload를 그냥 actor로 이동하면 마지막 Vec/Arc
 추가 source 리뷰는 초기 source의 강한 참조도 찾았다. 현재 preparation service·port가 각각 initial project Arc를 보유하고 CLI coordinator도 source를 유지한다. actor의 project만 바꾸면 첫 generation이 회수되지 않는다. startup source identity 검증을 유지하면서 post-bind 참조를 해제/약화하거나, 기존 a API를 보존하는 새 소비형 owner/factory를 제공하는 lifecycle을 먼저 동결한다. getter가 가리키는 값을 조용히 없애거나 API를 panic하게 바꾸지 않는다.
 
 worker의 active cooked 장부도 현재 초기 source 값으로 고정돼 있다. commit/retire 시 generation별 charge가 정확히 이동해야 한다. 후보를 queue로 넘기거나 취소 표시하는 시점에 byte quota를 먼저 돌려주지 않는다. retirement slot이 가득 찼을 때 commit 전에 공간을 예약하고 명시적 Busy를 반환할 수 있어야 한다. 종료/Drop 경로도 큰 backing을 caller thread로 떠넘기지 않는지 검증한다.
+
+회수의 구체 후보는 worker가 모든 engine-owned project의 reclamation Arc를 유지하고 `Arc::try_unwrap` 성공 뒤 큰 project를 worker에서 파괴하는 방식이다. 실패 Arc는 장부와 함께 유지하며 `.ok()`로 버리지 않는다. source 단독 소유권과 초기 참조 consume·panic/stop 정리 순서는 아직 다음 native owner 계약에서 동결할 사항이다. [공식 Arc 계약](https://doc.rust-lang.org/std/sync/struct.Arc.html#method.try_unwrap)은 이 선택의 근거이며 refcount를 한 번 읽은 것만으로 회수 완료를 보고하지 않는다. worker의 기존 outer catch 안에만 backstop을 두면 panic unwind 때 먼저 사라질 수 있어, failure guard와 actor 종료·실제 final drop도 함께 검토한다.
 
 read-only 리뷰의 API 후보는 non-Clone opaque `PreparedProjectLease`와 단일 bounded handoff slot이다. lease에는 candidate ID·memory charge·borrowed source view를 묶고 commit/폐기까지 reservation을 유지한다. `try_take_candidate`의 정확한 visibility·receiver/coordinator 경계와 `project()` borrow가 기존 Clone API에 노출하는 범위는 아직 동결하지 않았다. renderer/runtime 사이에 현재 없는 dependency를 가정해 crate-private 메서드를 다른 crate에서 호출하는 signature를 확정하지 않는다.
 
@@ -97,6 +105,16 @@ candidate의 parse·topology·CPU/GPU 예산·device staging 실패는 기존 ac
 
 GPU staging은 기존 device와 completion tracking을 사용한다. CPU upload descriptor 준비와 device 생성/업로드를 분리하고 한 번의 UI callback에 전체 import를 넣지 않는다. 실제 upload 작업량·staging bytes·completion/backpressure를 계측하며, 모든 driver call이 1ms 미만이라는 보장은 하지 않는다. 로딩 중 입력/Step/실제 표시의 진행은 따로 검증한다.
 
+현재 `PacketRenderer::plan_resources`는 같은 제출에서 ready packet을 바꾸는 전제라 geometry admission에 `no_active`를 전달하고 texture/sampler도 새 packet의 requested set을 기준으로 victim을 고른다. stage-only API에서 이 planner를 그대로 호출하면 GPU 완료된 이전 정상 자원을 actor commit 전에 축출할 수 있다. 후속 장치 계약은 active+staged pin 집합과 실제 retirement를 함께 다뤄야 한다. 기존 `commit_resources`/upload/draw/ready 교체의 한 경로를 중간에서 단순 분리하지 않는다.
+
+또한 현재 submission은 한 candidate의 전체 geometry/texture upload와 draw를 묶는다. 비동기 CPU import만으로 UI의 device 작업이 작아지는 것은 아니다. 후속 설계에서는 pump별 upload bytes·resource 생성 수·단계별 실패/취소 회수와 기존 in-flight 한도 안의 presentation 진행 여유를 동결하고 실제 driver/GPU/표시 시간을 측정해야 한다. 아직 숫자·stage API·성능을 확정한 구현은 아니다.
+
+후속 read-only 교차 리뷰는 정확한 연결 지점도 확인했다. renderer `packet.rs::ProjectRenderResources::prepare`는 `&PreparedProject`와 현재 authored handle map을 받지만, 추출된 sidecar/packet에 generation 회계 lease는 없다. `packet_renderer.rs::note_submission/poll_retirement`의 serial·callback watermark·staging ledger를 stage-only에도 재사용하되 draw/present를 수행한 것으로 기록하지 않아야 한다. `window.rs`는 최종 presented report만 제공하고 실행 중 candidate의 stage/present ACK 채널은 아직 없다. GPU 완료는 현재 화면에 필요한 old generation을 축출해도 된다는 뜻이 아니다.
+
+다음 계약은 host가 소유하는 bounded stage/present ACK 경계와 prepared-resource/packet까지 이어지는 source cleanup pin을 함께 정해야 한다. opaque move-only lease·짧은 borrowed callback·content read-only view는 아직 대안이며 `Any` token/framework를 채택한 결정이 아니다. 기존 PreparedProject는 Clone 가능한 native type이므로 borrowed 참조도 신뢰된 SDK 경계임을 명시해야 한다. control status에 payload를 노출하지 않는 보장과, 임의 native caller의 별도 clone/allocation을 제한한다는 주장을 혼동하지 않는다.
+
+[S86](../02-research/source-register.md)의 pinned wgpu27.0.1 source 확인은 callback의 비용도 분리해야 함을 보여준다. native 완료 callback은 submit/poll 진행 thread에서 실행될 수 있어 작은 serial/watermark 게시만 맡긴다. 큰 후보/packet의 마지막 drop이나 import·정리를 callback에 넣지 않는다. write 호출의 반환·후속 submission 완료·실제 present를 별도로 추적하며 stage-only도 draw 없이 completion reservation을 사용한다. UI의 blocking Wait로 이를 대신하지 않는다. staging 재사용 방식/작업량 수치와 실제 장치 검증은 아직 후속 동결 항목이다.
+
 ## audio bank와 old voice
 
 새 Play는 commit 후 current bank에서 clip을 찾고, 이미 재생 중인 voice는 원래 generation/clip identity를 유지한다. voice의 volume/pan/Stop/query는 old bank를 포함해 원래 voice를 대상으로 한다. alias index만 새 bank에 재사용해 다른 clip을 가리키게 하지 않는다. old loop 때문에 여러 generation이 남으면 한도에서 Busy가 가능해야 한다.
@@ -104,6 +122,8 @@ GPU staging은 기존 device와 completion tracking을 사용한다. CPU upload 
 Frame 변환은 `(실제 audio leaf identity, Frame layout version)`의 동일한 backing을 재사용하는 방향이다. 동일 key라도 실제로 별도 allocation을 만들었으면 공유한 것처럼 계수하지 않는다. 새 bank 전체를 매번 다시 변환하는 반복과 voice마다 PCM 복사를 피한다. backend sample clock·기존 native stream과 voice ID는 유지한다.
 
 old bank/frame charge를 해제하려면 tracked voice 종료뿐 아니라 backend/callback의 보유도 설명해야 한다. 기존 private Arc·backend ownership을 조사해 안전한 observation/retirement seam을 동결한다. 확인할 수 없으면 보수적으로 charge를 유지하고 explicit backpressure를 반환한다. 사용자 모드의 임의 native allocation까지 제한한다고 주장하지 않는다.
+
+추가 pinned-source 리뷰는 `PcmClip`→`StaticSoundData`→Kira render-owned `StaticSound`가 같은 `Arc<[Frame]>`를 보유하고 handle은 command/playback state만 보유함을 확인했다. 따라서 voice reap과 backing 회수는 다르다. 다음 audio 계약의 후보는 actual allocation별 단일 Frame store·`(LeafCookKey, Frame layout version)` 재사용·generation별 alias metadata와 voice origin·opaque backing observer다. observer만 weak로 두면 실제 소멸은 알 수 있어도 마지막 큰 free를 callback/actor에서 피하지 못한다. retirement cleanup owner가 strong sentinel을 유지하고 old Play 차단·bank/candidate owner 해제 뒤 sentinel-only baseline을 확인한 후 그 owner에서 해제하는 순서까지 필요하다. unsized `[Frame]`에 Sized project의 try_unwrap을 그대로 적용하지 않는다. 아직 API/owner baseline·metadata/종료 계약을 동결하거나 구현하지 않았다.
 
 ## 한도와 수명 장부
 
@@ -129,7 +149,7 @@ old bank/frame charge를 해제하려면 tracked voice 종료뿐 아니라 backe
 
 ## 구현 착수 전 동결 목록
 
-- [ ] semantic topology 비교의 정확한 허용 field·revision/order 규칙과 불일치 진단.
+- [x] semantic topology 비교의 정확한 허용 field·revision/order 규칙과 불일치 진단: P03.3b.1 상세 계약 동결. 구현/검증은 별도.
 - [ ] worker-private candidate handoff·CPU cleanup owner·lease/release·정지/실패 시 소유권.
 - [ ] headless/native/audio 조합의 consumer 등록·ready/commit/presentation handshake와 dependency 방향.
 - [ ] prepared CPU geometry/metadata·모든 retired backing의 aggregate 수치/회계와 observer 수명.

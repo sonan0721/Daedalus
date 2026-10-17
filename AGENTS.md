@@ -22,6 +22,8 @@
 - Share the public API contract before dependent parallel edits; keep file ownership disjoint and assign one Cargo.lock owner.
 - Reuse the workspace build cache. Coordinate Cargo checks against the shared target directory; do not create a second cold workspace only to bypass an in-progress lockfile update.
 - Run focused CPU checks while implementing. After source integration is stable, run the required workspace/managed checks and then hardware/UI checks. Repeat broad checks when changes or failures justify them.
+- Create evidence logs exclusively (shell `noclobber` or equivalent), with task-specific names. Fail on an existing filename; never reset an attempt counter over earlier raw output, including failed runs. Record any lost evidence explicitly rather than reconstructing historical output.
+- For focused tests, verify that the intended fully qualified test actually ran. A successful command with zero matching tests is not evidence for that case; keep the output and correct the filter.
 - CI caches accelerate dependencies and compilation; cache hits never replace locked builds, tests, or package smoke checks. Keep credentials and per-user configuration outside cached paths.
 - Optimize recurring development work across project lifecycle, common control service, SDK/schema binding, asset cooking, AI edit/run/observe/test loops, and packaging. Record actual duplication, correctness/invalidation behavior, and iteration evidence in [the workflow plan](docs/04-plan/development-iteration-pipeline.md). Do not equate this request with runtime optimization or CI caching alone.
 

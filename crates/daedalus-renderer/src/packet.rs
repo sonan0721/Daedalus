@@ -1298,7 +1298,7 @@ fn inverse_transpose(transform: Mat4) -> Result<Mat3, PacketRenderError> {
     })
 }
 
-fn valid_source_digest(digest: &str) -> bool {
+pub(crate) fn valid_source_digest(digest: &str) -> bool {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
     hex.len() == 64
         && hex

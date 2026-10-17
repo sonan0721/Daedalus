@@ -8,6 +8,7 @@
 //! unlit pass on sRGB targets. Shadows, general transparency, and temporal
 //! effects remain future work.
 
+mod gpu_owner;
 mod packet;
 mod packet_renderer;
 mod project;
@@ -19,6 +20,7 @@ mod window;
 #[cfg(feature = "test-fixtures")]
 pub mod test_fixtures;
 
+pub use gpu_owner::{WindowGpuOwner, WindowGpuOwnerPhase};
 pub use packet::{
     CpuFrameHandle, CpuGenerationId, CpuReclaimStatus, MeshHandle, MeshResourceLimits,
     PREPARED_RENDER_METADATA_LIMIT_BYTES, PacketAssetLimits, PacketCpuLimits, PacketCpuOwner,
@@ -41,10 +43,16 @@ pub use scene::{Camera, DirectionalLight, Material, Mesh, RenderObject, RenderSc
 pub use window::{
     FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervalStats, MAX_WINDOW_SCENE_GEOMETRY_BYTES,
     MAX_WINDOW_SCENE_INDICES, MAX_WINDOW_SCENE_OBJECTS, MAX_WINDOW_SCENE_VERTICES,
-    PacketAssetWindowOutcome, PacketPresentationWindowOutcome, PacketWindowError,
-    PacketWindowMessage, PacketWindowOutcome, PresentationMetadata, PresentedPacket, PresentedView,
-    WindowExitReason, WindowInput, WindowInputSink, WindowKeyCode, WindowMessage, WindowOptions,
-    WindowOutcome, WindowReport, run_packet_windowed_presented, run_packet_windowed_reported,
-    run_packet_windowed_reported_with_asset_limits, run_windowed, run_windowed_reported,
-    window_input_channel,
+    ManagedGenerationIdentity, ManagedPacketWindowClient, ManagedPacketWindowControl,
+    ManagedPacketWindowInput, ManagedPacketWindowOptions, ManagedPacketWindowServer,
+    ManagedPresentedSummary, ManagedPresentedView, ManagedStageDeferredReason, ManagedStageEvent,
+    ManagedStageKey, ManagedWindowError, ManagedWindowErrorCode, ManagedWindowExitReason,
+    ManagedWindowLifecycle, ManagedWindowOutcome, ManagedWindowRead, ManagedWindowRun,
+    ManagedWindowStatus, PacketAssetWindowOutcome, PacketPresentationWindowOutcome,
+    PacketStageStatusSummary, PacketWindowError, PacketWindowMessage, PacketWindowOutcome,
+    PresentationMetadata, PresentedPacket, PresentedView, WindowExitReason, WindowInput,
+    WindowInputSink, WindowKeyCode, WindowMessage, WindowOptions, WindowOutcome, WindowReport,
+    managed_packet_window_channel, run_packet_windowed_managed, run_packet_windowed_presented,
+    run_packet_windowed_reported, run_packet_windowed_reported_with_asset_limits, run_windowed,
+    run_windowed_reported, window_input_channel,
 };

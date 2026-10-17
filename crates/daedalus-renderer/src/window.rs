@@ -1,9 +1,10 @@
 use std::{
     collections::{HashSet, VecDeque},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     time::{Duration, Instant},
 };
@@ -21,12 +22,19 @@ use winit::{
 /// Key code type exposed by the window input observer.
 pub use winit::keyboard::KeyCode as WindowKeyCode;
 
+use crate::packet::valid_source_digest;
 use crate::{
-    Camera, PacketAssetLimits, PacketRenderError, PacketRenderer, PacketRendererLimits,
-    PacketResourceStats, RenderPacket, RenderScene, RenderView, Renderer, RendererError,
-    RendererInfo,
+    Camera, CpuFrameHandle, PacketAssetLimits, PacketAssetResourceStats, PacketRenderError,
+    PacketRenderer, PacketRendererLimits, PacketResourceStats, PacketStageError, PacketStageId,
+    PacketStageInput, PacketStageLimits, PacketStageState, PacketStageStatus, RenderPacket,
+    RenderScene, RenderView, Renderer, RendererError, RendererInfo, WindowGpuOwner,
+    WindowGpuOwnerPhase,
 };
 use daedalus_core::{SessionId, Tick};
+
+mod managed;
+use managed::ManagedPresentedReservationError;
+pub use managed::*;
 
 /// Maximum CPU-side scene geometry accepted by the native window path.
 /// These limits bound the validation-scene upload; they do not describe mesh
@@ -132,6 +140,57 @@ fn validate_packet_transition(
     }
     next.validate_reusing(limits, Some(previous))?;
     Ok(PacketTransition::New)
+}
+
+type FrameProgressMetadata<'a> = (SessionId, u64, &'a str, u64, Tick, Option<u64>);
+
+fn packet_progress_metadata(packet: &RenderPacket) -> FrameProgressMetadata<'_> {
+    (
+        packet.session(),
+        packet.project_generation(),
+        packet.source_digest(),
+        packet.sequence(),
+        packet.tick(),
+        packet.authority_snapshot_sequence(),
+    )
+}
+
+fn managed_frame_progress_error(
+    previous: FrameProgressMetadata<'_>,
+    next: &RenderPacket,
+) -> Option<&'static str> {
+    let (session, generation, digest, sequence, tick, snapshot_sequence) = previous;
+    if next.session() != session || next.project_generation() < generation {
+        return Some("managed frame session or generation moved backwards");
+    }
+    if next.project_generation() == generation && next.source_digest() != digest {
+        return Some("managed frame source digest changed within a generation");
+    }
+    if next.sequence() <= sequence {
+        return Some("managed frame publication sequence did not advance");
+    }
+    if next.tick() < tick {
+        return Some("managed frame tick moved backwards");
+    }
+    match (snapshot_sequence, next.authority_snapshot_sequence()) {
+        (Some(previous), Some(next)) if next < previous => {
+            Some("managed frame authority snapshot sequence moved backwards")
+        }
+        (Some(_), None) => Some("managed frame dropped its authority snapshot sequence"),
+        _ => None,
+    }
+}
+
+fn managed_frame_is_cancelled(
+    key: ManagedStageKey,
+    cancel_through: u64,
+    is_active_key: bool,
+) -> bool {
+    key.get() <= cancel_through && !is_active_key
+}
+
+fn managed_view_input_enabled(mode: WindowMode, has_presented_active_frame: bool) -> bool {
+    mode != WindowMode::Managed || has_presented_active_frame
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +540,30 @@ pub fn run_packet_windowed_presented(
     })
 }
 
+/// Opens the staged packet window and always returns its GPU owner, including
+/// startup errors and unwinds. The event loop runs on the calling thread.
+pub fn run_packet_windowed_managed(
+    initial: PacketStageInput,
+    server: ManagedPacketWindowServer,
+    options: ManagedPacketWindowOptions,
+) -> ManagedWindowRun {
+    let mut app = WindowApp::new_managed(initial, server, options);
+    let run_result = catch_unwind(AssertUnwindSafe(|| {
+        app.validate_managed_start()?;
+        let event_loop = EventLoop::new().map_err(|error| {
+            ManagedWindowError::new(ManagedWindowErrorCode::EventLoop, error.to_string())
+        })?;
+        event_loop.run_app(&mut app).map_err(|error| {
+            ManagedWindowError::new(ManagedWindowErrorCode::EventLoop, error.to_string())
+        })
+    }));
+    let outcome = match run_result {
+        Ok(result) => result,
+        Err(_) => Err(ManagedWindowError::internal_panic()),
+    };
+    app.finish_managed(outcome)
+}
+
 fn validate_options(options: &WindowOptions) -> Result<(), RendererError> {
     if options.width == 0 || options.height == 0 || options.frame_interval.is_zero() {
         return Err(RendererError::Window(
@@ -673,13 +756,56 @@ impl From<RendererError> for WindowFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowMode {
+    Legacy,
+    Packet,
+    Managed,
+}
+
+struct ManagedFrame {
+    key: ManagedStageKey,
+    identity: ManagedGenerationIdentity,
+    frame: Arc<CpuFrameHandle>,
+}
+
+struct ManagedStage {
+    key: ManagedStageKey,
+    identity: ManagedGenerationIdentity,
+    limits: PacketStageLimits,
+    input: Option<PacketStageInput>,
+    id: Option<PacketStageId>,
+    frame: Option<Arc<CpuFrameHandle>>,
+    event_published: bool,
+    cancellation_requested: bool,
+    last_status: Option<PacketStageStatus>,
+}
+
+struct ManagedWindowState {
+    server: ManagedPacketWindowServer,
+    initial: ManagedGenerationIdentity,
+    active: Option<ManagedFrame>,
+    stage: Option<ManagedStage>,
+    highest_key: ManagedStageKey,
+    deferred_key: Option<ManagedStageKey>,
+    pending_event: Option<ManagedStageEvent>,
+    present_sequence: u64,
+    last_presented: Option<ManagedPresentedView>,
+    bootstrap_frames: u64,
+}
+
 struct WindowApp {
     messages: Option<Receiver<WindowMessage>>,
     packet_messages: Option<Receiver<PacketWindowMessage>>,
     options: WindowOptions,
+    mode: WindowMode,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     packet_renderer: Option<PacketRenderer>,
+    gpu_owner: Option<WindowGpuOwner>,
+    managed: Option<ManagedWindowState>,
+    managed_failure: Option<ManagedWindowError>,
+    managed_reason: Option<ManagedWindowExitReason>,
     packet_limits: PacketRendererLimits,
     asset_limits: PacketAssetLimits,
     packet: Option<Arc<RenderPacket>>,
@@ -706,6 +832,132 @@ struct WindowApp {
     final_width: u32,
     final_height: u32,
     window_title: String,
+}
+
+fn update_managed_frame(
+    managed: &mut ManagedWindowState,
+    key: ManagedStageKey,
+    frame: Arc<CpuFrameHandle>,
+    cancel_through: u64,
+) -> Result<(), &'static str> {
+    let is_current_active_key = managed
+        .active
+        .as_ref()
+        .is_some_and(|active| active.key == key);
+    if managed_frame_is_cancelled(key, cancel_through, is_current_active_key) {
+        return Ok(());
+    }
+
+    let frame_matches_identity = |identity: &ManagedGenerationIdentity| {
+        frame.session() == identity.session()
+            && frame.project_generation() == identity.project_generation()
+            && frame.source_digest() == identity.source_digest()
+    };
+    let mut update_active = false;
+    let mut update_stage = false;
+    let mut invalid_message = None;
+
+    if let Some(active) = managed.active.as_ref()
+        && active.key == key
+    {
+        if !frame_matches_identity(&active.identity) {
+            invalid_message = Some("active frame identity does not match its stage key");
+        } else {
+            let current_sequence = active.frame.packet().sequence();
+            let next_sequence = frame.packet().sequence();
+            if next_sequence < current_sequence {
+                return Ok(());
+            }
+            if next_sequence == current_sequence {
+                if Arc::ptr_eq(&active.frame, &frame) {
+                    return Ok(());
+                }
+                invalid_message =
+                    Some("active frame reused a publication sequence with a different frame");
+            } else if let Some(message) = managed_frame_progress_error(
+                packet_progress_metadata(active.frame.packet()),
+                frame.packet(),
+            ) {
+                invalid_message = Some(message);
+            } else {
+                update_active = true;
+            }
+        }
+    } else if let Some(stage) = managed.stage.as_ref()
+        && stage.key == key
+    {
+        let ready = stage
+            .last_status
+            .as_ref()
+            .is_some_and(|status| status.state() == PacketStageState::Ready)
+            && stage.event_published;
+        if !ready || !frame_matches_identity(&stage.identity) {
+            invalid_message = Some("candidate frame arrived before matching stage readiness");
+        } else if let Some(current) = stage.frame.as_ref() {
+            let current_sequence = current.packet().sequence();
+            let next_sequence = frame.packet().sequence();
+            if next_sequence < current_sequence {
+                return Ok(());
+            }
+            if next_sequence == current_sequence {
+                if Arc::ptr_eq(current, &frame) {
+                    return Ok(());
+                }
+                invalid_message =
+                    Some("candidate frame reused a publication sequence with a different frame");
+            } else if let Some(message) = managed_frame_progress_error(
+                packet_progress_metadata(current.packet()),
+                frame.packet(),
+            ) {
+                invalid_message = Some(message);
+            } else {
+                update_stage = true;
+            }
+        } else {
+            let previous = managed
+                .active
+                .as_ref()
+                .map(|active| packet_progress_metadata(active.frame.packet()))
+                .or_else(|| {
+                    managed.last_presented.as_ref().map(|presented| {
+                        (
+                            presented.session(),
+                            presented.project_generation(),
+                            presented.source_digest(),
+                            presented.publication_sequence(),
+                            presented.tick(),
+                            presented.authority_snapshot_sequence(),
+                        )
+                    })
+                });
+            if let Some(message) =
+                previous.and_then(|previous| managed_frame_progress_error(previous, frame.packet()))
+            {
+                invalid_message = Some(message);
+            } else {
+                update_stage = true;
+            }
+        }
+    } else if managed
+        .active
+        .as_ref()
+        .is_some_and(|active| key < active.key)
+    {
+        // A late frame from an older already-promoted generation is harmlessly stale.
+        return Ok(());
+    } else {
+        invalid_message = Some("frame does not match the active or staged generation");
+    }
+
+    if let Some(message) = invalid_message {
+        return Err(message);
+    }
+    if update_active && let Some(active) = managed.active.as_mut() {
+        active.frame = frame;
+    } else if update_stage && let Some(stage) = managed.stage.as_mut() {
+        stage.frame = Some(frame);
+    }
+    Ok(())
 }
 
 impl WindowApp {
@@ -759,6 +1011,62 @@ impl WindowApp {
         )
     }
 
+    fn new_managed(
+        initial: PacketStageInput,
+        server: ManagedPacketWindowServer,
+        options: ManagedPacketWindowOptions,
+    ) -> Self {
+        let now = Instant::now();
+        let initial_identity = ManagedGenerationIdentity::new(
+            ManagedStageKey::INITIAL,
+            initial.session(),
+            initial.project_generation(),
+            initial.source_digest(),
+        );
+        let initial_stage = ManagedStage {
+            key: ManagedStageKey::INITIAL,
+            identity: initial_identity.clone(),
+            limits: options.initial_stage_limits,
+            input: Some(initial),
+            id: None,
+            frame: None,
+            event_published: false,
+            cancellation_requested: false,
+            last_status: None,
+        };
+        let initial_loading = options.window.initial_loading;
+        let width = options.window.width;
+        let height = options.window.height;
+        let mut app = Self::with_source(
+            None,
+            None,
+            RenderScene::new(),
+            None,
+            options.window,
+            options.packet_limits,
+            options.asset_limits,
+            now,
+            initial_loading,
+            width,
+            height,
+        );
+        app.mode = WindowMode::Managed;
+        app.gpu_owner = Some(WindowGpuOwner::new());
+        app.managed = Some(ManagedWindowState {
+            server,
+            initial: initial_identity,
+            active: None,
+            stage: Some(initial_stage),
+            highest_key: ManagedStageKey::INITIAL,
+            deferred_key: None,
+            pending_event: None,
+            present_sequence: 0,
+            last_presented: None,
+            bootstrap_frames: 0,
+        });
+        app
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn with_source(
         messages: Option<Receiver<WindowMessage>>,
@@ -782,9 +1090,18 @@ impl WindowApp {
             messages,
             packet_messages,
             options,
+            mode: if packet.is_some() {
+                WindowMode::Packet
+            } else {
+                WindowMode::Legacy
+            },
             window: None,
             renderer: None,
             packet_renderer: None,
+            gpu_owner: None,
+            managed: None,
+            managed_failure: None,
+            managed_reason: None,
             packet_limits,
             asset_limits,
             packet,
@@ -814,40 +1131,272 @@ impl WindowApp {
         }
     }
 
+    fn validate_managed_start(&self) -> Result<(), ManagedWindowError> {
+        let state = self.managed.as_ref().ok_or_else(|| {
+            ManagedWindowError::new(
+                ManagedWindowErrorCode::InvalidOptions,
+                "managed window state is missing",
+            )
+        })?;
+        validate_options(&self.options).map_err(|error| {
+            ManagedWindowError::new(ManagedWindowErrorCode::InvalidOptions, error.to_string())
+        })?;
+        if self.options.title.len() > 512 {
+            return Err(ManagedWindowError::new(
+                ManagedWindowErrorCode::InvalidOptions,
+                "managed window title exceeds 512 UTF-8 bytes",
+            ));
+        }
+        self.packet_limits.validate().map_err(|error| {
+            ManagedWindowError::new(ManagedWindowErrorCode::InvalidOptions, error.to_string())
+        })?;
+        self.asset_limits.validate().map_err(|error| {
+            ManagedWindowError::new(ManagedWindowErrorCode::InvalidOptions, error.to_string())
+        })?;
+        let initial = state.stage.as_ref().ok_or_else(|| {
+            ManagedWindowError::new(
+                ManagedWindowErrorCode::InvalidOptions,
+                "managed initial stage is missing",
+            )
+        })?;
+        let Some(input) = initial.input.as_ref() else {
+            return Err(ManagedWindowError::new(
+                ManagedWindowErrorCode::InvalidOptions,
+                "managed initial stage input is missing",
+            ));
+        };
+        if initial.key != ManagedStageKey::INITIAL
+            || input.project_generation() != 1
+            || input.session() != state.initial.session()
+            || !valid_source_digest(input.source_digest())
+            || input.packet_limits() != self.packet_limits
+            || input.asset_limits() != self.asset_limits
+            || initial.limits.upload_bytes_per_submission() == 0
+            || initial.limits.upload_bytes_per_submission()
+                > PacketStageLimits::default().upload_bytes_per_submission()
+            || initial.limits.max_resource_creates_per_submission() == 0
+            || initial.limits.max_resource_creates_per_submission()
+                > PacketStageLimits::default().max_resource_creates_per_submission()
+        {
+            return Err(ManagedWindowError::new(
+                ManagedWindowErrorCode::InvalidOptions,
+                "initial stage identity or limits are invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish_managed(mut self, run_result: Result<(), ManagedWindowError>) -> ManagedWindowRun {
+        let outcome = self.managed_failure.clone().map_or(run_result, Err);
+        if outcome.is_err() || self.exit_reason.is_none() {
+            self.exit_reason = Some(WindowExitReason::EventLoopReturned);
+        }
+
+        let resource_stats = self
+            .gpu_owner
+            .as_mut()
+            .and_then(WindowGpuOwner::packet_renderer_mut)
+            .map_or_else(PacketResourceStats::default, |renderer| {
+                renderer.resource_stats()
+            });
+        let asset_resource_stats = self
+            .gpu_owner
+            .as_mut()
+            .and_then(WindowGpuOwner::packet_renderer_mut)
+            .map_or_else(PacketAssetResourceStats::default, |renderer| {
+                renderer.asset_resource_stats()
+            });
+        let final_view = self.current_view();
+        let report = self.make_report();
+        let last_presented = self
+            .managed
+            .as_ref()
+            .and_then(|state| state.last_presented.clone());
+        let mut status = self.managed_status(ManagedWindowLifecycle::Closed);
+        status.exit_reason = if outcome.is_err() {
+            Some(ManagedWindowExitReason::Failed)
+        } else {
+            self.managed_exit_reason()
+        };
+        let window_outcome = outcome.map(|()| ManagedWindowOutcome {
+            report,
+            last_presented,
+            final_view,
+            resource_stats,
+            asset_resource_stats,
+        });
+
+        let shared = self
+            .managed
+            .as_ref()
+            .map(|state| Arc::clone(&state.server.shared));
+        if let Some(shared) = &shared {
+            shared.mark_closed();
+            let _ = shared.try_publish_status(status.clone());
+        }
+        if let Some(state) = self.managed.as_mut() {
+            state.active = None;
+            state.stage = None;
+            state.pending_event = None;
+        }
+        self.packet = None;
+        self.last_presented = None;
+        self.last_presented_view = None;
+        self.renderer = None;
+        self.packet_renderer = None;
+        drop(self.managed.take());
+        drop(self.surface.take());
+        drop(self.window.take());
+        let gpu_owner = self.gpu_owner.take().unwrap_or_default();
+        ManagedWindowRun {
+            outcome: window_outcome,
+            status,
+            gpu_owner,
+        }
+    }
+
+    fn managed_status(&self, lifecycle: ManagedWindowLifecycle) -> ManagedWindowStatus {
+        let (active, staging, last_presented, bootstrap_frames, shared) =
+            if let Some(state) = &self.managed {
+                let staging = state.stage.as_ref().and_then(|stage| {
+                    stage
+                        .last_status
+                        .as_ref()
+                        .map(|status| PacketStageStatusSummary::from_status(stage.key, status))
+                });
+                (
+                    state.active.as_ref().map(|active| active.identity.clone()),
+                    staging,
+                    state
+                        .last_presented
+                        .as_ref()
+                        .map(ManagedPresentedSummary::from_view),
+                    state.bootstrap_frames,
+                    Some(&state.server.shared),
+                )
+            } else {
+                (None, None, None, 0, None)
+            };
+        let owner_phase = self
+            .gpu_owner
+            .as_ref()
+            .map_or(WindowGpuOwnerPhase::NoDevice, WindowGpuOwner::phase);
+        let lifecycle = if lifecycle == ManagedWindowLifecycle::Closed {
+            lifecycle
+        } else if shared
+            .is_some_and(|shared| shared.host_stop_requested() || shared.view_close_requested())
+        {
+            ManagedWindowLifecycle::Stopping
+        } else if self.window.is_some() {
+            ManagedWindowLifecycle::Running
+        } else {
+            ManagedWindowLifecycle::Starting
+        };
+        ManagedWindowStatus {
+            lifecycle,
+            exit_reason: self.managed_exit_reason(),
+            owner_phase,
+            active,
+            staging,
+            last_presented,
+            rendered_frames: self.counters.rendered_frames,
+            bootstrap_frames,
+            physical_width: self.final_width,
+            physical_height: self.final_height,
+        }
+    }
+
+    fn managed_exit_reason(&self) -> Option<ManagedWindowExitReason> {
+        self.managed_reason
+            .or_else(|| {
+                self.managed_failure
+                    .as_ref()
+                    .map(|_| ManagedWindowExitReason::Failed)
+            })
+            .or_else(|| self.exit_reason.map(managed::map_exit_reason))
+    }
+
     fn current_camera(&self) -> &Camera {
-        self.local_view
+        if let Some(camera) = self
+            .local_view
             .as_ref()
             .map(RenderView::camera)
             .or(self.local_camera.as_ref())
-            .unwrap_or_else(|| {
-                self.packet
-                    .as_ref()
-                    .map_or(&self.scene.camera, |packet| packet.camera())
-            })
+        {
+            return camera;
+        }
+        if let Some(packet) = &self.packet {
+            return packet.camera();
+        }
+        if let Some(frame) = self.managed.as_ref().and_then(|managed| {
+            managed
+                .active
+                .as_ref()
+                .map(|active| &active.frame)
+                .or_else(|| {
+                    managed
+                        .stage
+                        .as_ref()
+                        .and_then(|stage| stage.frame.as_ref())
+                })
+        }) {
+            return frame.packet().camera();
+        }
+        &self.scene.camera
     }
 
     fn current_view(&self) -> RenderView {
         self.local_view.clone().unwrap_or_else(|| {
-            self.packet.as_ref().map_or_else(
-                || RenderView::perspective(self.scene.camera.clone()),
-                |packet| packet.view().clone(),
-            )
+            if let Some(packet) = &self.packet {
+                packet.view().clone()
+            } else if let Some(frame) = self.managed.as_ref().and_then(|managed| {
+                managed
+                    .active
+                    .as_ref()
+                    .map(|active| active.frame.as_ref())
+                    .or_else(|| {
+                        managed
+                            .stage
+                            .as_ref()
+                            .and_then(|stage| stage.frame.as_deref())
+                    })
+            }) {
+                frame.packet().view().clone()
+            } else {
+                RenderView::perspective(self.scene.camera.clone())
+            }
         })
     }
 
     fn sync_legacy_camera(&mut self) {
-        if self.packet.is_none()
+        if self.mode == WindowMode::Legacy
             && let Some(camera) = &self.local_camera
         {
             self.scene.camera = camera.clone();
         }
     }
 
-    fn validate_current_dimensions(&self, width: u32, height: u32) -> Result<(), RendererError> {
+    fn is_packet_path(&self) -> bool {
+        self.mode != WindowMode::Legacy
+    }
+
+    fn validate_current_dimensions(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RendererError> {
         if let Some(renderer) = &self.renderer {
             renderer.validate_dimensions(width, height)
         } else if let Some(renderer) = &self.packet_renderer {
             renderer.validate_dimensions(width, height)
+        } else if let Some(owner) = &mut self.gpu_owner {
+            if let Some(renderer) = owner.renderer() {
+                renderer.validate_dimensions(width, height)
+            } else if let Some(renderer) = owner.packet_renderer_mut() {
+                renderer.validate_dimensions(width, height)
+            } else {
+                Err(RendererError::Window("renderer is not initialized".into()))
+            }
         } else {
             Err(RendererError::Window("renderer is not initialized".into()))
         }
@@ -874,7 +1423,7 @@ impl WindowApp {
         } else {
             "Ready"
         };
-        let controls = window_controls_hint(self.packet.is_some());
+        let controls = window_controls_hint(self.is_packet_path());
         self.window_title = format!(
             "{} | {tick_and_generation} · {loading} | {controls}",
             self.options.title,
@@ -885,6 +1434,13 @@ impl WindowApp {
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: RendererError) {
+        if self.mode == WindowMode::Managed {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string()),
+            );
+            return;
+        }
         self.failure = Some(if self.packet.is_some() {
             WindowFailure::Packet(PacketWindowError::Renderer(error))
         } else {
@@ -894,13 +1450,1024 @@ impl WindowApp {
     }
 
     fn fail_packet(&mut self, event_loop: &ActiveEventLoop, error: PacketWindowError) {
+        if self.mode == WindowMode::Managed {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(ManagedWindowErrorCode::Packet, error.to_string()),
+            );
+            return;
+        }
         self.failure = Some(WindowFailure::Packet(error));
+        event_loop.exit();
+    }
+
+    fn fail_managed(&mut self, event_loop: &ActiveEventLoop, error: ManagedWindowError) {
+        self.managed_failure = Some(error);
+        self.exit_reason = Some(WindowExitReason::EventLoopReturned);
+        let status = self.managed_status(ManagedWindowLifecycle::Stopping);
+        if let Some(state) = &self.managed {
+            let _ = state.server.shared.try_publish_status(status);
+        }
         event_loop.exit();
     }
 
     fn exit(&mut self, event_loop: &ActiveEventLoop, reason: WindowExitReason) {
         self.exit_reason = Some(reason);
+        if self.mode == WindowMode::Managed
+            && let Some(state) = &self.managed
+        {
+            let _ = state
+                .server
+                .shared
+                .try_publish_status(self.managed_status(ManagedWindowLifecycle::Stopping));
+        }
         event_loop.exit();
+    }
+
+    fn exit_managed(&mut self, event_loop: &ActiveEventLoop, reason: ManagedWindowExitReason) {
+        self.managed_reason = Some(reason);
+        self.exit_reason = Some(managed::legacy_exit_reason(Some(reason)));
+        let status = self.managed_status(ManagedWindowLifecycle::Stopping);
+        if let Some(state) = &self.managed {
+            let _ = state.server.shared.try_publish_status(status);
+        }
+        event_loop.exit();
+    }
+
+    fn initialize_managed(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<(), ManagedWindowError> {
+        let attributes = WindowAttributes::default()
+            .with_title(self.options.title.clone())
+            .with_inner_size(LogicalSize::new(self.options.width, self.options.height));
+        let window = Arc::new(event_loop.create_window(attributes).map_err(|error| {
+            ManagedWindowError::new(ManagedWindowErrorCode::EventLoop, error.to_string())
+        })?);
+        let size = window.inner_size();
+        self.final_width = size.width;
+        self.final_height = size.height;
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let surface = instance.create_surface(window.clone()).map_err(|error| {
+            ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string())
+        })?;
+        let (adapter, capabilities) = pollster::block_on(async {
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: Some(&surface),
+                })
+                .await
+                .map_err(|error| {
+                    ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string())
+                })?;
+            let capabilities = surface.get_capabilities(&adapter);
+            Ok::<_, ManagedWindowError>((adapter, capabilities))
+        })?;
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .or_else(|| capabilities.formats.first().copied())
+            .ok_or_else(|| {
+                ManagedWindowError::new(
+                    ManagedWindowErrorCode::Renderer,
+                    "surface exposes no color format",
+                )
+            })?;
+        let present_mode = if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::AutoVsync)
+        {
+            wgpu::PresentMode::AutoVsync
+        } else if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Fifo)
+        {
+            wgpu::PresentMode::Fifo
+        } else {
+            *capabilities.present_modes.first().ok_or_else(|| {
+                ManagedWindowError::new(
+                    ManagedWindowErrorCode::Renderer,
+                    "surface exposes no presentation mode",
+                )
+            })?
+        };
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: preferred_surface_alpha_mode(&capabilities.alpha_modes),
+            view_formats: vec![],
+        };
+        let owner = self.gpu_owner.as_mut().ok_or_else(|| {
+            ManagedWindowError::new(
+                ManagedWindowErrorCode::InternalPanic,
+                "managed GPU owner is missing",
+            )
+        })?;
+        pollster::block_on(owner.initialize_renderer(instance, adapter, format)).map_err(
+            |error| ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string()),
+        )?;
+        let renderer = owner.renderer().ok_or_else(|| {
+            ManagedWindowError::new(
+                ManagedWindowErrorCode::Renderer,
+                "renderer initialization did not produce a ready renderer",
+            )
+        })?;
+        renderer
+            .validate_dimensions(config.width, config.height)
+            .map_err(|error| {
+                ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string())
+            })?;
+        surface.configure(&renderer.device, &config);
+        self.renderer_info = Some(managed::bounded_renderer_info(renderer.info()));
+        owner
+            .initialize_packet_renderer(self.packet_limits, self.asset_limits)
+            .map_err(|error| {
+                ManagedWindowError::new(ManagedWindowErrorCode::Packet, error.to_string())
+            })?;
+        self.window = Some(window);
+        self.surface = Some(SurfaceState { surface, config });
+        self.update_window_title();
+        self.admit_managed_initial_stage(event_loop);
+        Ok(())
+    }
+
+    fn admit_managed_initial_stage(&mut self, event_loop: &ActiveEventLoop) {
+        let (input, limits, shared) = {
+            let Some(managed) = &mut self.managed else {
+                return;
+            };
+            if managed.server.shared.cancel_watermark() >= ManagedStageKey::INITIAL.get() {
+                managed.stage = None;
+                managed.pending_event = Some(ManagedStageEvent::Cancelled {
+                    key: ManagedStageKey::INITIAL,
+                });
+                (
+                    None,
+                    PacketStageLimits::default(),
+                    Arc::clone(&managed.server.shared),
+                )
+            } else if let Some(stage) = managed.stage.as_mut() {
+                (
+                    stage.input.take(),
+                    stage.limits,
+                    Arc::clone(&managed.server.shared),
+                )
+            } else {
+                return;
+            }
+        };
+        let Some(input) = input else {
+            self.publish_managed_event();
+            let status = self.managed_status(ManagedWindowLifecycle::Running);
+            let _ = shared.try_publish_status(status);
+            return;
+        };
+        if shared.cancel_watermark() >= ManagedStageKey::INITIAL.get() {
+            if let Some(managed) = &mut self.managed {
+                managed.stage = None;
+                managed.pending_event = Some(ManagedStageEvent::Cancelled {
+                    key: ManagedStageKey::INITIAL,
+                });
+            }
+            self.publish_managed_event();
+            return;
+        }
+        let Some(renderer) = self
+            .gpu_owner
+            .as_mut()
+            .and_then(WindowGpuOwner::packet_renderer_mut)
+        else {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(
+                    ManagedWindowErrorCode::Packet,
+                    "packet renderer is not ready for the initial stage",
+                ),
+            );
+            return;
+        };
+        let result = renderer.try_begin_stage(input, limits);
+        match result {
+            Ok(id) => {
+                if let Some(stage) = self
+                    .managed
+                    .as_mut()
+                    .and_then(|managed| managed.stage.as_mut())
+                {
+                    stage.id = Some(id);
+                }
+            }
+            Err(PacketStageError::StageBusy) => {
+                if let Some(managed) = &mut self.managed {
+                    managed.deferred_key = Some(ManagedStageKey::INITIAL);
+                    managed.stage = None;
+                    managed.pending_event = Some(ManagedStageEvent::Deferred {
+                        key: ManagedStageKey::INITIAL,
+                        reason: ManagedStageDeferredReason::RendererBusy,
+                    });
+                }
+            }
+            Err(error) => {
+                if let Some(managed) = &mut self.managed {
+                    managed.stage = None;
+                    managed.pending_event = Some(ManagedStageEvent::Failed {
+                        key: ManagedStageKey::INITIAL,
+                        error: ManagedWindowError::new(
+                            ManagedWindowErrorCode::Stage,
+                            error.to_string(),
+                        ),
+                    });
+                }
+            }
+        }
+        self.publish_managed_event();
+        let status = self.managed_status(ManagedWindowLifecycle::Running);
+        let _ = shared.try_publish_status(status);
+    }
+
+    fn publish_managed_event(&mut self) {
+        let Some((shared, event)) = self.managed.as_ref().map(|managed| {
+            (
+                Arc::clone(&managed.server.shared),
+                managed.pending_event.clone(),
+            )
+        }) else {
+            return;
+        };
+        if let Some(event) = event
+            && shared.try_publish_stage_event(event.clone())
+            && let Some(managed) = &mut self.managed
+            && managed.pending_event.as_ref() == Some(&event)
+        {
+            managed.pending_event = None;
+            if let ManagedStageEvent::Ready { key, .. } = event
+                && let Some(stage) = managed.stage.as_mut()
+                && stage.key == key
+            {
+                stage.event_published = true;
+            }
+        }
+        let status = self.managed_status(ManagedWindowLifecycle::Running);
+        let _ = shared.try_publish_status(status);
+    }
+
+    fn record_managed_stage_event(&mut self, event: ManagedStageEvent) {
+        if let Some(managed) = &mut self.managed
+            && managed.pending_event.is_none()
+        {
+            managed.pending_event = Some(event);
+        }
+        self.publish_managed_event();
+    }
+
+    fn poll_managed_signals(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(shared) = self
+            .managed
+            .as_ref()
+            .map(|managed| Arc::clone(&managed.server.shared))
+        else {
+            return;
+        };
+        if shared.host_stop_requested() {
+            self.exit_managed(event_loop, ManagedWindowExitReason::HostStop);
+            return;
+        }
+        if shared.view_close_requested() {
+            self.exit_managed(event_loop, ManagedWindowExitReason::ViewClosed);
+            return;
+        }
+        let watermark = shared.cancel_watermark();
+        let Some((key, stage_id, cancellation_requested)) = self
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.stage.as_ref())
+            .map(|stage| (stage.key, stage.id, stage.cancellation_requested))
+        else {
+            self.publish_managed_event();
+            return;
+        };
+        if watermark < key.get() {
+            self.publish_managed_event();
+            return;
+        }
+        if cancellation_requested {
+            let Some(stage_id) = stage_id else {
+                self.finish_managed_cancellation(key);
+                self.publish_managed_event();
+                return;
+            };
+            let status = self
+                .gpu_owner
+                .as_mut()
+                .and_then(WindowGpuOwner::packet_renderer_mut)
+                .ok_or(PacketStageError::InvalidStageId)
+                .and_then(|renderer| renderer.try_stage_status(stage_id));
+            match status {
+                Ok(status)
+                    if matches!(
+                        status.state(),
+                        PacketStageState::Cancelled | PacketStageState::Failed
+                    ) =>
+                {
+                    self.finish_managed_cancellation(key)
+                }
+                Ok(status) => {
+                    if let Some(stage) = self
+                        .managed
+                        .as_mut()
+                        .and_then(|managed| managed.stage.as_mut())
+                    {
+                        stage.last_status = Some(status);
+                    }
+                }
+                Err(error) => {
+                    self.fail_managed(
+                        event_loop,
+                        ManagedWindowError::new(ManagedWindowErrorCode::Stage, error.to_string()),
+                    );
+                    return;
+                }
+            }
+            self.publish_managed_event();
+            return;
+        }
+        if let Some(stage_id) = stage_id {
+            let status = self
+                .gpu_owner
+                .as_mut()
+                .and_then(WindowGpuOwner::packet_renderer_mut)
+                .ok_or(PacketStageError::InvalidStageId)
+                .and_then(|renderer| renderer.try_cancel_stage(stage_id));
+            match status {
+                Ok(status) => {
+                    if let Some(stage) = self
+                        .managed
+                        .as_mut()
+                        .and_then(|managed| managed.stage.as_mut())
+                    {
+                        stage.cancellation_requested = true;
+                        stage.last_status = Some(status.clone());
+                    }
+                    if matches!(
+                        status.state(),
+                        PacketStageState::Cancelled | PacketStageState::Failed
+                    ) {
+                        self.finish_managed_cancellation(key);
+                    }
+                }
+                Err(error) => {
+                    self.fail_managed(
+                        event_loop,
+                        ManagedWindowError::new(ManagedWindowErrorCode::Stage, error.to_string()),
+                    );
+                    return;
+                }
+            }
+        } else {
+            self.finish_managed_cancellation(key);
+        }
+        self.publish_managed_event();
+    }
+
+    fn finish_managed_cancellation(&mut self, key: ManagedStageKey) {
+        let mut publish_cancelled = false;
+        if let Some(managed) = &mut self.managed
+            && managed.stage.as_ref().is_some_and(|stage| stage.key == key)
+        {
+            publish_cancelled = !managed
+                .stage
+                .as_ref()
+                .is_some_and(|stage| stage.event_published);
+            managed.stage = None;
+        }
+        if publish_cancelled && let Some(managed) = &mut self.managed {
+            let replaces_unpublished_ready = matches!(
+                managed.pending_event.as_ref(),
+                Some(ManagedStageEvent::Ready { key: pending_key, .. }) if *pending_key == key
+            );
+            if managed.pending_event.is_none() || replaces_unpublished_ready {
+                managed.pending_event = Some(ManagedStageEvent::Cancelled { key });
+            }
+        }
+    }
+
+    fn drain_managed_inputs(&mut self, event_loop: &ActiveEventLoop) {
+        if self.mode != WindowMode::Managed {
+            return;
+        }
+        self.poll_managed_signals(event_loop);
+        if self.managed_failure.is_some() || self.exit_reason.is_some() {
+            return;
+        }
+        self.publish_managed_event();
+        for _ in 0..MAX_MESSAGES_PER_EVENT {
+            let Some(managed) = &self.managed else {
+                return;
+            };
+            if managed.pending_event.is_some()
+                || managed.server.shared.stage_event_is_occupied_or_busy()
+            {
+                break;
+            }
+            let received = managed.server.receiver.try_recv();
+            match received {
+                Ok(ManagedPacketWindowInput::BeginStage { key, input, limits }) => {
+                    self.accept_managed_stage(key, input, limits, event_loop);
+                }
+                Ok(ManagedPacketWindowInput::Frame { key, frame }) => {
+                    self.accept_managed_frame(key, frame, event_loop);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.exit_managed(event_loop, ManagedWindowExitReason::HostStop);
+                    return;
+                }
+            }
+            self.publish_managed_event();
+            if self.managed_failure.is_some() || self.exit_reason.is_some() {
+                return;
+            }
+        }
+    }
+
+    fn accept_managed_stage(
+        &mut self,
+        key: ManagedStageKey,
+        input: PacketStageInput,
+        limits: PacketStageLimits,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let Some(managed) = self.managed.as_ref() else {
+            return;
+        };
+        let is_deferred_retry = managed.deferred_key == Some(key);
+        let initial_retry_valid = key == ManagedStageKey::INITIAL
+            && is_deferred_retry
+            && managed.active.is_none()
+            && input.session() == managed.initial.session()
+            && input.project_generation() == managed.initial.project_generation()
+            && input.source_digest() == managed.initial.source_digest();
+        let candidate_identity_valid = if key == ManagedStageKey::INITIAL {
+            false
+        } else if let Some(active) = managed.active.as_ref() {
+            active.identity.project_generation().checked_add(1) == Some(input.project_generation())
+                && input.session() == managed.initial.session()
+                && valid_source_digest(input.source_digest())
+        } else {
+            false
+        };
+        let key_valid = if is_deferred_retry {
+            managed.deferred_key == Some(key)
+        } else {
+            key > managed.highest_key
+        };
+        let identity_valid = (initial_retry_valid || candidate_identity_valid) && key_valid;
+        if !identity_valid {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(
+                    ManagedWindowErrorCode::Identity,
+                    "candidate stage key or project identity is invalid",
+                ),
+            );
+            return;
+        }
+        if managed.server.shared.cancel_watermark() >= key.get() {
+            if let Some(managed) = &mut self.managed {
+                managed.deferred_key = None;
+                if key > managed.highest_key {
+                    managed.highest_key = key;
+                }
+            }
+            self.record_managed_stage_event(ManagedStageEvent::Cancelled { key });
+            return;
+        }
+        if let Some(stage) = self.managed.as_ref().and_then(|state| state.stage.as_ref()) {
+            let _ = stage;
+            if let Some(managed) = &mut self.managed {
+                managed.deferred_key = Some(key);
+            }
+            self.record_managed_stage_event(ManagedStageEvent::Deferred {
+                key,
+                reason: ManagedStageDeferredReason::RendererBusy,
+            });
+            return;
+        }
+        let identity = ManagedGenerationIdentity::new(
+            key,
+            input.session(),
+            input.project_generation(),
+            input.source_digest(),
+        );
+        let result = self
+            .gpu_owner
+            .as_mut()
+            .and_then(WindowGpuOwner::packet_renderer_mut)
+            .ok_or(PacketStageError::InvalidLimits)
+            .and_then(|renderer| renderer.try_begin_stage(input, limits));
+        match result {
+            Ok(id) => {
+                let managed = self.managed.as_mut().expect("managed mode has state");
+                managed.highest_key = key;
+                managed.deferred_key = None;
+                managed.stage = Some(ManagedStage {
+                    key,
+                    identity,
+                    limits,
+                    input: None,
+                    id: Some(id),
+                    frame: None,
+                    event_published: false,
+                    cancellation_requested: false,
+                    last_status: None,
+                });
+            }
+            Err(PacketStageError::StageBusy) => {
+                if let Some(managed) = &mut self.managed {
+                    managed.deferred_key = Some(key);
+                }
+                self.record_managed_stage_event(ManagedStageEvent::Deferred {
+                    key,
+                    reason: ManagedStageDeferredReason::RendererBusy,
+                });
+            }
+            Err(error) => {
+                if let Some(managed) = &mut self.managed {
+                    managed.highest_key = key;
+                    managed.deferred_key = None;
+                }
+                self.record_managed_stage_event(ManagedStageEvent::Failed {
+                    key,
+                    error: ManagedWindowError::new(
+                        if matches!(error, PacketStageError::CounterExhausted) {
+                            ManagedWindowErrorCode::CounterExhausted
+                        } else {
+                            ManagedWindowErrorCode::Stage
+                        },
+                        error.to_string(),
+                    ),
+                });
+            }
+        }
+    }
+
+    fn accept_managed_frame(
+        &mut self,
+        key: ManagedStageKey,
+        frame: Arc<CpuFrameHandle>,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let outcome = self.managed.as_mut().map(|managed| {
+            let watermark = managed.server.shared.cancel_watermark();
+            update_managed_frame(managed, key, frame, watermark)
+        });
+        if let Some(Err(message)) = outcome {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(ManagedWindowErrorCode::Identity, message),
+            );
+        }
+    }
+
+    fn record_managed_stage_progress(&mut self, status: PacketStageStatus) {
+        let Some(managed) = self.managed.as_mut() else {
+            return;
+        };
+        let Some(stage) = managed.stage.as_ref() else {
+            return;
+        };
+        if stage.id != Some(status.id()) {
+            return;
+        }
+        let key = stage.key;
+        let event_published = stage.event_published;
+        if let Some(stage) = managed.stage.as_mut() {
+            stage.last_status = Some(status.clone());
+        }
+        match status.state() {
+            PacketStageState::Ready => {
+                let cancelled = managed.server.shared.cancel_watermark() >= key.get();
+                if !cancelled && !event_published && managed.pending_event.is_none() {
+                    managed.pending_event = Some(ManagedStageEvent::Ready {
+                        key,
+                        stage_id: status.id(),
+                        status,
+                    });
+                }
+            }
+            PacketStageState::Cancelled => {
+                managed.stage = None;
+                if !event_published {
+                    let replaces_unpublished_ready = matches!(
+                        managed.pending_event.as_ref(),
+                        Some(ManagedStageEvent::Ready { key: pending_key, .. })
+                            if *pending_key == key
+                    );
+                    if managed.pending_event.is_none() || replaces_unpublished_ready {
+                        managed.pending_event = Some(ManagedStageEvent::Cancelled { key });
+                    }
+                }
+            }
+            PacketStageState::Failed => {
+                let error = status.failure().map_or_else(
+                    || ManagedWindowError::new(ManagedWindowErrorCode::Stage, "GPU stage failed"),
+                    managed::map_packet_stage_failure,
+                );
+                managed.stage = None;
+                if !event_published {
+                    let replaces_unpublished_ready = matches!(
+                        managed.pending_event.as_ref(),
+                        Some(ManagedStageEvent::Ready { key: pending_key, .. })
+                            if *pending_key == key
+                    );
+                    if managed.pending_event.is_none() || replaces_unpublished_ready {
+                        managed.pending_event = Some(ManagedStageEvent::Failed { key, error });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn redraw_managed(&mut self, event_loop: &ActiveEventLoop) {
+        self.drain_managed_inputs(event_loop);
+        if self.managed_failure.is_some() || self.exit_reason.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        self.update_local_camera(now);
+        let Some(window) = self.window.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let Some(surface_state) = self.surface.as_ref() else {
+            return;
+        };
+        let width = surface_state.config.width;
+        let height = surface_state.config.height;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let (active_frame, active_key, candidate_frame, candidate_identity, stage_id) = {
+            let Some(managed) = self.managed.as_ref() else {
+                return;
+            };
+            let candidate = managed.stage.as_ref().and_then(|stage| {
+                (!stage.cancellation_requested
+                    && stage.event_published
+                    && stage
+                        .last_status
+                        .as_ref()
+                        .is_some_and(|status| status.state() == PacketStageState::Ready))
+                .then(|| stage.frame.clone())
+                .flatten()
+            });
+            (
+                managed.active.as_ref().map(|active| active.frame.clone()),
+                managed.active.as_ref().map(|active| active.key),
+                candidate,
+                managed
+                    .stage
+                    .as_ref()
+                    .and_then(|stage| stage.frame.as_ref().map(|_| stage.identity.clone())),
+                managed.stage.as_ref().and_then(|stage| {
+                    (!stage.cancellation_requested)
+                        .then_some(stage.id)
+                        .flatten()
+                }),
+            )
+        };
+
+        let mut chosen_is_candidate = candidate_frame.is_some();
+        let mut chosen_frame = candidate_frame.or(active_frame.clone());
+        let mut chosen_key = if chosen_is_candidate {
+            candidate_identity
+                .as_ref()
+                .map(ManagedGenerationIdentity::key)
+        } else {
+            active_key
+        };
+        let shared = self
+            .managed
+            .as_ref()
+            .map(|managed| Arc::clone(&managed.server.shared));
+        let mut present_guard = None;
+        if let Some(frame) = chosen_frame.as_ref() {
+            let Some(shared) = shared.as_ref() else {
+                return;
+            };
+            match shared.try_reserve_presented(frame.project_generation()) {
+                Ok(guard) => present_guard = Some(guard),
+                Err(ManagedPresentedReservationError::Busy) => return,
+                Err(ManagedPresentedReservationError::PreviousGenerationUnapplied)
+                    if chosen_is_candidate =>
+                {
+                    chosen_frame = active_frame.clone();
+                    chosen_is_candidate = false;
+                    chosen_key = active_key;
+                    let Some(active) = chosen_frame.as_ref() else {
+                        return;
+                    };
+                    match shared.try_reserve_presented(active.project_generation()) {
+                        Ok(guard) => present_guard = Some(guard),
+                        Err(_) => return,
+                    }
+                }
+                Err(ManagedPresentedReservationError::PreviousGenerationUnapplied) => return,
+            }
+        }
+
+        let chosen_view = chosen_frame.as_ref().map(|frame| {
+            self.local_view
+                .clone()
+                .unwrap_or_else(|| frame.view().clone())
+        });
+        let mut intended_present = None;
+        if let (Some(frame), Some(view), Some(key)) =
+            (chosen_frame.as_ref(), chosen_view.as_ref(), chosen_key)
+        {
+            let next_present_sequence = self
+                .managed
+                .as_ref()
+                .and_then(|managed| managed.present_sequence.checked_add(1));
+            let Some(next_present_sequence) = next_present_sequence else {
+                self.fail_managed(
+                    event_loop,
+                    ManagedWindowError::new(
+                        ManagedWindowErrorCode::CounterExhausted,
+                        "present sequence exhausted",
+                    ),
+                );
+                return;
+            };
+            match ManagedPresentedView::new(
+                key,
+                frame.packet(),
+                next_present_sequence,
+                width,
+                height,
+                view,
+            ) {
+                Ok(presented) => intended_present = Some(presented),
+                Err(error) => {
+                    self.fail_managed(event_loop, error);
+                    return;
+                }
+            }
+        } else if chosen_frame.is_some() {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(
+                    ManagedWindowErrorCode::Identity,
+                    "selected frame has no managed generation key",
+                ),
+            );
+            return;
+        }
+
+        if chosen_is_candidate
+            && intended_present.as_ref().is_some_and(|presented| {
+                shared
+                    .as_ref()
+                    .is_some_and(|shared| shared.cancel_watermark() >= presented.key().get())
+            })
+        {
+            return;
+        }
+
+        let loading_elapsed = self
+            .loading_since
+            .map(|start| now.saturating_duration_since(start).as_secs_f32());
+        let surface_result = self
+            .surface
+            .as_mut()
+            .map(|surface| surface.surface.get_current_texture());
+        let surface_frame = match surface_result {
+            Some(Ok(frame)) => frame,
+            Some(Err(wgpu::SurfaceError::Timeout)) => return,
+            Some(Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost)) => {
+                let device = self.gpu_owner.as_mut().and_then(|owner| {
+                    if owner.phase() == WindowGpuOwnerPhase::PacketRendererReady {
+                        owner
+                            .packet_renderer_mut()
+                            .map(|renderer| renderer.device())
+                    } else {
+                        owner.renderer().map(|renderer| &renderer.device)
+                    }
+                });
+                if let (Some(device), Some(surface)) = (device, self.surface.as_mut()) {
+                    surface.surface.configure(device, &surface.config);
+                }
+                return;
+            }
+            Some(Err(wgpu::SurfaceError::OutOfMemory)) => {
+                self.fail_managed(
+                    event_loop,
+                    ManagedWindowError::new(
+                        ManagedWindowErrorCode::Renderer,
+                        "surface ran out of memory",
+                    ),
+                );
+                return;
+            }
+            Some(Err(error)) => {
+                self.fail_managed(
+                    event_loop,
+                    ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string()),
+                );
+                return;
+            }
+            None => return,
+        };
+        let target = surface_frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let render_view = chosen_view.unwrap_or_else(|| self.current_view());
+        let render_frame = chosen_frame.clone();
+        let renderer_ready = self
+            .gpu_owner
+            .as_ref()
+            .is_some_and(|owner| owner.phase() == WindowGpuOwnerPhase::PacketRendererReady);
+        if !renderer_ready {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(
+                    ManagedWindowErrorCode::Renderer,
+                    "packet renderer is unavailable during redraw",
+                ),
+            );
+            return;
+        }
+        let submission = {
+            let renderer = self
+                .gpu_owner
+                .as_mut()
+                .and_then(WindowGpuOwner::packet_renderer_mut)
+                .expect("readiness was checked before renderer use");
+            renderer.render_cpu_frame_with_stage(
+                &target,
+                width,
+                height,
+                render_frame,
+                &render_view,
+                stage_id,
+                loading_elapsed,
+            )
+        };
+        let submission = match submission {
+            Ok(submission) => submission,
+            Err(PacketStageError::Render(PacketRenderError::ResidencyBusy)) => return,
+            Err(error @ PacketStageError::Render(PacketRenderError::Renderer(_))) => {
+                self.fail_managed(
+                    event_loop,
+                    ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string()),
+                );
+                return;
+            }
+            Err(error) => {
+                if let Some(stage_id) = stage_id {
+                    if let Some(status) = self
+                        .gpu_owner
+                        .as_mut()
+                        .and_then(WindowGpuOwner::packet_renderer_mut)
+                        .and_then(|renderer| renderer.try_cancel_stage(stage_id).ok())
+                        && let Some(stage) = self
+                            .managed
+                            .as_mut()
+                            .and_then(|managed| managed.stage.as_mut())
+                    {
+                        stage.last_status = Some(status);
+                    }
+                    let key = self
+                        .managed
+                        .as_ref()
+                        .and_then(|managed| managed.stage.as_ref())
+                        .map(|stage| stage.key)
+                        .unwrap_or(ManagedStageKey::INITIAL);
+                    self.record_managed_stage_event(ManagedStageEvent::Failed {
+                        key,
+                        error: ManagedWindowError::new(
+                            if matches!(error, PacketStageError::CounterExhausted) {
+                                ManagedWindowErrorCode::CounterExhausted
+                            } else {
+                                ManagedWindowErrorCode::Stage
+                            },
+                            error.to_string(),
+                        ),
+                    });
+                    return;
+                }
+                self.fail_managed(
+                    event_loop,
+                    ManagedWindowError::new(
+                        if matches!(
+                            error,
+                            PacketStageError::FrameIdentityMismatch
+                                | PacketStageError::FrameResourcesUnavailable
+                        ) {
+                            ManagedWindowErrorCode::Identity
+                        } else {
+                            ManagedWindowErrorCode::Packet
+                        },
+                        error.to_string(),
+                    ),
+                );
+                return;
+            }
+        };
+
+        if let Some(progress) = submission.progress().cloned() {
+            self.record_managed_stage_progress(progress);
+            self.publish_managed_event();
+        }
+        let presented_submission = submission.frame();
+        if intended_present.is_some() && presented_submission.is_none() {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(
+                    ManagedWindowErrorCode::Identity,
+                    "game frame submission produced no packet view",
+                ),
+            );
+            return;
+        }
+        if let (Some(presented), Some(submitted)) =
+            (intended_present.as_ref(), presented_submission)
+        {
+            let packet = submitted.packet();
+            if submitted.view() != presented.view()
+                || packet.session() != presented.session()
+                || packet.sequence() != presented.publication_sequence()
+                || packet.tick() != presented.tick()
+                || packet.authority_snapshot_sequence() != presented.authority_snapshot_sequence()
+                || packet.project_generation() != presented.project_generation()
+                || packet.source_digest() != presented.source_digest()
+            {
+                self.fail_managed(
+                    event_loop,
+                    ManagedWindowError::new(
+                        ManagedWindowErrorCode::Identity,
+                        "submitted frame identity changed after managed preflight",
+                    ),
+                );
+                return;
+            }
+        }
+
+        window.pre_present_notify();
+        surface_frame.present();
+        if let Some(presented) = intended_present {
+            if let Some(guard) = &mut present_guard {
+                guard.publish(presented.clone());
+            }
+            if let Some(managed) = &mut self.managed {
+                managed.present_sequence = presented.present_sequence();
+                managed.last_presented = Some(presented.clone());
+                if chosen_is_candidate {
+                    if let (Some(frame), Some(identity)) = (chosen_frame.take(), candidate_identity)
+                    {
+                        managed.active = Some(ManagedFrame {
+                            key: identity.key(),
+                            identity,
+                            frame,
+                        });
+                        managed.stage = None;
+                    }
+                } else if let (Some(frame), Some(active)) =
+                    (chosen_frame.take(), managed.active.as_mut())
+                {
+                    active.frame = frame;
+                }
+            }
+            self.latest_presentation = Some(PresentationMetadata {
+                sequence: presented.publication_sequence(),
+                tick: presented.tick().get(),
+                generation: presented.project_generation(),
+            });
+            self.set_loading(false);
+        } else if let Some(managed) = &mut self.managed {
+            managed.bootstrap_frames = managed.bootstrap_frames.saturating_add(1);
+        }
+        self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(1);
+        if self.is_loading() {
+            self.counters.loading_frames = self.counters.loading_frames.saturating_add(1);
+        }
+        self.intervals.record_present(Instant::now());
+        let status = self.managed_status(ManagedWindowLifecycle::Running);
+        if let Some(managed) = &self.managed {
+            let _ = managed.server.shared.try_publish_status(status);
+        }
+        if max_frames_reached(self.counters.rendered_frames, self.options.max_frames) {
+            self.exit_managed(event_loop, ManagedWindowExitReason::FrameLimit);
+        }
     }
 
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), WindowFailure> {
@@ -1111,6 +2678,16 @@ impl WindowApp {
         if elapsed <= 0.0 {
             return;
         }
+        if !managed_view_input_enabled(
+            self.mode,
+            self.managed
+                .as_ref()
+                .is_some_and(|managed| managed.active.is_some()),
+        ) {
+            // Keep observing input during bootstrap, but do not replace the
+            // first authored view before its first frame is actually presented.
+            return;
+        }
         let current_view = self.current_view();
         let mut camera = current_view.camera().clone();
         let forward = (Vec3::from_array(camera.target) - Vec3::from_array(camera.position))
@@ -1163,7 +2740,7 @@ impl WindowApp {
         move_camera(&mut camera, movement, elapsed);
         if camera != previous {
             let updated = current_view.with_camera(camera.clone());
-            if self.packet.is_some() {
+            if self.is_packet_path() {
                 self.local_view = Some(updated);
             } else {
                 self.local_camera = Some(camera);
@@ -1175,6 +2752,10 @@ impl WindowApp {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        if self.mode == WindowMode::Managed {
+            self.redraw_managed(event_loop);
+            return;
+        }
         self.drain_messages(event_loop);
         if self.failure.is_some() {
             return;
@@ -1410,6 +2991,12 @@ impl ApplicationHandler for WindowApp {
         if self.window.is_some() {
             return;
         }
+        if self.mode == WindowMode::Managed {
+            if let Err(error) = self.initialize_managed(event_loop) {
+                self.fail_managed(event_loop, error);
+            }
+            return;
+        }
         if let Err(error) = self.initialize(event_loop) {
             self.failure = Some(error);
             event_loop.exit();
@@ -1431,7 +3018,11 @@ impl ApplicationHandler for WindowApp {
         }
         match event {
             WindowEvent::CloseRequested => {
-                self.exit(event_loop, WindowExitReason::CloseRequested);
+                if self.mode == WindowMode::Managed {
+                    self.exit_managed(event_loop, ManagedWindowExitReason::ViewClosed);
+                } else {
+                    self.exit(event_loop, WindowExitReason::CloseRequested);
+                }
             }
             WindowEvent::Resized(size) => {
                 self.counters.resize_count = self.counters.resize_count.saturating_add(1);
@@ -1446,7 +3037,18 @@ impl ApplicationHandler for WindowApp {
                         .renderer
                         .as_ref()
                         .map(|renderer| &renderer.device)
-                        .or_else(|| self.packet_renderer.as_ref().map(PacketRenderer::device));
+                        .or_else(|| self.packet_renderer.as_ref().map(PacketRenderer::device))
+                        .or_else(|| {
+                            self.gpu_owner.as_mut().and_then(|owner| {
+                                if owner.phase() == WindowGpuOwnerPhase::PacketRendererReady {
+                                    owner
+                                        .packet_renderer_mut()
+                                        .map(|renderer| renderer.device())
+                                } else {
+                                    owner.renderer().map(|renderer| &renderer.device)
+                                }
+                            })
+                        });
                     if let (Some(device), Some(surface_state)) = (device, &mut self.surface) {
                         surface_state.config.width = size.width;
                         surface_state.config.height = size.height;
@@ -1492,7 +3094,11 @@ impl ApplicationHandler for WindowApp {
                     self.last_update = now;
                 }
                 if code == KeyCode::Escape && pressed {
-                    self.exit(event_loop, WindowExitReason::EscapePressed);
+                    if self.mode == WindowMode::Managed {
+                        self.exit_managed(event_loop, ManagedWindowExitReason::EscapePressed);
+                    } else {
+                        self.exit(event_loop, WindowExitReason::EscapePressed);
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -1503,6 +3109,19 @@ impl ApplicationHandler for WindowApp {
                 self.emit_input(WindowInput::MouseButton { button, pressed });
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if !managed_view_input_enabled(
+                    self.mode,
+                    self.managed
+                        .as_ref()
+                        .is_some_and(|managed| managed.active.is_some()),
+                ) {
+                    self.last_cursor = Some(position);
+                    self.emit_input(WindowInput::CursorMoved {
+                        x: position.x,
+                        y: position.y,
+                    });
+                    return;
+                }
                 if self.left_mouse_down
                     && let Some(previous) = self.last_cursor
                 {
@@ -1536,7 +3155,7 @@ impl ApplicationHandler for WindowApp {
                         let previous_camera = camera.clone();
                         camera.orbit(-dx * 0.006, -dy * 0.006, 0.0);
                         if camera != previous_camera {
-                            if self.packet.is_some() {
+                            if self.is_packet_path() {
                                 self.local_view = Some(view.with_camera(camera));
                             } else {
                                 self.local_camera = Some(camera);
@@ -1558,6 +3177,15 @@ impl ApplicationHandler for WindowApp {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(position) => (position.y as f32) * 0.01,
                 };
+                if !managed_view_input_enabled(
+                    self.mode,
+                    self.managed
+                        .as_ref()
+                        .is_some_and(|managed| managed.active.is_some()),
+                ) {
+                    self.emit_input(WindowInput::MouseWheel { lines });
+                    return;
+                }
                 let view = self.current_view();
                 if let crate::RenderProjection::Orthographic { vertical_size } = view.projection() {
                     let zoom = (vertical_size * (-lines * 0.12).exp()).clamp(0.001, 1_000_000.0);
@@ -1574,7 +3202,7 @@ impl ApplicationHandler for WindowApp {
                     let previous_camera = camera.clone();
                     camera.orbit(0.0, 0.0, -lines * 0.12);
                     if camera != previous_camera {
-                        if self.packet.is_some() {
+                        if self.is_packet_path() {
                             self.local_view = Some(view.with_camera(camera));
                         } else {
                             self.local_camera = Some(camera);
@@ -1592,6 +3220,30 @@ impl ApplicationHandler for WindowApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.mode == WindowMode::Managed {
+            self.drain_managed_inputs(event_loop);
+            if self.managed_failure.is_some() || self.exit_reason.is_some() {
+                return;
+            }
+            let now = Instant::now();
+            if max_run_time_reached(self.started_at, now, self.options.max_run_time) {
+                self.exit_managed(event_loop, ManagedWindowExitReason::TimeLimit);
+                return;
+            }
+            if now >= self.next_redraw {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                self.next_redraw = now + self.options.frame_interval;
+            }
+            let wait_until = self
+                .options
+                .max_run_time
+                .map(|limit| self.started_at + limit)
+                .map_or(self.next_redraw, |deadline| self.next_redraw.min(deadline));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wait_until));
+            return;
+        }
         self.drain_messages(event_loop);
         if self.failure.is_some() {
             return;
@@ -1659,23 +3311,32 @@ fn move_camera(camera: &mut Camera, movement: Vec3, elapsed: f32) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, atomic::AtomicBool},
+    };
 
-    use daedalus_core::{SessionId, Tick};
+    use daedalus_content::{
+        ByteMapSourceResolver, ImportCancellation, ImportLimits, MemoryCookCache, ProjectManifest,
+        prepare_project_with_assets,
+    };
+    use daedalus_core::{RenderSnapshot, SessionId, Tick};
     use glam::Mat4;
     use winit::keyboard::KeyCode;
 
     use crate::{
-        Camera, DirectionalLight, Material, Mesh, PacketAssetLimits, PacketRendererLimits,
-        RenderObject, RenderPacket, RenderScene, Vertex,
+        Camera, CpuFrameHandle, DirectionalLight, Material, Mesh, PacketAssetLimits,
+        PacketCpuLimits, PacketCpuOwner, PacketRendererLimits, PacketStageInput, RenderObject,
+        RenderPacket, RenderProjection, RenderScene, RenderView, SourcePin, Vertex,
     };
 
     use super::{
-        FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, PacketTransition, PresentationMetadata,
-        WindowApp, WindowInput, WindowOptions, apply_presentation, max_frames_reached,
-        max_run_time_reached, preferred_surface_alpha_mode, presentation_disconnect_error,
-        validate_options, validate_packet_transition, validate_window_scene, window_controls_hint,
-        window_input_channel,
+        FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, ManagedFrame, ManagedWindowState,
+        PacketTransition, PresentationMetadata, WindowApp, WindowInput, WindowMode, WindowOptions,
+        apply_presentation, managed_frame_is_cancelled, managed_view_input_enabled,
+        max_frames_reached, max_run_time_reached, preferred_surface_alpha_mode,
+        presentation_disconnect_error, validate_options, validate_packet_transition,
+        validate_window_scene, window_controls_hint, window_input_channel,
     };
 
     #[test]
@@ -1722,6 +3383,75 @@ mod tests {
             [0.02, 0.03, 0.04, 1.0],
             Vec::new(),
         ))
+    }
+
+    fn managed_cpu_frames() -> (
+        PacketCpuOwner,
+        crate::CpuGenerationId,
+        PacketStageInput,
+        Arc<CpuFrameHandle>,
+        Arc<CpuFrameHandle>,
+    ) {
+        let manifest = serde_json::to_vec(&ProjectManifest::new("managed-window-test"))
+            .expect("manifest serializes");
+        let scene = br#"{"schema_version":1,"revision":0,"entities":[],"assets":[]}"#;
+        let mut resolver = ByteMapSourceResolver::default();
+        let mut cache = MemoryCookCache::default();
+        let project = prepare_project_with_assets(
+            &manifest,
+            scene,
+            &mut resolver,
+            &mut cache,
+            ImportLimits::default(),
+            &ImportCancellation::never(),
+        )
+        .expect("empty project prepares through the public asset-aware path");
+
+        let session = SessionId::from_raw(44);
+        let mut owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .expect("default CPU renderer limits are valid");
+        let generation = owner
+            .prepare_generation(
+                &project,
+                1,
+                session,
+                &BTreeMap::new(),
+                SourcePin::new(Arc::new(())),
+                &AtomicBool::new(false),
+            )
+            .expect("empty imported project prepares a managed generation");
+        let input = owner
+            .stage_input(generation)
+            .expect("prepared generation exposes its real stage input");
+        let view = RenderView::new(
+            Camera::default(),
+            RenderProjection::Orthographic {
+                vertical_size: 12.0,
+            },
+        );
+        let mut make_frame = |sequence| {
+            let snapshot = RenderSnapshot {
+                sequence,
+                tick: Tick(sequence),
+                entities: Arc::from([]),
+            };
+            owner
+                .extract_validated(
+                    generation,
+                    &snapshot,
+                    sequence,
+                    Some(&view),
+                    &AtomicBool::new(false),
+                )
+                .expect("snapshot extracts through the real CPU renderer owner")
+        };
+        let first = make_frame(1);
+        let second = make_frame(2);
+        (owner, generation, input, first, second)
     }
 
     #[test]
@@ -2069,5 +3799,268 @@ mod tests {
         assert!(app.local_view.is_none());
         assert_eq!(app.current_view(), expected_view);
         assert_eq!(app.counters.local_camera_changes, 0);
+    }
+
+    #[test]
+    fn cancel_through_drops_only_pending_stage_frames_not_active_pose_updates() {
+        let (_owner, _generation, _input, first, second) = managed_cpu_frames();
+        let (_client, server) = super::managed::managed_packet_window_channel();
+        let active_key = super::ManagedStageKey::INITIAL;
+        let candidate_key = active_key.checked_next().expect("second managed key");
+        let identity = super::ManagedGenerationIdentity::new(
+            active_key,
+            first.session(),
+            first.project_generation(),
+            first.source_digest(),
+        );
+        let mut state = ManagedWindowState {
+            server,
+            initial: identity.clone(),
+            active: Some(ManagedFrame {
+                key: active_key,
+                identity,
+                frame: Arc::clone(&first),
+            }),
+            stage: None,
+            highest_key: candidate_key,
+            deferred_key: None,
+            pending_event: None,
+            present_sequence: 0,
+            last_presented: None,
+            bootstrap_frames: 0,
+        };
+
+        assert!(managed_frame_is_cancelled(
+            candidate_key,
+            candidate_key.get(),
+            false
+        ));
+        super::update_managed_frame(
+            &mut state,
+            active_key,
+            Arc::clone(&second),
+            candidate_key.get(),
+        )
+        .expect("candidate cancellation does not block active pose updates");
+        let active = state.active.as_ref().expect("active frame remains present");
+        assert_eq!(active.frame.publication_sequence(), 2);
+        assert!(Arc::ptr_eq(&active.frame, &second));
+    }
+
+    #[test]
+    fn managed_bootstrap_camera_input_preserves_the_first_authored_view() {
+        let (_owner, _generation, _input, first, _second) = managed_cpu_frames();
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut app = WindowApp::new(RenderScene::new(), receiver, WindowOptions::default());
+        let (_client, server) = super::managed::managed_packet_window_channel();
+        let identity = super::ManagedGenerationIdentity::new(
+            super::ManagedStageKey::INITIAL,
+            first.session(),
+            first.project_generation(),
+            first.source_digest(),
+        );
+        app.mode = WindowMode::Managed;
+        app.managed = Some(super::ManagedWindowState {
+            server,
+            initial: identity.clone(),
+            active: None,
+            stage: None,
+            highest_key: super::managed::ManagedStageKey::INITIAL,
+            deferred_key: None,
+            pending_event: None,
+            present_sequence: 0,
+            last_presented: None,
+            bootstrap_frames: 0,
+        });
+
+        assert_eq!(
+            first.view().projection(),
+            RenderProjection::Orthographic {
+                vertical_size: 12.0
+            }
+        );
+        assert!(!managed_view_input_enabled(WindowMode::Managed, false));
+        app.keys_down.insert(KeyCode::KeyW);
+        app.apply_camera_movement(1.0 / 60.0);
+        assert!(app.local_view.is_none());
+        assert_eq!(app.counters.local_camera_changes, 0);
+
+        app.managed.as_mut().unwrap().active = Some(ManagedFrame {
+            key: super::ManagedStageKey::INITIAL,
+            identity,
+            frame: Arc::clone(&first),
+        });
+        assert_eq!(
+            app.current_view().projection(),
+            RenderProjection::Orthographic {
+                vertical_size: 12.0
+            }
+        );
+        app.apply_camera_movement(1.0 / 60.0);
+        assert_eq!(
+            app.local_view.as_ref().unwrap().projection(),
+            RenderProjection::Orthographic {
+                vertical_size: 12.0
+            }
+        );
+        assert_eq!(app.counters.local_camera_changes, 1);
+        assert!(managed_view_input_enabled(WindowMode::Managed, true));
+        assert!(managed_view_input_enabled(WindowMode::Packet, false));
+    }
+
+    #[test]
+    fn managed_payload_channel_returns_exact_owned_cpu_inputs_and_frames() {
+        let (owner, generation, initial_input, first, second) = managed_cpu_frames();
+        let full_input = owner.stage_input(generation).unwrap();
+        let disconnected_input = owner.stage_input(generation).unwrap();
+        let expected_session = full_input.session();
+        let expected_generation = full_input.project_generation();
+        let expected_digest = full_input.source_digest().to_owned();
+        let key = super::ManagedStageKey::INITIAL;
+        let candidate_key = key.checked_next().expect("candidate key follows initial");
+        let after_candidate = candidate_key
+            .checked_next()
+            .expect("third key is representable");
+        let (client, server) = super::managed::managed_packet_window_channel();
+
+        client
+            .try_send(super::ManagedPacketWindowInput::BeginStage {
+                key,
+                input: initial_input,
+                limits: crate::PacketStageLimits::default(),
+            })
+            .expect("the one-slot channel accepts its first owned request");
+        let returned_input = match client.try_send(super::ManagedPacketWindowInput::BeginStage {
+            key: candidate_key,
+            input: full_input,
+            limits: crate::PacketStageLimits::default(),
+        }) {
+            Err(std::sync::mpsc::TrySendError::Full(
+                super::ManagedPacketWindowInput::BeginStage { key, input, .. },
+            )) => {
+                assert_eq!(key, candidate_key);
+                input
+            }
+            other => panic!("full channel returns the exact stage input, got {other:?}"),
+        };
+        assert_eq!(returned_input.session(), expected_session);
+        assert_eq!(returned_input.project_generation(), expected_generation);
+        assert_eq!(returned_input.source_digest(), expected_digest);
+
+        let returned_full_frame = match client.try_send(super::ManagedPacketWindowInput::Frame {
+            key,
+            frame: Arc::clone(&first),
+        }) {
+            Err(std::sync::mpsc::TrySendError::Full(super::ManagedPacketWindowInput::Frame {
+                key: returned_key,
+                frame,
+            })) => {
+                assert_eq!(returned_key, key);
+                frame
+            }
+            other => panic!("full channel returns the exact frame, got {other:?}"),
+        };
+        assert!(Arc::ptr_eq(&returned_full_frame, &first));
+
+        drop(server);
+        let returned_disconnected_frame =
+            match client.try_send(super::ManagedPacketWindowInput::Frame {
+                key: candidate_key,
+                frame: Arc::clone(&second),
+            }) {
+                Err(std::sync::mpsc::TrySendError::Disconnected(
+                    super::ManagedPacketWindowInput::Frame {
+                        key: returned_key,
+                        frame,
+                    },
+                )) => {
+                    assert_eq!(returned_key, candidate_key);
+                    frame
+                }
+                other => panic!("disconnected channel returns the exact frame, got {other:?}"),
+            };
+        assert!(Arc::ptr_eq(&returned_disconnected_frame, &second));
+
+        let returned_disconnected_input =
+            match client.try_send(super::ManagedPacketWindowInput::BeginStage {
+                key: after_candidate,
+                input: disconnected_input,
+                limits: crate::PacketStageLimits::default(),
+            }) {
+                Err(std::sync::mpsc::TrySendError::Disconnected(
+                    super::ManagedPacketWindowInput::BeginStage { key, input, .. },
+                )) => {
+                    assert_eq!(key, after_candidate);
+                    input
+                }
+                other => {
+                    panic!("disconnected channel returns the exact stage input, got {other:?}")
+                }
+            };
+        assert_eq!(returned_disconnected_input.session(), expected_session);
+        assert_eq!(
+            returned_disconnected_input.project_generation(),
+            expected_generation
+        );
+        assert_eq!(returned_disconnected_input.source_digest(), expected_digest);
+    }
+
+    #[test]
+    fn managed_identity_and_present_metadata_preserve_canonical_project_digest() {
+        let (_owner, _generation, input, first, _second) = managed_cpu_frames();
+        let digest = input.source_digest();
+
+        assert_eq!(digest.len(), 71);
+        assert!(digest.starts_with("sha256:"));
+        assert_eq!(first.source_digest(), digest);
+
+        let identity = super::ManagedGenerationIdentity::new(
+            super::ManagedStageKey::INITIAL,
+            first.session(),
+            first.project_generation(),
+            first.source_digest(),
+        );
+        assert_eq!(identity.source_digest(), digest);
+
+        let presented = super::ManagedPresentedView::new(
+            super::ManagedStageKey::INITIAL,
+            first.packet(),
+            1,
+            640,
+            360,
+            first.view(),
+        )
+        .expect("canonical project digest is retained in presented metadata");
+        assert_eq!(presented.source_digest(), digest);
+        assert_eq!(
+            super::ManagedPresentedSummary::from_view(&presented).source_digest(),
+            digest
+        );
+    }
+
+    #[test]
+    fn invalid_managed_start_returns_no_device_without_acknowledging_a_frame() {
+        let (_owner, _generation, initial_input, _first, _second) = managed_cpu_frames();
+        let (_client, server) = super::managed::managed_packet_window_channel();
+        let mut options = super::ManagedPacketWindowOptions::default();
+        options.window.width = 0;
+
+        let run = super::run_packet_windowed_managed(initial_input, server, options);
+
+        assert_eq!(
+            run.outcome
+                .as_ref()
+                .expect_err("invalid options fail before native event-loop startup")
+                .code(),
+            super::ManagedWindowErrorCode::InvalidOptions
+        );
+        assert_eq!(run.gpu_owner.phase(), crate::WindowGpuOwnerPhase::NoDevice);
+        assert_eq!(
+            run.status.lifecycle(),
+            super::ManagedWindowLifecycle::Closed
+        );
+        assert_eq!(run.status.last_presented(), None);
+        assert_eq!(run.status.rendered_frames(), 0);
+        assert_eq!(run.status.bootstrap_frames(), 0);
     }
 }

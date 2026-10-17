@@ -259,3 +259,20 @@ all-feature no-run 첫 시도는 A 소유 window의 import/borrow/privacy/derive
 one-shot disposition 계약의 문서 검사 `p03-host-disposition-contract-docs-root-attempt01.log`는 exit0·SHA-256 `d9beddccf1e755199accd39ccce1f77cbaa1cba3aefef1c0586774d87a591224`다. 이는 코드 기능 통과가 아니다.
 
 첫 all-feature CPU 실행은 83통과/1실패였다(`p03-owner-allfeatures-cpu-luna-attempt01.log`, `d74928310fa81b1fe0d612433f411fe5e5d353d595d3f6283fbe454ef6a14a15`). root가 source를 대조한 결과 content의 `sha256:<64hex>` 71바이트 digest를 새 managed identity가 진단 문자열처럼64바이트로 자르는 production 오류였다. 테스트의 identity 비교를 약하게 하지 않고 stage admission/present/summary와 host의 동일한 truncation 경로를 모두 바로잡도록 계약과 Luna 작업을 수정했다. 기존 packet validator의 형식 검증을 재사용한다. 수정 후 성공은 별도로 기록한다.
+
+### Renderer 구현 commit의 최종 focused 근거
+
+실제 digest를 그대로 보존하고 기존 packet validator를 crate 내부에서 공통 사용하도록 수정했다. 새 managed public API를 추가하면서 기존 packet/legacy API·기본값은 유지했다. owner in-place 초기화와 stage paired-create 보존은 같은 renderer helper를 사용한다. 아래는 renderer source 동결 뒤의 근거이며 host/CLI 코드는 아직 포함하지 않는다.
+
+| raw log | 결과 | SHA-256 |
+| --- | --- | --- |
+| `p03-owner-allfeatures-cpu-luna-attempt03.log` | CPU85통과/0실패·장치28ignored. 실제 CPU owner fixture의 포화/연결해제 원본 payload 반환·bootstrap camera·취소 중 active pose·invalid startup·71바이트 digest 보존 포함 | `d21731d6933da7430172c5c03f9bf600ad53c9618ca11162e767c9dc49f03bb5` |
+| `p03-owner-allfeatures-clippy-luna-attempt03.log` | renderer all-target/all-feature strict Clippy exit0 | `0b061833708ae6481de85a274c765f19a85eb17f58b67aa394e76252684b8b3f` |
+| `p03-owner-renderer-fmt-luna-attempt01.log` | renderer package fmt check exit0 | `5af79323d6d020951ab4e2d01e8a197d8c5013eebe165e44f1d1041372bcd61c` |
+| `p03-host-renderer-full-gpu-root-attempt01.log` | root가 전체 ignored renderer 명령을 한 번 실행. 실제 Metal library28+PNG capture1=29통과/0실패 | `7209ad719355ac6bf283115b13b377e07ce397ba7bcdd00a3840fee71044c2e8` |
+
+마지막 명령은 `cargo test -p daedalus-renderer --all-features --locked -- --ignored --nocapture --test-threads=1`이다. 이전 owner7/lazy2/staged11 subset과 기존 model/sprite/alpha/legacy capture를 모두 포함하므로 이29개에 subset 수를 더하지 않는다. 실제 adapter는 Apple M3 Pro/Metal/IntegratedGpu이며 root가 출력된 metal-roughness PNG의 세 구와 바닥을 시각 확인했다. 이미지 확인은 상용 비주얼 품질 인수가 아니다.
+
+앞선 strict Clippy01은 dead code·unused variable·조건문 정리를 요구했고02는 정리 뒤 unused import를 발견했다. raw `p03-owner-allfeatures-clippy-luna-attempt01.log` (`1e0b251b7eff255b7697134ea973ec906703bf0d81b65a4c94e027b5dbbd45c3`)와02를 보존했으며03이 최종 성공이다. 별도 focused digest 재실행은 위85개에 포함한다. renderer snapshot의 CPU/Metal 통과와 실제 새 managed 창/host 연결 통과를 혼합하지 않는다.
+
+C가 renderer lease를 반환한 뒤 root가 전체 Metal 회귀를 실행했다. 종료 후 D에게 새 host manifest/workspace member/Cargo.lock의 단독 편집·focused Cargo lease를 넘겼다. 기존 target cache를 재사용하고 새 registry dependency·추가 cold workspace·새 smoke framework를 만들지 않는다. 공개 Rust SDK start/attach/Step/Realtime/stop 및 실제 worker 포화/반환/Drop 시험은 source 작성 뒤 실행 대기 중이다. 전체 workspace·managed·CLI 실제 창/교체/ACK·CI/packaged 검증과 3.3a/b/c/d 최종 인수는 아직 남았다.

@@ -14,12 +14,12 @@ use daedalus_core::{
 };
 use serde_json::json;
 
-use super::super::PacketRenderer;
+use super::super::{PacketRenderer, staging::StagePanicPoint};
 use super::*;
 use crate::{
     CpuFrameHandle, PacketCpuLimits, PacketCpuOwner, PacketRendererDrainStatus, PacketStageError,
     PacketStageFrameSubmission, PacketStageId, PacketStageInput, PacketStageLimits,
-    PacketStageState, SourcePin,
+    PacketStageState, SourcePin, WindowGpuOwner,
 };
 
 const STAGE_DEADLINE: Duration = Duration::from_secs(20);
@@ -380,6 +380,32 @@ fn packet_renderer_with_asset_limits(asset_limits: PacketAssetLimits) -> PacketR
         .expect("asset limits should support bounded staging")
 }
 
+fn managed_packet_renderer_with_asset_limits(asset_limits: PacketAssetLimits) -> WindowGpuOwner {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    }))
+    .expect("a real native wgpu adapter is required for this ignored test");
+    let mut owner = WindowGpuOwner::new();
+    pollster::block_on(owner.initialize_renderer(
+        instance,
+        adapter,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    ))
+    .expect("managed base renderer should initialize");
+    let info = owner.renderer().expect("managed renderer ready").info();
+    eprintln!(
+        "managed staged GPU test adapter: name={:?}, backend={:?}, device_type={:?}",
+        info.adapter_name, info.backend, info.device_type
+    );
+    owner
+        .initialize_packet_renderer(PacketRendererLimits::default(), asset_limits)
+        .expect("managed packet renderer should initialize");
+    owner
+}
+
 fn target(
     renderer: &PacketRenderer,
     width: u32,
@@ -558,6 +584,101 @@ fn pump_once_with_loading_overlay(
         Err(PacketStageError::Render(PacketRenderError::ResidencyBusy)) => None,
         Err(error) => panic!("real staged frame with loading overlay failed: {error}"),
     }
+}
+
+fn assert_injected_pair_panic_stays_in_managed_owner(
+    point: StagePanicPoint,
+    texture_dimensions: Option<(u32, u32)>,
+    session_raw: u64,
+) {
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::mpsc,
+    };
+
+    let project = imported_project_with_texture_dimensions(3, 1.0, texture_dimensions, 1);
+    let session = SessionId::from_raw(session_raw);
+    let (cpu_owner, _generation, input, frame) =
+        cpu_generation_with_limits(&project, 1, session, PacketAssetLimits::default());
+    let mut owner = managed_packet_renderer_with_asset_limits(PacketAssetLimits::default());
+    let (target_texture, target_view) = {
+        let renderer = owner
+            .packet_renderer_mut()
+            .expect("managed packet renderer ready");
+        target(renderer, 64, 64)
+    };
+    let stage = owner
+        .packet_renderer_mut()
+        .expect("managed packet renderer ready")
+        .try_begin_stage(input, PacketStageLimits::default())
+        .expect("real imported CPU generation should be admitted");
+    owner
+        .packet_renderer_mut()
+        .expect("managed packet renderer ready")
+        .stage_state
+        .inject_pair_panic_for_test(point);
+
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        owner
+            .packet_renderer_mut()
+            .expect("managed packet renderer remains in owner")
+            .render_cpu_frame_with_stage(
+                &target_view,
+                64,
+                64,
+                Some(Arc::clone(&frame)),
+                &RenderView::perspective(Camera::default()),
+                Some(stage),
+                None,
+            )
+    }));
+    assert!(
+        panic.is_err(),
+        "configured real-create injection must panic"
+    );
+    let renderer = owner
+        .packet_renderer_mut()
+        .expect("managed packet renderer remains after unwind");
+    assert!(
+        renderer.stage_state.has_incomplete_pair_for_test(point),
+        "the first returned handle must remain in its pending pair slot"
+    );
+    assert!(owner.has_device());
+
+    drop(target_view);
+    drop(target_texture);
+    drop(frame);
+    drop(cpu_owner);
+    let (sender, receiver) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        drop(owner);
+        let _ = sender.send(thread::current().id());
+    });
+    let dropped_on = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("managed partial pair was dropped on the cleanup worker");
+    assert_eq!(dropped_on, worker.thread().id());
+    worker.join().expect("cleanup worker completed");
+}
+
+#[test]
+#[ignore = "requires a native wgpu adapter; injects real staged GPU pair interruptions"]
+fn staged_partial_geometry_texture_and_default_pairs_remain_owned_after_unwind() {
+    assert_injected_pair_panic_stays_in_managed_owner(
+        StagePanicPoint::GeometryAfterVertex,
+        None,
+        41_221,
+    );
+    assert_injected_pair_panic_stays_in_managed_owner(
+        StagePanicPoint::ImportedTextureAfterTexture,
+        Some((5, 3)),
+        41_222,
+    );
+    assert_injected_pair_panic_stays_in_managed_owner(
+        StagePanicPoint::DefaultTextureAfterTexture,
+        None,
+        41_223,
+    );
 }
 
 fn poll_until(

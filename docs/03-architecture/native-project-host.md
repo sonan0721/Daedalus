@@ -37,6 +37,18 @@ CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별�
 
 bootstrap surface present는 game presented/ACK가 아니다. actor의 generation1/source는 이미 initial publication으로 존재할 수 있으나 view는 Starting·presented 없음이다. initial device-ready 뒤 실제 최신 SessionFrame에서 첫 packet을 추출하고 정상 draw/present 경계에서만 initial identity의 ACK를 보낸다. candidate/activation ID를 만들거나 초기 source를 다시 Commit하지 않는다. startup 실패도 candidate stage 실패로 위장하지 않고 host 초기 준비 실패/종료로 보고한다.
 
+### managed window의 additive 연결 경계
+
+source 리뷰에서 기존 `run_packet_windowed_presented`는 필수 initial packet을 요구하고 결과의 `final_packet` Arc를 유지하며, 실제 present metadata에는 authority snapshot sequence가 없음을 확인했다. 새 연결은 기존 `WindowApp`/surface/input/camera/event loop를 managed mode로 확장한다. 기존 public packet 함수·message·outcome의 동작과 struct literal은 보존한다.
+
+managed 시작 입력은 실제 initial `PacketStageInput`과 유한 options/limits이며 **initial CpuFrameHandle은 요구하지 않는다**. 실제 GPU Ready 전에는 bootstrap clear/loading만 표시한다. 이후 첫/후속 frame은 실제 SessionFrame에서 추출한 `Arc<CpuFrameHandle>`이고, resource stage 입력과 구분한다. UI는 최신 active frame과 candidate 준비를 따로 보관해 로딩 중에도 최신 authority pose를 그린다. CPU validation map을 UI에서 다시 만들지 않는다.
+
+payload 전달은 capacity1의 typed 경계로 초기/후보 StageInput·최신 frame·cancel identity를 순서/현재성 검증 후 접수한다. 큐 포화 시 소유권은 sender에게 반환되며 host는 canonical CPU roots를 유지한다. close/whole stop은 이 큐의 여유에 의존하지 않는 atomic 신호다. ready/failure stage 상태와 last actual-present metadata는 각각 유한 슬롯에 보존해 하나가 다른 필수 ACK를 덮어쓰지 않는다. host는 renderer-local stage ID를 runtime의 실제 Initial/Candidate identity에 연결하며 renderer가 runtime ID/type을 import하지 않는다.
+
+managed window의 metadata는 session/generation/digest·publication sequence·authority snapshot sequence·tick·실제 physical dimensions/view와 checked present sequence를 함께 보존한다. UI는 `surface.present()` 경계 뒤에만 presented를 기록한다. Busy로 acquired frame을 버린 시도·bootstrap clear는 actual game present 횟수/ACK에 포함하지 않는다. compact host 결과에는 packet/frame/source Arc를 담지 않는다.
+
+window 내부 finalizer는 성공·초기화 뒤 오류·unwind에서도 작은 결과를 복사한 뒤 UI의 CPU-frame/packet aliases, SurfaceState, Window를 순서대로 해제하고 PacketRenderer만 별도 capacity1 device-disposition 경계로 반환한다. device 생성 전 실패는 NoDeviceCreated를 보낸다. native host의 같은 CPU owner/backstop이 이 반환을 수신해 실제 nonwaiting drain과 CPU registry 회수를 끝내며, UI에서 unfinished worker를 join하지 않는다. public 실패가 발생했다고 초기화된 device를 UI에서 곧바로 최종 drop하는 반환형을 만들지 않는다. 정확한 새 symbol/signature와 source 소유권은 renderer API compile 확인 뒤 착수 전에 동결한다. 이 경계는 source 기반 설계이며 실제 창/오류/panic 검증은 아직 남아 있다.
+
 ## runtime-neutral consumer port 구체안
 
 기존 `NativeProjectActivationService::start_headless`는 보존한다. 별도 render-consumer startup factory는 기존 actor/worker owner와 move-only single-consumer port를 함께 반환한다. startup 뒤 소비자를 붙여 이미 수락한 Commit 조건을 바꾸지 않는다. headless의 Staged 의미는 현재 CPU 호환성이고, render factory에서는 실제 consumer-ready까지 Commit을 막는다.

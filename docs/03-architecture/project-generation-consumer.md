@@ -1,6 +1,6 @@
 # P03.3b.3.1 Runtime-neutral project generation consumer
 
-상태: runtime 경계 구현 계약 동결·구현 전 · 2026-10-17 · 선행 b.2/PR16 인수
+상태: runtime 경계 계약 동결·source 구현/검증 중·인수 전 · 2026-10-17 · 선행 b.2/PR16 인수
 
 ## 목적과 범위
 
@@ -55,6 +55,8 @@ Commit 후 old source의 ACK 대기 pin 한 개를 runtime이 유지한다. matc
 port의 `try_status()`는 small consumer status를 nonwaiting으로 읽는다. initial view 상태·현재 stage identity/outcome/report progress·마지막 Applied present·bounded failure/closed 상태만 포함한다. 전체 논리 DTO는 기존32KiB result ceiling 안에서 검사한다. public control 결과/JSON에 source Arc/lease를 넣지 않는다. 이 첫 slice는 port와 같은 actor의 getter이며 CLI/MCP wire 추가는 후속 adapter다.
 
 pending lease1·terminal report1·present ACK1·ACK 대기 old-source pin1을 둔다. status/slot 접근은 try-lock이며 큰 작업을 lock 안에서 실행하지 않는다. stop/consumer-closed/currentness 표시는 out-of-band atomic/기존 wake 경계로 전달하고 queue의 여유를 기다리지 않는다. actor가 control queue 포화 중에도 이 신호/보고를 처리해야 한다. stage request마다 thread를 만들지 않는다.
+
+위 nonwaiting 경계는 public port/actor admission에 적용한다. 기존 preparation worker의 최종 cleanup backstop은 작은 metadata mutex의 소유권을 얻은 뒤 untaken payload/ACK pin을 확실히 해제할 수 있다. 이 내부 worker 경로를 UI에서 호출하거나 기다리지 않으며 전체 구현을 lock-free 또는 mutex 대기 시간 상한이 증명된 것으로 부르지 않는다.
 
 port의 `request_close()`와 Drop은 기다리지 않고 같은 out-of-band Closed를 표시한다. 명시적 close는 idempotent이며 port를 상태 조회용으로 보유한 채 표시 경로만 닫을 수 있다. 아직 commit하지 않은 candidate는 취소/실패로 수렴하며 새 Stage/Commit은 기존 AssetActivationUnavailable 등 기존 typed session 오류로 효과 전 거부한다. 일반 Step/read는 살아 있는 authority에서 계속 가능하다. Closed/stop은 불가능해진 ACK 대기 pin을 abandoned로 반환할 수 있으나 presented 성공을 기록하지 않는다. host의 GPU/CPU pins는 실제 drain/회수까지 남는다. actor/worker panic·startup 실패에서도 기존 canonical worker backstop과 source charge를 유지한다. try_shutdown은 실제 join 가능 상태만 관측하고 held pin이 있으면 Stopping이다.
 

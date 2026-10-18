@@ -32,3 +32,15 @@ runtime/public test source는 freeze됐다. Cargo lease는 renderer 담당자에
 | host artifact·PNG/file/reader·CLI protocol capture | 후속 a.3/a.4, 미구현 |
 
 실제 실행 raw·source/binary hash·실패·장치 범위는 실행 뒤에만 추가한다. 별도 offscreen PNG를 이 gate의 증거로 쓰지 않는다. a.2·상위 P02.3a·D1/D2/D3는 미통과다.
+
+## 첫 source review의 지적
+
+아직 module 연결/집중 compile 전인 초안에서 root가 아래를 확인해 소유자에게 전달했다. 이는 실행된 테스트 실패가 아니다. 수정 뒤 source와 실제 회귀를 대조한다.
+
+- readback이 Pending 관측 때 production phase를 QueuePending으로 바꾸고, 다음 호출은 Submitted만 허용해 정상 완료가 진행되지 않을 수 있었다. 진단 상태와 production phase를 구분한다.
+- admission의 수동 cell 초기화와 별도 reserve helper가 중복되며 atomic key 게시가 빠졌다. detach/worker Drop/fallback이 같은 실제 key를 보도록 예약 책임을 한곳에 둔다.
+- copy/buffer가 생기기 전의 취소·실패도 queue fence만 기다릴 수 있었다. GPU work가 없는 경우와 제출됐을 수 있는 경우를 구분하되 후자의 fence를 위조하지 않는다.
+- immutable selected-view getter가 lock/Option clone으로 바뀌면 Busy와 metadata 부재를 혼동하고 cell 재사용 뒤 다른 frame을 읽을 수 있다. handle의 작은 immutable metadata snapshot으로 실제 선택을 보존한다.
+- late worker 등록, return 소비 전 cell 재사용, QueuePending의 Released 오표시와 worker-detached/outstanding-handle fallback 조건을 보완한다.
+
+host a.3의 읽기 전용 감사는 기존 CPU owner에 PNG/파일 I/O를 전부 넣으면 frame 준비·반환 GPU polling을 지연시킬 수 있다는 후속 검토를 진행한다. bounded encoder subjob과 durable request의 정확한 transfer/stop 순서는 source 착수 전에 별도 계약으로 확정하며, 아직 host 구현이나 성능 측정 결과가 아니다.

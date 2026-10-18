@@ -68,6 +68,7 @@
 | [Native renderer owner 수명](03-architecture/native-renderer-owner-lifecycle.md) | device/packet 부분 초기화·paired create panic·managed 창 반환·worker final drop의 구현 전 소유권 계약 |
 | [Managed packet 창](03-architecture/managed-packet-window.md) | resource-only 초기 loading·유한 stage/frame 전달·OOB 취소·실제 present ACK·오류에도 owner를 반환하는 기존 창 확장 계약 |
 | [CLI view activation](03-architecture/native-project-view-activation.md) | host를 유일한 실행 owner로 소비하는 CLI 경계·flag·report v2·실제 표시/종료 관측과 기존 경로 호환 계약 |
+| [Viewer 입력 정책](03-architecture/native-view-input-policy.md) | native 기본 조작을 유지하면서 protocol 자동 검증의 keyboard/camera 간섭을 분리하는 additive API 계약 |
 | [Project generation consumer](03-architecture/project-generation-consumer.md) | renderer 의존 없는 source lease·Queued/Applied·실제 publication token·present ACK/회수의 첫 runtime 구현 계약 |
 | [모델·텍스처 실행 계약](03-architecture/model-texture-runtime.md) | P03.2a의 실제 project binding·공통 창/capture·cache pin 해제·GPU 한도/색/수명·회귀 기준 |
 | [물리·액션·오디오](03-architecture/physics-action-audio.md) | 캐릭터·판정·포즈·이벤트·오디오·경로의 엔진 계약 |

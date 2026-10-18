@@ -1,6 +1,6 @@
 # Native project view activation: CLI adapter와 report v2
 
-상태: P03.3b.3.3d 구현 전 계약 · 2026-10-17 · 실제 CLI/창 인수 전
+상태: P03.3b.3.3d source·실제 CLI 교체 metadata35통과 · 2026-10-18 · pixels/전체 인수 전
 
 ## 목적과 source 감사
 

@@ -1,6 +1,6 @@
 # Native project host: 엔진 라이브러리와 CLI의 조합 경계
 
-상태: runtime/renderer library 인수·host 공개 API 집중 검사 통과·실제 창/CLI 연결 검증 전 · 2026-10-17
+상태: 공개 API·실제 SDK 창·CLI 교체 metadata 집중 검증 통과 · 2026-10-18 · pixels/CI/package 인수 전
 
 ## 목적과 현재 사실
 

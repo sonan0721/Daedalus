@@ -1,6 +1,6 @@
 # Managed packet window: stage·frame·실제 present 경계
 
-상태: P03.3b.3.3b 구현 계약 · 2026-10-17 · 실제 창/host 인수 전
+상태: P03.3b.3.3b source·실제 same-window 교체 metadata 검증 중 · 2026-10-18 · pixels/최종 통합 인수 전
 
 ## 목적과 선행 조건
 

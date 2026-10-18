@@ -290,6 +290,22 @@ python3 scripts/smoke_project.py --cli target/debug/daedalus --assets --audio --
 
 This is CPU source activation. It does not update displayed pixels or an audio bank. `latest_frame.sequence` is the publication sequence; `authority_snapshot_sequence` identifies the underlying simulation snapshot. A deterministic actual-worker regression reproduced a Stage-result loss found by CI; the fix passed the corrected workspace (326 tests), CPU CLI smoke (62 checks), and all five PR checks including both packaged CPU smokes. The corrected clean macOS archive then failed the actual-device finite-audio completion check twice, temporarily holding PR acceptance. Later same-binary native recovery and final clean-package checks allowed PR16 acceptance; PR17's downloaded CI Mac binary also passed the combined native 72-check run with real Ended. No backend/device/volume/deadline change or root cause was established. These later results preserve the earlier failures; see the [final generation evidence](docs/06-worklog/2026-10-17-render-generation.md). The helper also checks actual invalid-option rejection before filesystem effects. See the [headless contract](docs/03-architecture/headless-asset-generation.md) and [activation worklog](docs/06-worklog/2026-10-16-project-asset-activation.md) for exact identities, coverage limits, and intermediate failures.
 
+## Reusable native host and managed source activation
+
+The host is a library consumer of one project authority, with an opt-in native window. Focused verification commands are:
+
+```sh
+cargo test -p daedalus-project-host --no-default-features --locked
+cargo test -p daedalus-project-host --all-features --locked
+cargo run -p daedalus-project-host --all-features --locked --example native_host_smoke -- --observe-ms 500 /path/to/project
+cargo build -p daedalus-cli --all-features --locked
+python3 scripts/smoke_project.py --cli target/debug/daedalus --view --asset-activation
+```
+
+The public SDK example checks actual presentation metadata, repeated redraw of one Manual publication, view closure with the same authority still alive, and whole-session shutdown. It needs a native window and the OS UI thread. The opt-in CLI smoke uses the existing external model/sprite fixture, mutates live authority state, edits PNG/model/atlas sources, waits for actual device-ready Stage before Commit, observes the new presented identity, and checks old-source retirement and final report identity. It does not capture the window's pixels.
+
+The [2026-10-18 worklog](docs/06-worklog/2026-10-18-native-host-integration.md) records a 35-check focused CLI pass plus the preceding shared-pipeline/report defects. Broader native invocation encountered local camera input during an assumption of no input; that failure is retained. The explicit [viewer input policy](docs/03-architecture/native-view-input-policy.md) is being implemented to keep protocol automation separate from physical viewer controls. No test assertion is waived, and the full native, CI/package, pixel, performance, and D1 gates remain distinct.
+
 ## Physics/audio integration
 
 The initial physics/audio adapters can be checked independently:

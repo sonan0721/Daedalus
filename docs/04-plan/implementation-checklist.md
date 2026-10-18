@@ -147,7 +147,7 @@ P03.1 근거는 [작업 기록](../06-worklog/2026-10-16-asset-import.md)에 있
 - [ ] P03.3b.3.3: 공통 native host·window bootstrap/device 반환·CLI adapter·SDK 소비와 같은 session/window/device 실제 교체·픽셀/pose/ACK/회수 통합 인수.
 - [ ] P03.3b.3.3a: [recoverable GPU owner](../03-architecture/native-renderer-owner-lifecycle.md)의 부분 base/packet 초기화·lazy handle·stage paired create 보존·worker final drop. renderer focused CPU85·실제 Metal29는 통과했으며 host/legacy·최종 CI/package 회귀 인수 전 미완료. [원본 근거](../06-worklog/2026-10-17-render-generation.md).
 - [ ] P03.3b.3.3b: additive managed window의 clear/loading bootstrap·stage/frame 분리·실제 publication/present·내부 catch/항상 owner 반환·surface/window 정리. 기존 창 API 호환성 포함.
-- [ ] P03.3b.3.3c: `daedalus-project-host`의 단일 source/session·CPU owner·공개 control/attach·동일 authority·backstop과 nonwaiting shutdown. focused window-feature17/기본7·양쪽 strict·공개 SDK 실제 창/반복 present·창 닫은 뒤 같은 authority Step/종료는 통과. 픽셀·CLI 교체·통합 CI/package 인수는 남음.
+- [ ] P03.3b.3.3c: `daedalus-project-host`의 단일 source/session·CPU owner·공개 control/attach·동일 authority·backstop과 nonwaiting shutdown. focused window-feature17/기본7·양쪽 strict·공개 SDK 실제 창/반복 present·같은 authority Step/종료와 실제 CLI 교체 집중35는 통과. 픽셀·전체 native/CI/package 인수는 남음. [새 통합 기록](../06-worklog/2026-10-18-native-host-integration.md).
 - [ ] P03.3b.3.3d: CLI adapter와 실제 source edit→Stage→Commit→pixels/pose/ACK/retirement, SDK 소비·두 package·5 CI·exact tree 인수. 하위 코드/fixture 통과를 전체 b.3/P03/D1 인수로 대체하지 않음.
 - [ ] P03.4: warm/nochange·PNG/buffer/atlas/WAV edit의 read/decode/cook/upload 수와 실제 반복 루프 비용·반응성 계측.
 

@@ -1,12 +1,12 @@
 # Live capture의 protocol 2와 CLI 파일 전달
 
-상태: P02.3a.4 source 착수 전 계약 · renderer a.2·host a.3 인수 대기 · 2026-10-18
+상태: P02.3a.4 source 착수 전 계약 · renderer a.2 로컬 인수·host a.3 검증 중 · 2026-10-18
 
 ## 만든 이유와 실제 선행 조건
 
 AI가 같은 project session의 명령 결과와 실제 pixels를 연결하려면 요청뿐 아니라 PNG를 언제 읽고 언제 ACK하는지도 정해야 한다. [전체 capture](live-capture-and-artifacts.md)와 [host artifact](live-capture-host-artifacts.md) 계약을 기존 JSONL adapter에 적용하는 마지막 경계를 고정한다. Luna의 읽기 전용 CLI source 감사와 root의 runtime/CLI 대조를 반영했다. 이 문서는 실제 wire operation·파일 전달·GPU 검증 성공의 근거가 아니다.
 
-현재 runtime은 `SessionOperation::CaptureFrame`과 일반 ticket을 제공하며 CLI도 compact capture 결과를 변환한다. 그러나 wire enum에는 capture operation이 없고 `live_capture`는 false다. host의 capture builder/status/artifact lookup은 아직 a.3 구현 전이다. metadata serializer가 있다는 이유로 기능을 켜지 않는다.
+현재 runtime은 `SessionOperation::CaptureFrame`과 일반 ticket을 제공하며 CLI도 compact capture 결과를 변환한다. 그러나 wire enum에는 capture operation이 없고 `live_capture`는 false다. host의 capture builder/status/artifact lookup source는 a.3에서 작성해 검증 중이며 실제 host PNG/reader/종료 인수는 남아 있다. metadata serializer나 host source가 있다는 이유로 CLI 기능을 켜지 않는다.
 
 `project_view.rs::run`은 `--asset-activation`일 때만 `project_view/activation.rs`의 재사용 `NativeProjectHost`를 시작한다. 첫 a.4는 이 경로를 사용한다. 기본 viewer·headless serve·batch `project capture`를 같은 live session 경로로 보고하지 않는다. 기본 viewer의 host 통합은 후속 제품 경로로 추적하며, 첫 capture 인수만으로 P02/D1을 닫지 않는다.
 
@@ -48,6 +48,20 @@ wire caller는 ACK 전에 파일을 읽거나 자신의 디렉터리로 복사�
 admission 오류는 기존 `capture_unavailable`, `capture_starting`, `capture_unsupported`, `capture_detached`, `capture_capacity`와 권한·queue/result capacity·stop 매핑을 유지한다. accepted terminal 오류는 기존 `CaptureFailure` 코드로 반환하며 PNG 성공 metadata/path를 붙이지 않는다.
 
 artifact lookup Busy는 retryable `capture_artifact_busy`이고 원래 terminal ticket을 보존한다. foreign/session mismatch·expired/not-ready binding·표현 불가능한 path는 구체적인 typed Poll 오류로 구분한다. 정확한 host error variant와 CLI code 매핑은 a.3 public header를 인수한 뒤 source 전에 대조한다. Poll 오류를 runtime terminal 결과나 ACK 성공으로 바꾸지 않는다.
+
+a.3 공개 header와 기존 CLI를 대조한 a.4 매핑 계약은 다음과 같다. CLI source는 아직 작성하지 않았다.
+
+| Host access error | Poll code | retryable |
+| --- | --- | --- |
+| `Busy` | `capture_artifact_busy` | true |
+| `NotReady` | `capture_artifact_not_ready` | true |
+| `ForeignSession` | `capture_artifact_foreign_session` | false |
+| `UnknownArtifact` | `capture_artifact_unknown` | false |
+| `Expired` | `capture_artifact_expired` | false |
+| `Stopped` | `capture_artifact_stopped` | false |
+| `Poisoned` | `capture_artifact_poisoned` | false |
+
+정확한 UTF-8 path 표현 실패는 `capture_artifact_path_invalid`, path를 포함한 응답 한도 초과는 `capture_artifact_response_too_large`다. generic 응답 serializer의 fallback에만 맡기지 않고 Poll의 typed 오류로 다루며 어떤 경우도 자동 ACK하지 않는다. 처음 인증한 lease는 기존 ticket entry에 유지한다. operation 노출/제출 가능성과 실제 `live_capture` Ready는 분리해 Starting/Unsupported/Detached의 기존 runtime 오류를 보존한다.
 
 stdin EOF는 기존 transport detach이며 창을 즉시 닫지 않는다. stdout queue Full/BrokenPipe도 기존 detach 경계를 따른다. tickets/CLI leases가 해제된 뒤에도 host의 work lease·readback·encoder/spool cleanup은 계속된다. 출력 worker는 raw bounded JSON bytes만 소유하고 host/ticket/GPU/file lease를 잡지 않는다. 따라서 detach 전 큐에 있었지만 아직 flush되지 않은 artifact 응답은 나중에 전달돼도 path 유효성을 보장하지 않는다. writer를 기다려 파일을 영구 보유하거나 창 callback/host shutdown에서 blocked stdout join을 하지 않는다.
 

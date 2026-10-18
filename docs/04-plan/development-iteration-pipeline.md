@@ -277,6 +277,8 @@ a.3에서는 coordinator·CPU owner·encoder를 각각 다른 source 소유자�
 
 encoder의 최초 source 리뷰에서는 일반 PNG `write_image_data`가 압축 결과 전체를 임시 Vec로 만든다는 pinned 구현을 확인했다. 고정64KiB chunk의 streaming writer로 바꿔 요청·출력 파일 외의 큰 중간 배열을 피하고, output cap/hash를 실제 write마다 적용하도록 했다. source 수정/회귀 중이며 실제 메모리·대기 시간 개선율은 아직 측정하지 않았다. capture를 반복하는 AI 관찰 경로의 최적화이며 빌드 cache 효과와 구분한다.
 
+a.3 첫 컴파일은 lib-only 성공 뒤 test/example의 실제 getter·borrow/move 오류를 두 차례 더 발견했다. 텍스트 header 합의는 필요하지만 compiler 검증을 대체하지 않는다. 후속 adapter는 public API와 최소 소비 코드를 먼저 동결해 `--all-targets`를 확인하고, 그 뒤 세부 동작 시험·장치 proof를 작성한다. 완료한 command 사이에만 소유 파일을 수정하며 compiler lease는 유지한다. 원본과 범위는 host 작업 기록에 남기며 컴파일 오류를 고친 횟수나 검사 시간 감소를 제품 성능으로 계산하지 않는다.
+
 ## Rust 컴파일 가속 조사와 적용 순서
 
 2026-10-18 사용자의 Ninja/Make와 같은 가속 방법 질문에 따라 현재 source·toolchain·공식 자료를 확인했다. 이 절은 조사와 다음 측정 계약이며 가속 적용/개선 배율의 실측 결과가 아니다. 엔진 구현과 별개로 빌드 환경을 무작정 바꾸지 않고, 기존 Cargo lease 안의 예정된 검사에서 병목을 관찰한다.

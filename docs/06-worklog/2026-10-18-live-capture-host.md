@@ -1,6 +1,6 @@
 # P02.3a.3: host capture·encoder·artifact 수명 작업 기록
 
-상태: source 착수 · 실제 host PNG/reader/shutdown 인수 전 · 2026-10-18
+상태: source·집중 CPU34 통과 · 실제 host PNG/reader/shutdown 인수 전 · 2026-10-18
 
 ## 만든 이유
 
@@ -40,12 +40,34 @@ PNG 경로는 pinned `png0.18.1/src/encoder.rs`를 직접 대조했다. `write_i
 
 | Gate | 상태 |
 | --- | --- |
-| public/private header·feature-off 경계 | source/API 동결 진행 |
-| ingress take/transfer panic·fence/stop race | 미검증 |
-| real-publication registry·Busy/pin/capacity | 미검증 |
-| streaming PNG cap·hash·partial/실패 정리·encode-once | 미검증 |
-| artifact capability 인증·ACK/reader·파일 삭제/credit·shutdown | 미검증 |
+| public/private header·feature-off 경계 | all-target compile 통과, feature-off 검사 대기 |
+| ingress take/transfer panic·fence/stop race | 집중 CPU 회귀 통과 |
+| real-publication registry·Busy/pin/capacity | actual CPU frame/identity 집중 회귀 통과, native 연결 대기 |
+| streaming PNG cap·hash·partial/실패 정리·encode-once | 집중 CPU 회귀 통과 |
+| artifact capability 인증·ACK/reader·파일 삭제/credit·shutdown | 집중 CPU 회귀 통과, actual host/native proof 대기 |
 | 실제 host same-surface PNG·실제 authority/identity 대조 | 미실행 |
 | CLI/protocol·workspace/managed/Python·두 package/다섯 CI | 후속 a.4, 미실행 |
 
 컴파일/CPU/GPU의 실제 command·실패·raw hash는 실행 뒤 기록한다. source/빈 interface·synthetic metadata는 실제 host 성공의 증거가 아니다. a.3/a.4·P02 및 D1/D2/D3는 미통과다.
+
+## 첫 컴파일과 수정
+
+아래 raw는 `dist/project-evidence/`에 각기 새 파일로 남겼다. Cargo는 A만 실행했고 C/D는 완료한 command 사이에 자신의 파일만 수정했다. lock diff는 host package의 기존 `png`/`sha2` dependency 이름 두 개 추가뿐이며 version/checksum 변경이 없음을 root도 대조했다.
+
+| Attempt | Command / 결과 | Raw SHA-256 |
+| --- | --- | --- |
+| 01 | `cargo check -p daedalus-project-host --features capture --lib --locked`; host lock entry 갱신 필요로 exit101 | `584f57d34605306f78cc4ac2a7b76e21c372aea2cc8e1d02df71ece161b4209e` |
+| 02 | 같은 focused lib check를 `--offline`·unlocked로 resolve; lock 갱신 후 source API/enum 오류로 실패 | `f31cebb8a2949c83813b720c755dc1100dafeb08fff4225c6c130d038a355346` |
+| 03 | 01의 locked lib check 통과 | `dd815706a98a0e9ef631df4105831ac7a9eac3c395d5b1a6b4ac9cb9b8ec6f67` |
+| 04 | `cargo test -p daedalus-project-host --features capture --lib --locked`; test helper visibility·현재 PNG API·borrowed slot/실제 getter·enum/type 사용 오류로 compile 실패, 실행 test0 | `3cc007aa92e0875360be39f26db229e23875cd9c2b6386974a9c545785a91c96` |
+| 05 | `cargo check -p daedalus-project-host --all-targets --all-features --locked`; example borrow/move·test helper getter/shadowing 오류로 compile 실패, 실행 test0 | `0e6f334f74a44b4b69c680c6e3cda5e9e64b20b0a2b1f7e954bc5f5ad596b126` |
+| 06 | 05의 all-target locked check 통과 | `90c91a5923419afc2c872982a8c2699e9eb86dc1c8017e4a092c2df5725f6edd` |
+| 07 | 04의 capture lib test 통과: 실제34 passed·0 failed·0 ignored | `818d316d7a75a46496efec2d04f1b8044bace06b1500b863e2ca682df5bb8324` |
+
+각 파일명은 `p02-capture-host-luna-attempt01-check.log`, `attempt02-check-unlocked.log`, `attempt03-check-locked.log`, `attempt04-tests-capture-lib.log`이며 02~04도 동일한 `p02-capture-host-luna-` prefix다. 04 뒤 각 소유자가 해당 compile 오류를 수정하고 다시 동결했다. test 실행·strict·실제 native PNG 인수는 후속 결과가 필요하다.
+
+05의 raw는 `p02-capture-host-luna-attempt05-check-all-targets.log`다. lib-only check 성공으로 example/test 코드의 API 일치까지 가정하지 않는다. 세 담당자는 command 종료를 확인한 뒤 자기 파일만 수정하며 다음 all-target check를 위해 다시 동결한다. 다음 adapter 단계는 먼저 최소 API 연결을 `--all-targets`로 확인한 뒤 행동 시험을 붙인다. 이 순서 변경은 이번 반복 실패에서 얻은 개선이며 절약 시간은 아직 측정하지 않았다.
+
+06/07의 raw는 각각 `p02-capture-host-luna-attempt06-check-all-targets.log`, `p02-capture-host-luna-attempt07-tests-capture-lib.log`다. 07은 PNG 실제 decode/hash·cap/IO 실패, authentic CPU publication/Weak slot, partial cleanup의 credit 반환, ACK 후 reader 단독 보유·파일 삭제, ingress Busy의 같은 Box/fence, coordinator take/transfer panic, encoder submit 전후 panic·종료, unopened-view host 종료를 검사했다. 이34개에는 기존 host 회귀가 포함되며 새 GPU 시험34개라는 뜻이 아니다. actual native capture 인수와 strict/feature-off 검증은 별도다.
+
+실제 host proof용 외부 임시 project는 기존 `smoke_project.py::_write_managed_activation_view_project`를 재사용해 만들었다. 생성 raw `p02-capture-host-native-fixture01.log` SHA-256 `16f7e8dd5c0209b789329c7680937bc980cb448da1179d07561d955cab6ba4a6`, helper source SHA-256 `0f59844c00d583d54a27dea94ff3417fc2945967ae8e617914d6f04418f7a89c`다. `/tmp/daedalus-p02-host-capture-native-20261018-01`은 offline model/texture/atlas/WAV 데이터가 있는 작은 engine 시험이며 게임 프로젝트가 아니다. 아직 이 fixture의 host GPU 실행을 성공시킨 결과는 아니다.

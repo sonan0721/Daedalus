@@ -120,6 +120,8 @@ facade Drop은 stop 요청만 하고 window callback에서 wait/join/I/O를 하�
 
 encoder spawn caller는 thread 생성만 하며 spool directory create/open/delete는 encoder worker의 비동기 bootstrap에서 수행한다. renderer Ready와 encoder의 실제 Ready를 모두 확인한 뒤만 runtime Ready를 게시한다. bootstrap I/O 실패는 capture Failed·handoff detach로 보고하고 unrelated Unsupported 사유나 성공으로 바꾸지 않는다. host/CPU/window callback에서 bootstrap 파일 작업을 대신하지 않는다.
 
+capture 모드의 renderer channel은 `NativeProjectHost::start`에서 CPU worker spawn 전에 만든다. 그 시점에 capture worker를 등록하고 capture client/worker를 CPU owner에 이동한다. 일반 window client/server는 host가 보유하다 기존 `run_view(&mut self)`에서 한 번 소비한다. 채널 생성만으로 장치나 Ready가 생기는 것은 아니며 실제 창/장치 handshake를 기다린다. default capture-off 경로는 기존처럼 `run_view`에서 일반 채널을 만든다. 창을 한 번도 열지 않은 capture host도 stop 때 미사용 endpoint와 encoder를 정리해야 하며, 새 actor·device·늦은 worker-binding 채널을 추가하지 않는다.
+
 partial/unpublished 파일은 실패 시 interest가 살아 있어도 삭제한다. CPU의 pending request 자체가 strong capability를 보유하기 때문에 weak interest 소멸만 기다리면 실패 cleanup이 자기 자신을 기다릴 수 있다. encoder는 partial path·work lease·정리 상태를 per-job catch 바깥에 설치하고, 실제 삭제 뒤만 work lease를 해제한다. 성공해 공개된 파일만 weak interest 소멸을 기다린다. responder Busy는 같은 completion을 재시도하며 다시 encode하지 않는다. responder Closed/timeout 뒤 request를 처분해도 독립 cleanup work lease는 실제 GPU/파일 정리까지 남는다.
 
 host startup 오류에도 fence가 열린 채 CPU owner를 남기지 않는다. coordinator spawn 이전 실패는 transfer를 소유한 startup guard가 detach/이미 취득한 요청 처분/transfer-fence close를 마감한다. encoder thread 생성 뒤 다른 초기화가 실패한 경우에도 encoder stop·private spool 정리 ownership을 남긴다. 이 경계는 constructor 성공 경로와 별도로 회귀한다. source/actual publication 비교는 public session/generation/digest getter를 사용하는 host의 한 helper로 통일하며 runtime private matcher의 visibility를 추측해 호출하지 않는다.

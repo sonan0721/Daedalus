@@ -1,6 +1,6 @@
 # Live capture의 요청·이미지·artifact 소유권
 
-상태: 구현 전 수명 계약, public signature의 Luna source 대조 대기 · 2026-10-18 · P02/P03/DEV06
+상태: runtime source 구현·집중 CPU 검증 중, renderer/host backend 전 · 2026-10-18 · P02/P03/DEV06
 
 ## 이 문서를 만든 이유
 
@@ -16,7 +16,7 @@ source 감사는 현재 `RequestProgress`가 terminal result와 normal credit을
 
 **Queue admission과 capture dispatch의 bind 시점을 구분한다.** `try_submit`은 actor 밖에서 실행되며 현재 authoritative generation/digest를 일관되게 읽는 기존 경계가 없다. 따라서 queue admission은 ID·deadline·normal/image reserve와 readiness를 고정하고, actor가 요청을 handoff로 dispatch하는 한 turn에서 자신의 실제 active generation/digest를 bind한다. `at_least_tick=None`의 floor는 그 turn의 실제 authority tick이다. explicit floor는 해당 최소 tick을 기다리며 actor를 막거나 Manual Step을 자동 실행하지 않는다. renderer 선택과 actor completion에서 source/currentness를 다시 검사한다. 오래된 latest-frame/render mailbox나 초기 ProjectInfo에서 source를 추측하지 않는다. 이는 client enqueue 시 source를 bind하려던 앞선 제안을 source 감사 뒤 수정한 것이다.
 
-runtime 소유자의 읽기 전용 API 제안을 root가 검토했다. 아래 경계와 factory/op/result의 형태로 첫 runtime 구현에 착수하며, renderer/host backend의 dependent source 작성 전 최종 type signature를 다시 공유한다. 아래 이름은 source 작성 전 계약이고 아직 구현된 public API가 아니다.
+runtime 소유자의 API 제안을 root가 검토해 아래 경계와 factory/op/result로 구현 중이다. source review와 집중 CPU 검증 결과는 [runtime 작업 기록](../06-worklog/2026-10-18-live-capture-foundation.md)에 남긴다. 아직 최종 인수된 public API는 아니며, renderer/host backend의 dependent source 작성 전 검증된 type signature를 다시 공유한다.
 
 | Type | 소유권과 공개 범위 |
 | --- | --- |

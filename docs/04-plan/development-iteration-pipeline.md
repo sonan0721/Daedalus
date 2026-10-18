@@ -270,3 +270,26 @@ strict 검사에서 찾은 큰 dispatch error는 최초 생성한 request를 한
 마지막 client-role/ID assertion-only 수정 뒤에는 담당자의 focused14·strict를 마치고 source hash와 Cargo lease를 root에게 넘겼다. package별 전체 검사를 또 반복하는 대신 root가 최종 workspace414·check/fmt/strict를 수행했다. Python72는 독립 source라 compile/test와 병행했다. 같은 shared target을 유지하고 cold workspace나 새 test framework를 만들지 않았다. 최종 workspace 실행의47.703초는 해당 snapshot 한 번의 관측이며 다른 범위의 과거 실행과 속도 배율로 비교하지 않는다.
 
 주기적인 source/doc commit은 유지하고 실제 GPU/host/CLI capture가 이어진 a.4에서 두 package·다섯 CI·다운로드 native proof·main 동일 tree를 인수한다. a.1의 로컬 checkpoint를 이유로 이 최종 gate를 생략하지 않는다. 실제 같은 frame의 edit→Step→capture→assert 자동화·MCP·trace와 전체 DEV04/06은 계속 미완료다.
+
+## Rust 컴파일 가속 조사와 적용 순서
+
+2026-10-18 사용자의 Ninja/Make와 같은 가속 방법 질문에 따라 현재 source·toolchain·공식 자료를 확인했다. 이 절은 조사와 다음 측정 계약이며 가속 적용/개선 배율의 실측 결과가 아니다. 엔진 구현과 별개로 빌드 환경을 무작정 바꾸지 않고, 기존 Cargo lease 안의 예정된 검사에서 병목을 관찰한다.
+
+현재 로컬은 pinned rustc1.94.0·aarch64-apple-darwin이다. root Cargo.toml에 profile override가 없고 workspace 안 `.cargo/config`도 없으며, 확인한 Cargo home config와 PATH에 sccache/ccache가 없었다. 현재 검사 process의 `CARGO_INCREMENTAL/CARGO_BUILD_JOBS/CARGO_TARGET_DIR/RUSTC_WRAPPER/CARGO_BUILD_RUSTC_WRAPPER/RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS/CMAKE_GENERATOR`는 설정되지 않았음을 value 덤프 없이 확인했다. Cargo의 dev/test 기본 증분 빌드·논리 CPU 수에 따른 job 병렬성이 기준이다. 다른 shell/session/상위 경로의 override 부재까지 증명하지 않는다. CI는 이미 registry/git/target cache를 OS/arch/toolchain/manifest 경계로 복원한다.
+
+Ninja와 CMake executable은 이 Mac에 있다. 기존 `target/debug/build/oxijolt-sys-*/out/joltc/build/CMakeCache.txt`의 실제 generator는 Unix Makefiles·`/usr/bin/make`였다. Ninja 전환은 pinned oxijolt-sys의 CMake/C++ source fallback 후보이며 Cargo/rustc 자체를 대체하지 않는다. 이미 만들어 둔 native cache의 generator를 빌드 도중 교체하거나 검사 없이 prebuilt를 사용했다고 가정하지 않는다. Linux CI는 별도 명시한 SHA-검사 prebuilt 정책을 유지한다.
+
+| 후보 | 효과를 볼 대상 | 적용 전 확인 |
+| --- | --- | --- |
+| 공유 target·증분 빌드·focused check | 같은 checkout의 작은 Rust 수정 반복 | 기존 방식 유지. feature/target/RUSTFLAGS/profile을 불필요하게 바꿔 cache를 무효화하지 않음 |
+| `cargo ... --timings` | crate별 소요 시간·병렬 진행의 관찰 | 이미 필요한 다음 검사 하나에 추가, source/flags/toolchain·raw와 timestamped HTML을 보존. 측정 자체가 가속은 아님 |
+| dev/test debug 정보 조정 | debug 정보 생성과 링크가 큰 반복 빌드 | full debug와 line-tables-only 등의 빌드 시간·backtrace/디버거 손실을 비교. release 품질/검사를 낮추지 않음 |
+| sccache | 재빌드/CI의 cacheable Rust·C/C++ compilation 재사용 | 증분 컴파일 중인 Rust crate와 bin/cdylib/proc-macro 링크의 caching 제약을 확인. 로컬 전체 incremental을 끄고 무조건 빨라졌다고 가정하지 않음 |
+| Ninja·C/C++ compiler cache | native source를 다시 빌드하는 Jolt 경로 | 기존 native cache·ABI/features/source·동시 job/메모리를 보존하는 별도 비교. Rust-only 수정 시간과 혼합하지 않음 |
+| 의존성·crate 경계/링크 비용 정리 | 실제로 반복 컴파일되는 큰 단위 | timings/source로 확인한 중복에만 적용. public API 변경의 재컴파일 fan-out과 maintainability를 함께 검토 |
+
+첫 단계는 D가 다음 이미 필요한 focused check/build 한 번에 `--timings`를 더하는 것이다. source를 멈추고 같은 공유 target에서 수행한다. 이때 warm/no-op 결과를 cold build나 편집 재빌드 성능으로 보고하지 않는다. 의미 있는 비교는 source/동일 edit 종류·feature/target/profile/toolchain·cache 상태·job 수·다른 부하를 기록하고, cold·no-op·작은 수정·링크가 필요한 실행 파일 빌드를 나눈다. 현재 동시 renderer/harness source 작업과 섞어 성능 우열을 판정하지 않는다.
+
+적용이 필요하면 root가 bounded 설정/측정 계약을 먼저 정하고 Luna xhigh가 project-owned config/script/CI를 작성한다. Cargo.lock·toolchain·공유 target을 동시에 바꾸거나 `cargo clean`/cold checkout으로 현재 엔진 검증 cache를 비우지 않는다. 기준 Mac18GB에서 job 수를 무작정 늘리지 않으며 실제 memory pressure를 함께 확인한다. 진단·correctness 검사를 생략한 시간을 컴파일 개선으로 합산하지 않는다.
+
+확인한 1차 자료(접근2026-10-18): [Cargo profiles/incremental/debug](https://doc.rust-lang.org/cargo/reference/profiles.html), [Cargo jobs/wrapper configuration](https://doc.rust-lang.org/cargo/reference/config.html), [Cargo build timings](https://doc.rust-lang.org/cargo/commands/cargo-build.html#compilation-options), [sccache Rust 제약](https://github.com/mozilla/sccache/blob/main/docs/Rust.md), [Ninja manual](https://ninja-build.org/manual.html). 온라인 최신 문서를 pinned1.94의 모든 옵션 지원 근거로 확대하지 않으며 실제 사용할 flag는 현재 toolchain으로 확인한다. native 판단은 로컬 pinned oxijolt-sys1.1.0+jolt5.6.0의 build.rs/CMakeCache와 기존 CI source를 기준으로 한다.

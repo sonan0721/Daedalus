@@ -87,3 +87,30 @@ Luna가 activation report의 digest를 final status accessor로 매핑했다. ro
 이는 실제 창의 표시 metadata·세션 상태·이전 source 회수와 final 보고의 근거다. helper의 `pixel_capture`는null이며 같은 창 이미지 readback·GPU 전체 물리 메모리0·144fps를 증명하지 않는다. 전체 workspace/CI/package와 quiet authority-camera 회귀는 아직 다음 단계다.
 
 자동 검증 창의 native 입력 간섭을 줄이는 명시적 protocol-only viewer mode를 별도 유지보수 계약으로 검토한다. 기존 기본 interactive API/default와 검증 assertion은 보존하며, 창 생명주기와 실제 protocol mutation/Step 동작을 그대로 검사한다. 이 기능은 아직 source 작성/검증 전이다.
+
+## 명시적 viewer 입력 정책의 통합 검증
+
+[입력 정책 계약](../03-architecture/native-view-input-policy.md)을 먼저 작성하고 renderer/host3파일과 CLI/Python4파일의 소유권을 나눴다. 기존 public 옵션 구조체와 Native 기본 API를 유지하면서 additive 실행 함수와 `project view --input-source native|protocol`을 연결했다. 자동 검증 helper는 protocol을 명시하며 quiet-camera·state·표시 검사를 완화하지 않는다. 실제 관측한 물리 입력 계수와 focus/resize/OS Close 처리는 계속 보존한다.
+
+첫 Python discovery는72건 중 synthetic report fixture 하나가 새 필수 `input_source` 필드를 제공하지 않아 실패했다. raw `p03-view-input-python-root-attempt01.log`·exit1·46.954초·SHA-256 `f773d6df66bdda9a7be406396aa51726c00195073019c574c72b3798b9788b60`를 보존했다. Luna에게 fixture와 명시적 잘못된 routing 거부 회귀를 수정하도록 배정했다. 실제 엔진 실행 실패가 아니며 validator를 느슨하게 바꾸지 않는다. 전체 source 동결 뒤 Rust와 실제 native suite를 순서대로 실행한다.
+
+root는 양쪽 source freeze/hash를 확인하고 전체 diff를 리뷰했다. renderer3회귀는 억제된 실제 control counter·lifecycle observer 유지, held-key camera 차단, 기존 Native 기본/전달을 검사한다. CLI는 default/명시 선택/잘못된 선택과 두 report의 policy를 검사한다. 새로운 manifest/dependency 변경은 없다.
+
+| 최종 source 검사 | 실제 결과 | raw SHA-256 |
+| --- | --- | --- |
+| `p03-view-input-python-root-attempt02.log` | Python72통과·45.720초 | `b8a8a374c2a82b839a4b8d5aba86a878b0369466deefdd8d6f0e6f3ea06d1104` |
+| `p03-view-input-workspace-test-root-attempt01.log` | locked/all-feature workspace398통과·장치34 ignored·69.627초 | `ec4148177e170bde208b4ef397c2d71ecbf9a479f156c0fae0ed9f0b1b190d5a` |
+| `p03-view-input-workspace-clippy-root-attempt01.log` | workspace/all-target/all-feature strict exit0·20.498초 | `e20e3acfb9ea45109cfdbb8219822e5ee890eefee7dfaec2a44eb5f1d1d64395` |
+| `p03-view-input-fmt-root-attempt01.log` | workspace fmt exit0 | `b8ad9a4e61f53a9f6195b4b70da877a47e34d1beba6d409b3bf73beb72db62f5` |
+| `p03-view-input-docs-root-attempt01.log` | docs exit0 | `6fe47da0fc518f6dccb72225ec94fc7374527e4708848cc9e347fb39080d69af` |
+| `p03-view-input-cli-build-root-attempt01.log` | locked/all-feature CLI build exit0·11.689초 | `f85da29d19641250bf1cb4be650e8ab47730ecef6951db64f3371cfae5c627e4` |
+
+이 build의 executable SHA-256은 `222f66a71ca84a09cc7e42fb329f2ec23d2d324044c61c2ca913b846bdbb454a`다. ignored34건은 위 CPU 결과로 통과 처리하지 않으며, 앞선 renderer Metal 집중 검사와 구분한다. 이 binary로 원래 전체 flags의 실제 native 실행05를 진행한다.
+
+## 실제 전체 flags 재검증 65통과
+
+실행05는 맨 처음과 같은 `--assets --view --models --sprites --asset-preparation --asset-activation` 조합이며65/65통과했다. exit0·21.522초, raw `p03-host-native-cli-root-attempt05.log` SHA-256 `57caf9081265bae2b50d5d338030f25457e3bd4b00202bf9668f5f2558ba05c4`다. helper가 자동 창에 명시하는 input_source만 새 protocol 정책을 사용한다. model/sprite batch PNG·authority camera·입력 없는 local camera·기존 Close/EOF/blocked stdout·preparation·same-window managed commit/retirement 검사를 모두 유지했다. 이65개는 focused35와 중복되며 합산하지 않는다. 이번 명령은 audio/native-audio를 요청하지 않았다.
+
+managed report는 protocol·session1·gen2/tick1/publication3/authority snapshot2·present sequence65를 기록했다. committed digest는 앞선04와 같은 `sha256:fe3ec0938cf560c14adda2662713d720ce96d2778fe9bebc56a4e553aac11d85`이고 handle session1/index1/generation0·translation[-1,0.25,-3]·scale[1.1,1,1]을 보존했다. retired cooked bytes/generation count는0, final host_shutdown은stopped·adapter_error는null이다. 독립 sprite viewer는 authority camera translation[0.25,0.5,0]과 실제 표시/최종 camera를 일치시켰다.
+
+model/sprite batch PNG는 별도 capture session이고 managed `pixel_capture`는 여전히null이다. 이번 통과는 같은 live window의 readback·OS scanout·144fps·전체 물리 메모리 회수를 증명하지 않는다. 원래 실패01~03을 그대로 유지하며 두 package/다섯 CI와 후속 live capture gate는 계속 열어 둔다.

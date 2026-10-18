@@ -208,10 +208,13 @@ fn execute_view(
         ..ManagedPacketWindowOptions::default()
     };
     let view = host
-        .run_view(NativeProjectViewOptions {
-            window,
-            view_override: None,
-        })
+        .run_view_with_input_policy(
+            NativeProjectViewOptions {
+                window,
+                view_override: None,
+            },
+            args.input_source.renderer_policy(),
+        )
         .map_err(|error| error.to_string());
 
     let (input, pump_failure) = stop_input_control_pump(host, stop.as_ref(), pump);
@@ -461,6 +464,7 @@ fn build_report(
         "command":"project_view",
         "report_version":2,
         "presentation_mode":"managed_activation",
+        "input_source":args.input_source.as_str(),
         "project_name":project.as_ref().map(|page| page.name.as_str()),
         "source_digest":status.map(NativeProjectHostStatus::active_source_digest),
         "source_schema_version":project.as_ref().map(|page| page.schema_version),
@@ -538,7 +542,7 @@ mod tests {
 
     use super::{ActivationExecution, build_report};
     use crate::project::ProjectClockArg;
-    use crate::project_view::ProjectViewArgs;
+    use crate::project_view::{ProjectViewArgs, ProjectViewInputSource};
 
     fn args() -> ProjectViewArgs {
         ProjectViewArgs {
@@ -548,6 +552,7 @@ mod tests {
             stdio_control: true,
             asset_preparation: true,
             asset_activation: true,
+            input_source: ProjectViewInputSource::Native,
             controlled_entity: None,
             width: 320,
             height: 180,
@@ -561,10 +566,12 @@ mod tests {
     fn report_v2_keeps_queue_and_present_semantics_separate_without_fabricated_data() {
         let execution = ActivationExecution::failed(None, "startup query failed");
         let stopping = NativeProjectHostShutdown::Stopping;
-        let report = build_report(&args(), &execution, None, None, Ok(&stopping));
+        let mut args = args();
+        let report = build_report(&args, &execution, None, None, Ok(&stopping));
 
         assert_eq!(report["report_version"], json!(2));
         assert_eq!(report["presentation_mode"], json!("managed_activation"));
+        assert_eq!(report["input_source"], json!("native"));
         assert!(report.get("accepted_packet").is_none());
         assert!(report["queued_publication"].is_null());
         assert!(report["last_presented"].is_null());
@@ -574,5 +581,9 @@ mod tests {
         assert!(report["coordinator"].is_null());
         assert_eq!(report["host_shutdown"], json!("stopping"));
         assert_eq!(report["adapter_error"], json!("startup query failed"));
+
+        args.input_source = ProjectViewInputSource::Protocol;
+        let protocol_report = build_report(&args, &execution, None, None, Ok(&stopping));
+        assert_eq!(protocol_report["input_source"], json!("protocol"));
     }
 }

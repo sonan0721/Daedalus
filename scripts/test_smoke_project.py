@@ -356,6 +356,8 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         )
         self.assertNotIn("--asset-preparation", default)
         self.assertNotIn("--audio", default)
+        input_index = default.index("--input-source")
+        self.assertEqual(default[input_index + 1], "protocol")
         self.assertIn("--stdio-control", prepared)
         self.assertEqual(prepared[-1], "--asset-preparation")
         prepared_audio = _project_view_command(
@@ -370,6 +372,21 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             ["--audio", "offline"],
         )
         self.assertEqual(prepared_audio[-1], "--asset-preparation")
+        native = _project_view_command(
+            project,
+            self.root / "view-native.json",
+            seconds=3,
+            input_source="native",
+        )
+        native_input_index = native.index("--input-source")
+        self.assertEqual(native[native_input_index + 1], "native")
+        with self.assertRaisesRegex(SmokeError, "input_source"):
+            _project_view_command(
+                project,
+                self.root / "view-invalid-input-source.json",
+                seconds=3,
+                input_source="keyboard",
+            )
 
     def test_managed_activation_view_fixture_combines_model_sprite_and_orthographic_camera(self) -> None:
         project = self.root / "managed-activation-view-fixture"
@@ -413,7 +430,9 @@ class ProjectSmokeProcessTests(unittest.TestCase):
             asset_activation=True,
         )
         self.assertNotIn("--asset-activation", legacy)
+        self.assertEqual(legacy[legacy.index("--input-source") + 1], "protocol")
         self.assertEqual(managed[-1], "--asset-activation")
+        self.assertEqual(managed[managed.index("--input-source") + 1], "protocol")
         self.assertIn("--stdio-control", managed)
         self.assertNotIn("--audio", managed)
 
@@ -1112,6 +1131,7 @@ class ProjectSmokeProcessTests(unittest.TestCase):
         }
         report = {
             "command": "project_view",
+            "input_source": "protocol",
             "session": "9",
             "source_digest": "a" * 64,
             "authority_final_tick": "1",

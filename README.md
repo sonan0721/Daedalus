@@ -42,6 +42,8 @@ cargo run -p daedalus-cli --features window -- project view /path/to/project --c
 
 The [viewer contract](docs/03-architecture/project-view-control.md) describes tickets, explicit Step, bounded I/O, and shutdown. Camera controls work without a selected entity; `--controlled-entity <stable-id>` enables diagnostic arrow movement, and manual mode uses F10 for one tick. Protocol 1 remains available through `project serve`. Live image capture, MCP, and managed attach to this viewer are still pending.
 
+For automated viewing, add `--input-source protocol`. This disables physical keyboard, pointer, and wheel controls while preserving protocol edits, Step, resize, and OS close. Both legacy and managed project views report the selected input source. Interactive viewing defaults to `--input-source native`; see the [input policy](docs/03-architecture/native-view-input-policy.md).
+
 The renderer's additive [packet API](docs/03-architecture/renderer-resource-reuse.md) shares immutable geometry, retains device-local buffers, and updates changed instance/material rows. Small native GPU tests verify reuse and pixel parity with the original capture path. Broader rendering quality, live project reload, and complete P02/D1 acceptance remain open.
 
 ## CPU asset preparation

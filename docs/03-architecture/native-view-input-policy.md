@@ -1,6 +1,6 @@
 # Native viewer의 입력 소스와 자동 검증
 
-상태: 구현 전 계약 동결 · 2026-10-18 · DEV06/P02/P03
+상태: additive API 구현·로컬 전체 Rust/Python·실제 Mac 통합65 통과, CI/package 대기 · 2026-10-18 · DEV06/P02/P03
 
 ## 목적과 관측 근거
 
@@ -38,6 +38,8 @@ Luna D는 renderer window.rs/lib.rs와 host.rs의 policy·wrapper·실제 이벤
 - Focus/resize/close는 동작하고 정상 JSONL Step·asset Stage/Commit·actual present/회수·종료가 유지된다.
 - 기존 quiet authority-camera 검증을 포함한 전체 native flags가 같은 binary에서 통과한다.
 - pipeline 개선 결과를 전체 D1·144fps·OS focus 보장으로 보고하지 않는다. capture pixels와 CI/package 제품 인수는 별도다.
+
+실제 검증의 명령·source 범위·실패와 후속65통과는 [통합 기록](../06-worklog/2026-10-18-native-host-integration.md)을 따른다. 이전 실패를 지우거나 Native 물리 입력 자체의 새 자동 검증·live pixels·전체 엔진 인수로 확대하지 않는다.
 
 ## 1차 자료
 

@@ -4859,6 +4859,11 @@ def _validate_native_view_report(
     latest_frame: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _expect(report.get("command") == "project_view", "native report is from another command", report)
+    _expect(
+        report.get("input_source") == "protocol",
+        "automated native project view did not report protocol-only input routing",
+        report,
+    )
     _expect(report.get("session") == expected_session, "native report belongs to another session", report)
     _expect(
         report.get("source_digest") == expected_source_digest,
@@ -4980,15 +4985,20 @@ def _project_view_command(
     report: Path,
     *,
     seconds: int,
+    input_source: str = "protocol",
     asset_preparation: bool = False,
     asset_activation: bool = False,
     audio: bool = False,
 ) -> list[str]:
+    if input_source not in {"native", "protocol"}:
+        raise SmokeError("project view input_source must be 'native' or 'protocol'")
     command = [
         "project",
         "view",
         os.fspath(project),
         "--stdio-control",
+        "--input-source",
+        input_source,
         "--clock",
         "manual",
         "--seconds",
@@ -5911,6 +5921,11 @@ def _validate_native_activation_view_report(
         and report.get("report_version") == 2
         and report.get("presentation_mode") == "managed_activation",
         "activation view wrote another report contract",
+        report,
+    )
+    _expect(
+        report.get("input_source") == "protocol",
+        "automated activation view did not report protocol-only input routing",
         report,
     )
     _expect(

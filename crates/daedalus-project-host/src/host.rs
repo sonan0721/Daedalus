@@ -22,7 +22,8 @@ use daedalus_renderer::{
     ManagedPacketWindowClient, ManagedPacketWindowControl, ManagedPacketWindowInput,
     ManagedPacketWindowOptions, ManagedPresentedSummary, ManagedPresentedView, ManagedStageEvent,
     ManagedStageKey, ManagedWindowOutcome, ManagedWindowRead, PacketStageInput, PacketStageLimits,
-    RenderView, WindowGpuOwner, managed_packet_window_channel, run_packet_windowed_managed,
+    RenderView, WindowGpuOwner, WindowInputPolicy, managed_packet_window_channel,
+    run_packet_windowed_managed_with_input_policy,
 };
 use daedalus_renderer::{
     PacketAssetLimits, PacketCpuLimits, PacketCpuOwner, PacketCpuStatus, PacketRenderError,
@@ -660,6 +661,16 @@ impl NativeProjectHost {
         &mut self,
         options: NativeProjectViewOptions,
     ) -> Result<NativeViewOutcome, NativeViewError> {
+        self.run_view_with_input_policy(options, WindowInputPolicy::Native)
+    }
+
+    /// Runs the one native view with an explicit policy for physical window input.
+    #[cfg(feature = "window")]
+    pub fn run_view_with_input_policy(
+        &mut self,
+        options: NativeProjectViewOptions,
+        input_policy: WindowInputPolicy,
+    ) -> Result<NativeViewOutcome, NativeViewError> {
         if self.signal.stop_requested.load(Ordering::Acquire) {
             return Err(NativeViewError {
                 code: "stopped".to_owned(),
@@ -762,7 +773,12 @@ impl NativeProjectHost {
             }
         };
 
-        let run = run_packet_windowed_managed(initial, server, options.window);
+        let run = run_packet_windowed_managed_with_input_policy(
+            initial,
+            server,
+            options.window,
+            input_policy,
+        );
         let daedalus_renderer::ManagedWindowRun {
             outcome,
             status: window_status,

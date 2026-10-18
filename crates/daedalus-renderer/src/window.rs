@@ -32,6 +32,31 @@ use crate::{
 };
 use daedalus_core::{SessionId, Tick};
 
+/// Selects whether native controls may operate the window-local camera.
+///
+/// `Native` preserves the interactive behavior of existing window APIs.
+/// `ProtocolOnly` leaves window lifecycle events active while preventing
+/// physical keyboard, pointer, and wheel controls from changing the view or
+/// reaching the input observer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowInputPolicy {
+    /// Native controls operate the local camera and are forwarded to observers.
+    #[default]
+    Native,
+    /// The protocol is the only source of view changes and gameplay input.
+    ProtocolOnly,
+}
+
+impl WindowInputPolicy {
+    const fn allows_local_camera(self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    const fn forwards_native_controls(self) -> bool {
+        self.allows_local_camera()
+    }
+}
+
 mod managed;
 use managed::ManagedPresentedReservationError;
 pub use managed::*;
@@ -201,8 +226,9 @@ pub struct WindowOptions {
     /// Requests redraws near the requested interval. The operating system and
     /// display presentation mode may impose a different cadence.
     pub frame_interval: Duration,
-    /// Optional bounded observer queue for OS input. Full-queue drops are
-    /// counted on the sink, while local camera controls continue to work.
+    /// Optional bounded observer queue for OS input. Native controls are
+    /// forwarded only under `WindowInputPolicy::Native`; focus and resize
+    /// lifecycle events remain observable under either policy.
     pub input_events: Option<WindowInputSink>,
     /// Loading state to display from the first native frame.
     pub initial_loading: bool,
@@ -233,8 +259,8 @@ impl Default for WindowOptions {
 }
 
 /// A bounded, nonblocking observer for native window input. A full or
-/// disconnected queue drops the observer event and increments
-/// `dropped_event_count()`; local camera controls remain active.
+/// disconnected queue drops a forwarded observer event and increments
+/// `dropped_event_count()`.
 #[derive(Clone, Debug)]
 pub struct WindowInputSink {
     sender: SyncSender<WindowInput>,
@@ -272,9 +298,10 @@ pub fn window_input_channel(
     ))
 }
 
-/// Native input received by the window loop. The loop also handles camera
-/// orbit and zoom locally, so those controls remain responsive while runtime
-/// messages are delayed. Key input is always observed, including camera keys.
+/// Native input received by the window loop. Under `WindowInputPolicy::Native`,
+/// keyboard, pointer, and wheel controls are forwarded even when they also
+/// operate the camera locally. `ProtocolOnly` records those physical events in
+/// window counters without forwarding them to this observer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WindowInput {
     Key { code: KeyCode, pressed: bool },
@@ -505,6 +532,25 @@ pub fn run_packet_windowed_presented(
     limits: PacketRendererLimits,
     asset_limits: PacketAssetLimits,
 ) -> Result<PacketPresentationWindowOutcome, PacketWindowError> {
+    run_packet_windowed_presented_with_input_policy(
+        initial_packet,
+        messages,
+        options,
+        limits,
+        asset_limits,
+        WindowInputPolicy::Native,
+    )
+}
+
+/// Opens the persistent packet path with an explicit policy for native input.
+pub fn run_packet_windowed_presented_with_input_policy(
+    initial_packet: Arc<RenderPacket>,
+    messages: Receiver<PacketWindowMessage>,
+    options: WindowOptions,
+    limits: PacketRendererLimits,
+    asset_limits: PacketAssetLimits,
+    input_policy: WindowInputPolicy,
+) -> Result<PacketPresentationWindowOutcome, PacketWindowError> {
     validate_options(&options)
         .map_err(|error| PacketWindowError::InvalidOptions(error.to_string()))?;
     limits.validate().map_err(PacketWindowError::Packet)?;
@@ -512,9 +558,16 @@ pub fn run_packet_windowed_presented(
     initial_packet
         .validate(limits)
         .map_err(PacketWindowError::Packet)?;
-    let event_loop =
-        EventLoop::new().map_err(|error| PacketWindowError::EventLoop(error.to_string()))?;
-    let mut app = WindowApp::new_packet(initial_packet, messages, options, limits, asset_limits);
+    let event_loop = build_event_loop(input_policy)
+        .map_err(|error| PacketWindowError::EventLoop(error.to_string()))?;
+    let mut app = WindowApp::new_packet(
+        initial_packet,
+        messages,
+        options,
+        limits,
+        asset_limits,
+        input_policy,
+    );
     event_loop
         .run_app(&mut app)
         .map_err(|error| PacketWindowError::EventLoop(error.to_string()))?;
@@ -547,10 +600,25 @@ pub fn run_packet_windowed_managed(
     server: ManagedPacketWindowServer,
     options: ManagedPacketWindowOptions,
 ) -> ManagedWindowRun {
-    let mut app = WindowApp::new_managed(initial, server, options);
+    run_packet_windowed_managed_with_input_policy(
+        initial,
+        server,
+        options,
+        WindowInputPolicy::Native,
+    )
+}
+
+/// Opens the staged packet window with an explicit native-input policy.
+pub fn run_packet_windowed_managed_with_input_policy(
+    initial: PacketStageInput,
+    server: ManagedPacketWindowServer,
+    options: ManagedPacketWindowOptions,
+    input_policy: WindowInputPolicy,
+) -> ManagedWindowRun {
+    let mut app = WindowApp::new_managed(initial, server, options, input_policy);
     let run_result = catch_unwind(AssertUnwindSafe(|| {
         app.validate_managed_start()?;
-        let event_loop = EventLoop::new().map_err(|error| {
+        let event_loop = build_event_loop(input_policy).map_err(|error| {
             ManagedWindowError::new(ManagedWindowErrorCode::EventLoop, error.to_string())
         })?;
         event_loop.run_app(&mut app).map_err(|error| {
@@ -562,6 +630,22 @@ pub fn run_packet_windowed_managed(
         Err(_) => Err(ManagedWindowError::internal_panic()),
     };
     app.finish_managed(outcome)
+}
+
+fn build_event_loop(
+    input_policy: WindowInputPolicy,
+) -> Result<EventLoop<()>, winit::error::EventLoopError> {
+    #[cfg(target_os = "macos")]
+    if input_policy == WindowInputPolicy::ProtocolOnly {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+
+        let mut builder = EventLoop::builder();
+        builder.with_activate_ignoring_other_apps(false);
+        return builder.build();
+    }
+
+    let _ = input_policy;
+    EventLoop::new()
 }
 
 fn validate_options(options: &WindowOptions) -> Result<(), RendererError> {
@@ -798,6 +882,7 @@ struct WindowApp {
     messages: Option<Receiver<WindowMessage>>,
     packet_messages: Option<Receiver<PacketWindowMessage>>,
     options: WindowOptions,
+    input_policy: WindowInputPolicy,
     mode: WindowMode,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -991,12 +1076,13 @@ impl WindowApp {
         options: WindowOptions,
         limits: PacketRendererLimits,
         asset_limits: PacketAssetLimits,
+        input_policy: WindowInputPolicy,
     ) -> Self {
         let now = Instant::now();
         let initial_loading = options.initial_loading;
         let width = options.width;
         let height = options.height;
-        Self::with_source(
+        let mut app = Self::with_source(
             None,
             Some(messages),
             RenderScene::new(),
@@ -1008,13 +1094,16 @@ impl WindowApp {
             initial_loading,
             width,
             height,
-        )
+        );
+        app.input_policy = input_policy;
+        app
     }
 
     fn new_managed(
         initial: PacketStageInput,
         server: ManagedPacketWindowServer,
         options: ManagedPacketWindowOptions,
+        input_policy: WindowInputPolicy,
     ) -> Self {
         let now = Instant::now();
         let initial_identity = ManagedGenerationIdentity::new(
@@ -1051,6 +1140,7 @@ impl WindowApp {
             height,
         );
         app.mode = WindowMode::Managed;
+        app.input_policy = input_policy;
         app.gpu_owner = Some(WindowGpuOwner::new());
         app.managed = Some(ManagedWindowState {
             server,
@@ -1090,6 +1180,7 @@ impl WindowApp {
             messages,
             packet_messages,
             options,
+            input_policy: WindowInputPolicy::Native,
             mode: if packet.is_some() {
                 WindowMode::Packet
             } else {
@@ -1423,7 +1514,7 @@ impl WindowApp {
         } else {
             "Ready"
         };
-        let controls = window_controls_hint(self.is_packet_path());
+        let controls = window_controls_hint(self.is_packet_path(), self.input_policy);
         self.window_title = format!(
             "{} | {tick_and_generation} · {loading} | {controls}",
             self.options.title,
@@ -1500,7 +1591,8 @@ impl WindowApp {
     ) -> Result<(), ManagedWindowError> {
         let attributes = WindowAttributes::default()
             .with_title(self.options.title.clone())
-            .with_inner_size(LogicalSize::new(self.options.width, self.options.height));
+            .with_inner_size(LogicalSize::new(self.options.width, self.options.height))
+            .with_active(self.input_policy == WindowInputPolicy::Native);
         let window = Arc::new(event_loop.create_window(attributes).map_err(|error| {
             ManagedWindowError::new(ManagedWindowErrorCode::EventLoop, error.to_string())
         })?);
@@ -2473,7 +2565,8 @@ impl WindowApp {
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), WindowFailure> {
         let attributes = WindowAttributes::default()
             .with_title(self.options.title.clone())
-            .with_inner_size(LogicalSize::new(self.options.width, self.options.height));
+            .with_inner_size(LogicalSize::new(self.options.width, self.options.height))
+            .with_active(self.input_policy == WindowInputPolicy::Native);
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -2675,7 +2768,7 @@ impl WindowApp {
     }
 
     fn apply_camera_movement(&mut self, elapsed: f32) {
-        if elapsed <= 0.0 {
+        if elapsed <= 0.0 || !self.input_policy.allows_local_camera() {
             return;
         }
         if !managed_view_input_enabled(
@@ -2871,6 +2964,28 @@ impl WindowApp {
     }
 
     fn emit_input(&mut self, event: WindowInput) {
+        self.record_input(event, true);
+    }
+
+    fn emit_native_control(&mut self, event: WindowInput) {
+        self.record_input(event, self.input_policy.forwards_native_controls());
+    }
+
+    fn process_native_key(&mut self, code: KeyCode, pressed: bool) -> bool {
+        if !self.input_policy.forwards_native_controls() {
+            self.record_input(WindowInput::Key { code, pressed }, false);
+            return false;
+        }
+        if pressed {
+            self.keys_down.insert(code);
+        } else {
+            self.keys_down.remove(&code);
+        }
+        self.emit_input(WindowInput::Key { code, pressed });
+        true
+    }
+
+    fn record_input(&mut self, event: WindowInput, forward_to_observer: bool) {
         self.counters.input_events = self.counters.input_events.saturating_add(1);
         let while_loading = self.is_loading();
         if while_loading {
@@ -2907,7 +3022,7 @@ impl WindowApp {
         if while_loading {
             *loading_events = loading_events.saturating_add(1);
         }
-        if let Some(sender) = &self.options.input_events {
+        if forward_to_observer && let Some(sender) = &self.options.input_events {
             sender.try_send(event);
         }
     }
@@ -3075,12 +3190,9 @@ impl ApplicationHandler for WindowApp {
                     return;
                 };
                 let pressed = event.state == ElementState::Pressed;
-                if pressed {
-                    self.keys_down.insert(code);
-                } else {
-                    self.keys_down.remove(&code);
+                if !self.process_native_key(code, pressed) {
+                    return;
                 }
-                self.emit_input(WindowInput::Key { code, pressed });
                 if pressed && is_camera_key(code) {
                     // Apply a small immediate step so a short press/release
                     // between redraws is visible in the final camera report.
@@ -3106,17 +3218,19 @@ impl ApplicationHandler for WindowApp {
                 if button == MouseButton::Left {
                     self.left_mouse_down = pressed;
                 }
-                self.emit_input(WindowInput::MouseButton { button, pressed });
+                self.emit_native_control(WindowInput::MouseButton { button, pressed });
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if !managed_view_input_enabled(
-                    self.mode,
-                    self.managed
-                        .as_ref()
-                        .is_some_and(|managed| managed.active.is_some()),
-                ) {
+                if !self.input_policy.allows_local_camera()
+                    || !managed_view_input_enabled(
+                        self.mode,
+                        self.managed
+                            .as_ref()
+                            .is_some_and(|managed| managed.active.is_some()),
+                    )
+                {
                     self.last_cursor = Some(position);
-                    self.emit_input(WindowInput::CursorMoved {
+                    self.emit_native_control(WindowInput::CursorMoved {
                         x: position.x,
                         y: position.y,
                     });
@@ -3167,7 +3281,7 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
                 self.last_cursor = Some(position);
-                self.emit_input(WindowInput::CursorMoved {
+                self.emit_native_control(WindowInput::CursorMoved {
                     x: position.x,
                     y: position.y,
                 });
@@ -3177,13 +3291,15 @@ impl ApplicationHandler for WindowApp {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(position) => (position.y as f32) * 0.01,
                 };
-                if !managed_view_input_enabled(
-                    self.mode,
-                    self.managed
-                        .as_ref()
-                        .is_some_and(|managed| managed.active.is_some()),
-                ) {
-                    self.emit_input(WindowInput::MouseWheel { lines });
+                if !self.input_policy.allows_local_camera()
+                    || !managed_view_input_enabled(
+                        self.mode,
+                        self.managed
+                            .as_ref()
+                            .is_some_and(|managed| managed.active.is_some()),
+                    )
+                {
+                    self.emit_native_control(WindowInput::MouseWheel { lines });
                     return;
                 }
                 let view = self.current_view();
@@ -3212,7 +3328,7 @@ impl ApplicationHandler for WindowApp {
                             self.counters.local_camera_changes.saturating_add(1);
                     }
                 }
-                self.emit_input(WindowInput::MouseWheel { lines });
+                self.emit_native_control(WindowInput::MouseWheel { lines });
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
@@ -3281,7 +3397,10 @@ fn bounded_message(mut message: String) -> String {
     message
 }
 
-fn window_controls_hint(packet_mode: bool) -> &'static str {
+fn window_controls_hint(packet_mode: bool, input_policy: WindowInputPolicy) -> &'static str {
+    if input_policy == WindowInputPolicy::ProtocolOnly {
+        return "Protocol controls · OS close";
+    }
     if packet_mode {
         "WASD/QE + drag/wheel · Esc close"
     } else {
@@ -3332,22 +3451,116 @@ mod tests {
 
     use super::{
         FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, ManagedFrame, ManagedWindowState,
-        PacketTransition, PresentationMetadata, WindowApp, WindowInput, WindowMode, WindowOptions,
-        apply_presentation, managed_frame_is_cancelled, managed_view_input_enabled,
-        max_frames_reached, max_run_time_reached, preferred_surface_alpha_mode,
-        presentation_disconnect_error, validate_options, validate_packet_transition,
-        validate_window_scene, window_controls_hint, window_input_channel,
+        PacketTransition, PresentationMetadata, WindowApp, WindowInput, WindowInputPolicy,
+        WindowMode, WindowOptions, apply_presentation, managed_frame_is_cancelled,
+        managed_view_input_enabled, max_frames_reached, max_run_time_reached,
+        preferred_surface_alpha_mode, presentation_disconnect_error, validate_options,
+        validate_packet_transition, validate_window_scene, window_controls_hint,
+        window_input_channel,
     };
 
     #[test]
     fn control_hint_describes_only_controls_available_in_each_source_mode() {
         assert_eq!(
-            window_controls_hint(true),
+            window_controls_hint(true, WindowInputPolicy::Native),
             "WASD/QE + drag/wheel · Esc close"
         );
         assert_eq!(
-            window_controls_hint(false),
+            window_controls_hint(false, WindowInputPolicy::Native),
             "WASD/QE + drag/wheel · Arrows move · R regenerate · Esc close"
+        );
+        assert_eq!(
+            window_controls_hint(true, WindowInputPolicy::ProtocolOnly),
+            "Protocol controls · OS close"
+        );
+    }
+
+    #[test]
+    fn protocol_only_records_native_controls_but_forwards_only_lifecycle_events() {
+        let (sink, observed_events) = window_input_channel(8).expect("positive observer capacity");
+        let (_messages, message_receiver) = std::sync::mpsc::channel();
+        let options = WindowOptions {
+            input_events: Some(sink),
+            ..WindowOptions::default()
+        };
+        let mut app = WindowApp::new(RenderScene::new(), message_receiver, options);
+        app.input_policy = WindowInputPolicy::ProtocolOnly;
+
+        assert!(!app.process_native_key(KeyCode::ArrowUp, true));
+        assert!(!app.process_native_key(KeyCode::Escape, true));
+        assert!(app.keys_down.is_empty());
+        app.emit_native_control(WindowInput::MouseButton {
+            button: winit::event::MouseButton::Left,
+            pressed: true,
+        });
+        app.emit_native_control(WindowInput::CursorMoved { x: 12.0, y: 24.0 });
+        app.emit_native_control(WindowInput::MouseWheel { lines: 1.0 });
+        app.emit_input(WindowInput::Focused(false));
+        app.emit_input(WindowInput::Resized {
+            width: 640,
+            height: 480,
+        });
+
+        assert_eq!(app.counters.input_events, 7);
+        assert_eq!(app.counters.key_events, 2);
+        assert_eq!(app.counters.mouse_button_events, 1);
+        assert_eq!(app.counters.cursor_events, 1);
+        assert_eq!(app.counters.wheel_events, 1);
+        assert_eq!(app.counters.focus_events, 1);
+        assert_eq!(app.counters.resize_events, 1);
+        assert_eq!(
+            app.options
+                .input_events
+                .as_ref()
+                .expect("observer configured")
+                .dropped_event_count(),
+            0
+        );
+        assert_eq!(
+            observed_events.try_iter().collect::<Vec<_>>(),
+            vec![
+                WindowInput::Focused(false),
+                WindowInput::Resized {
+                    width: 640,
+                    height: 480,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn protocol_only_cannot_apply_held_native_camera_keys() {
+        let (_messages, receiver) = std::sync::mpsc::channel();
+        let mut app = WindowApp::new(RenderScene::new(), receiver, WindowOptions::default());
+        app.input_policy = WindowInputPolicy::ProtocolOnly;
+        assert!(!app.input_policy.allows_local_camera());
+        let initial_camera = app.current_camera().clone();
+        app.keys_down.insert(KeyCode::KeyW);
+        app.apply_camera_movement(1.0 / 60.0);
+
+        assert_eq!(app.current_camera(), &initial_camera);
+        assert_eq!(app.counters.local_camera_changes, 0);
+    }
+
+    #[test]
+    fn native_policy_remains_the_default_and_forwards_key_observation() {
+        let (sink, observed_events) = window_input_channel(1).expect("positive observer capacity");
+        let (_messages, message_receiver) = std::sync::mpsc::channel();
+        let options = WindowOptions {
+            input_events: Some(sink),
+            ..WindowOptions::default()
+        };
+        let mut app = WindowApp::new(RenderScene::new(), message_receiver, options);
+
+        assert_eq!(app.input_policy, WindowInputPolicy::default());
+        assert_eq!(app.input_policy, WindowInputPolicy::Native);
+        assert!(app.process_native_key(KeyCode::ArrowUp, true));
+        assert_eq!(
+            observed_events.try_recv().expect("native key is forwarded"),
+            WindowInput::Key {
+                code: KeyCode::ArrowUp,
+                pressed: true,
+            }
         );
     }
 
@@ -3464,6 +3677,7 @@ mod tests {
             WindowOptions::default(),
             PacketRendererLimits::default(),
             PacketAssetLimits::default(),
+            WindowInputPolicy::Native,
         );
 
         assert_eq!(
@@ -3792,6 +4006,7 @@ mod tests {
             WindowOptions::default(),
             PacketRendererLimits::default(),
             PacketAssetLimits::default(),
+            WindowInputPolicy::Native,
         );
 
         app.apply_camera_movement(1.0 / 60.0);

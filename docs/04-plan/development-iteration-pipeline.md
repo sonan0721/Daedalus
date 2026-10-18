@@ -250,3 +250,9 @@ host 구현 검토에서는 기존 digest validator·runtime compact publication
 현재 정리 기준은 증분 캐시 그룹 내부의 모든 파일·디렉터리 중 가장 최근 변경 시각이24시간보다 오래된 경우다. 그룹 최상위 mtime만으로 판정하지 않는다. 소스 작업·Cargo/장치 검증 소유자가 비어 있는지 먼저 확인하고, 대상 root가 저장소의 `target/debug/incremental`인지 검증한다. 삭제 목록과 전후 측정은 고유 raw에 보존한다. 소스와 기존 증거의 hash, 현재 CLI hash, Git 상태를 정리 전후 대조한다. 이24시간 기준은 이번 로컬 유지보수 판단이며 자동 실행 일정이나 성능 보장이 아니다.
 
 공유 target 전체를 비우거나 `git clean -fdx`로 소스·검증물을 함께 제거하지 않는다. 새 기능의 확인된 소스는 기능별 checkpoint commit으로 보존하고, 통합/제품 인수 전인 사항을 작업 기록에 남긴다. 캐시 정리를 빌드 속도 개선이나 엔진 기능 완성으로 보고하지 않는다. [실제 정리 결과](../06-worklog/2026-10-17-render-generation.md)는 할당 byte 추정과 시스템 여유 공간의 관측값을 구분한다.
+
+## 자동 viewer 검증의 명시적 입력 정책
+
+실제 전체 native 검증은 quiet-camera 전제 중 key6/local camera change5를 관측해 실패했다. 해당 검사를 완화하거나 창 전체를 다른 offscreen 경로로 바꾸는 대신 [입력 정책](../03-architecture/native-view-input-policy.md)을 추가했다. CLI 기본 Native와 공개 옵션 구조체는 유지하고 기존 공통 smoke command helper가 ProtocolOnly를 명시한다. 창/app의 activation 요청도 이 모드에 맞게 줄인다. 관측한 물리 event counter와 focus/resize/close·실제 GPU 표시·protocol Step/Commit은 보존하므로 자동화의 전제와 사람이 사용하는 조작 정책을 각각 검증할 수 있다.
+
+source freeze 뒤 전체 Rust/Python과 원래 전체 flags의 실제 Mac65가 통과했다. 정확한 실패/수정/후속 결과와 raw hash는 [통합 기록](../06-worklog/2026-10-18-native-host-integration.md)을 따른다. 별도 framework·game fixture project·숨은 retry·deadline/예산 증가를 추가하지 않았다. 재시도 원인 하나를 명시적 엔진 API로 다룬 개선이며 일반 실행 시간 단축 배율이나 모든 OS의 focus 보장을 측정한 것은 아니다.

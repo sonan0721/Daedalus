@@ -37,7 +37,9 @@ status는 Starting/Ready/Unsupported/Detached와 작은 작업 phase·byte count
 2. coordinator는 runtime handoff에서 얻은 요청을 다른 fallible 작업 없이 즉시 **iteration catch 바깥의 persistent state**에 설치한다. stack local에만 두거나 다음 routing 계산 뒤 보관하지 않는다.
 3. 요청의 session/generation/digest를 실제 `CoordinatorGeneration`과 맞추고 그 record의 `ManagedStageKey`를 사용한다. last-presented clone·initial camera·generation 숫자를 stage key로 추측하지 않는다. 아직 해당 source를 선택할 수 없으면 원래 source/deadline을 유지해 bounded 대기하거나 typed failure다.
 4. CPU owner ingress로 원래 request를 이동한다. 거부/Busy에는 같은 소유권을 보존한다. worker는 곧바로 catch 바깥의 `PendingCapture`로 이동한 뒤 renderer 요청을 제출한다.
-5. stop/panic은 handoff detach→이미 얻은 request의 durable transfer/확정 처분→open fence 해제 순서다. flag를 먼저 지워 worker가 종료된 뒤 request를 넘기는 경로를 만들지 않는다.
+5. stop/panic은 handoff detach→**coordinator가 이미 take한** request의 durable transfer/확정 처분→open fence 해제 순서다. flag를 먼저 지워 worker가 종료된 뒤 request를 넘기는 경로를 만들지 않는다.
+
+이 fence는 host가 가져간 요청의 소유권만 다룬다. 현재 runtime port는 Detached 뒤 take를 거부하며 unclaimed slot이 비었다는 별도 ACK는 없다. 가져가지 않은 요청은 GPU/file 작업을 시작하지 않은 runtime 소유다. actor의 Detached 관측·failure drain/retry·shutdown drain이 이를 마감하고, 전체 host shutdown은 runtime service도 별도로 확인한다. CPU worker의 stop fence가 port empty ACK나 전체 service Stopped를 기다리게 만들면 불필요한 API와 종료 의존 순환이 생길 수 있어 그렇게 하지 않는다.
 
 `PendingCapture`는 runtime request/responder·독립 work lease·renderer key·readback/cleanup handle·encoder 상태·재시도할 compact completion을 소유한다. coordinator나 encoder job 하나의 unwind로 이 record가 먼저 떨어지지 않는다. 원래 boxed renderer request도 Busy 재시도에 그대로 보존한다.
 
@@ -80,7 +82,9 @@ registry는 full opaque CaptureArtifactId·session/host binding·weak interest·
 
 ## Shutdown과 인수
 
-기존 CPU worker stop predicate에 ingress fence·pending capture·encoder job/result·artifact cleanup을 더한다. 반환 `WindowGpuOwner`의 fence/drain도 기존 경로로 진행한다. facade Drop은 stop 요청만 하고 window callback에서 wait/join/I/O를 하지 않는다. `try_shutdown`은 reader-held/cleanup 상태 동안 Stopping이며 finished worker만 join한다.
+기존 CPU worker stop predicate에 ingress fence·pending capture·encoder job/result·artifact cleanup을 더한다. 반환 `WindowGpuOwner`의 fence/drain도 기존 경로로 진행한다. encoder join handle은 기존 CPU worker lifecycle이 소유한다. pending capture·registry·cleanup이 없어진 뒤에만 encoder stop을 요청하고, 계속 Poll하며 `is_finished()` 뒤에만 join한다. host는 기존 CPU worker와 runtime service의 실제 종료를 모두 확인한다. encoder의 예상 밖 종료나 파일 제거 실패는 work lease를 보존한 cleanup failure이며 성공 종료가 아니다.
+
+facade Drop은 stop 요청만 하고 window callback에서 wait/join/I/O를 하지 않는다. `try_shutdown`은 reader-held/cleanup 상태 동안 Stopping이며 finished worker만 join한다.
 
 필수 CPU 회귀는 default unavailable·real readiness 전달·정확한 generation→stage routing·coordinator take/transfer panic·stop race·Busy completion 시 encode1회·write 상한/실패·partial 삭제·weak cycle 부재·각 strong owner 단독 retention·reader-held shutdown이다. 실제 PNG는 decode/hash/색/identity를 검사하고, 실제 GPU/host 연결은 a.2/3 native proof와 a.4 같은 창의 mutation→Step→capture→ACK→다음 capture로 확인한다. source 제안이나 CPU synthetic metadata를 실제 PNG/장치 검증으로 계산하지 않는다.
 

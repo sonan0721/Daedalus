@@ -8,6 +8,8 @@
 
 ## 빌드 산출물
 
+현재 검증한 Mac CLI는 ignored `dist/local/current-macos-arm64/extracted/daedalus`로 접근한다. current-macos-arm64는 checksum·정확한 commit·dirty=false·notices/inventory와 실제 binary 검증을 마친 버전 폴더를 가리키는 로컬 상대 symlink다. 원본 버전 폴더/archive/증거를 덮어쓰지 않는다. 이 링크는 설치·서명·공개 릴리스나 다른 플랫폼 지원을 뜻하지 않는다. 현재 대상과 실제 검증 근거는 [native host 통합 기록](../06-worklog/2026-10-18-native-host-integration.md)에 둔다.
+
 초기 배포 단위는 타깃별 native CLI 실행 파일, 원본 엔진 라이선스, 사용 안내, JSON build manifest, archive·SHA-256이다. 최초 검증 범위는 이 Mac의 `aarch64-apple-darwin`이다. GitHub 빌드는 macOS-arm64·Linux-x64부터 실제 빌드/실행 상태를 검증하고 확대한다. Windows·web·mobile 산출물 이름만 만들어 지원으로 표시하지 않는다.
 
 Rust 의존성의 package ID·버전·license 선언·source checksum과 배포 package 안의 license/notice 텍스트를 inventory와 함께 모은다. metadata의 CLI 도달 graph와 feature/target 조건을 기록하며, 보수적인 포함 목록을 실제 binary symbol 수준 SBOM이라고 부르지 않는다. 빠진 license 원문은 공개 tag package에서 명시적 오류로 처리하고, arbitrary 사용자 경로를 자동 수집하지 않는다. 자동 수집이 모든 법적 의무 검토를 대신한다고 주장하지 않는다.

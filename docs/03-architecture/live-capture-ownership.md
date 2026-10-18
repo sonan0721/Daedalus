@@ -30,7 +30,9 @@ runtime 소유자의 읽기 전용 API 제안을 root가 검토했다. 아래 �
 
 `SessionRequestResult`의 기존 Clone/Debug/PartialEq 성질을 무심코 깨지 않는다. capability 비교는 identity를 비교하되, reader 획득의 검증은 실제 interest/registry binding도 확인한다. debug 출력은 PNG bytes·사용자 경로·큰 backing을 덤프하지 않는다. compact result의 실제 byte ceiling과 정상/Step/image reserve rollback은 새 variant에서도 검증한다.
 
-첫 `CaptureHandoffPort`는 `try_status`·`try_report_ready`·`try_report_unsupported`·`try_detach`·`try_take_request`의 nonwaiting 경계를 제공한다. Starting→Ready/Unsupported의 초기 보고는 한 번이며 Detached는 terminal이다. runtime native port는 신뢰 consumer 경계이며 CPU test의 Ready 보고를 실제 장치 capability로 보고하지 않는다. 실제 COPY_SRC/format 확인은 후속 renderer 소유다. responder loss는 private completion slot의 sender-interest 소멸로 actor가 감지해 typed terminal failure로 마감한다. UI callback에서 ticket cell mutex를 직접 호출하지 않는다.
+첫 `CaptureHandoffPort`는 `try_status`·`try_set_ready`·`try_set_unsupported`·`request_detach`·`try_take_request`의 nonwaiting 경계를 제공한다. Starting→Ready/Unsupported의 초기 보고는 한 번이며 Detached는 terminal이다. OOB request_detach는 idempotent 신호다. runtime native port는 신뢰 consumer 경계이며 CPU test의 Ready 보고를 실제 장치 capability로 보고하지 않는다. 실제 COPY_SRC/format 확인은 후속 renderer 소유다. responder loss는 private completion slot의 sender-interest 소멸로 actor가 감지해 typed terminal failure로 마감한다. UI callback에서 ticket cell mutex를 직접 호출하지 않는다.
+
+`CaptureResponder::try_complete(&mut self, &CaptureCompletion)`은 nonwaiting 완료 시도이며 Busy일 때 caller가 같은 완료 payload와 responder를 보유한다. 성공은 한 번이다. receiver close와 completion을 일관된 순서로 처리해 이미 사라진 actor endpoint의 orphan slot에 성공을 쓰지 않는다. actor→handoff dispatch의 Busy/Detached도 원래 owned request를 돌려줘 cancel/terminal 처리 전에 capability/work lease가 조기 소멸하지 않게 한다.
 
 순서는 capability/clock/limits→queue 여유→normal session/client reserve→image reserve→enqueue/ticket counter 고갈 확인→성공 enqueue다. 거부의 RAII rollback과 ID 비소비를 검증하며, full ID를 발급한 성공 admission 뒤에는 재사용하지 않는다. capture는 inspect 권한을 사용하며 기존 public `SessionCapabilities` 구조체/default를 바꾸지 않는다. 최소 CLI exhaustive-result arm은 컴파일/compact metadata만 연결하고 wire capture parser·artifact path·live_capture=true는 backend/실제 PNG 전까지 추가하지 않는다.
 
@@ -63,6 +65,16 @@ renderer에는 runtime dependency를 추가하지 않는다. renderer-owned scal
 PNG/file만 읽는 native artifact reader를 GPU frame/source pin으로 잘못 연결하지 않는다. readback 사용이 끝난 뒤 device/CPU backing은 기존 수명대로 회수할 수 있으며, artifact worker와 image slot은 마지막 capability/reader와 파일 정리가 끝날 때까지 남을 수 있다. `try_shutdown`은 이 잔류 상태를 Stopping으로 보고하고 finished worker만 join한다. reader를 영원히 보유하면 종료/slot 회복도 영원히 늦어질 수 있으며 강제 시간 상한이나 자동 reader 무효화를 선언하지 않는다.
 
 capture worker의 per-job panic catch 바깥에 readback/work lease 소유자를 둔다. unwind로 token만 먼저 떨어지고 callback/GPU 작업이 남는 경로를 허용하지 않는다. callback은 작은 flag/try-send만 수행하며 encode/hash/I/O/큰 row copy/Wait/join을 하지 않는다. close·deadline·responder Drop·completion disconnect의 terminal 실패와 실제 자원 정리는 각각 관측한다.
+
+## 후속 renderer handoff 감사
+
+Luna의 읽기 전용 재검토는 기존 channel/server에 private optional lane을 추가하는 additive `managed_packet_window_capture_channel()` 형태를 제안했다. 반환은 기존 window client·별도 capture client·기존 server이며, frame/stage lane과 capture의 단일 request/completion 예약을 분리한다. 이는 아직 구현된 API가 아니다.
+
+첫 renderer 완료는 **Submitted(readback)** 의미로 draw/copy 제출과 present() 호출 직후, map 완료 전에 host의 durable worker로 전달한다. move-only readback handle과 PacketRenderer의 private owner pin이 같은 readback state를 공유한다. host worker가 map flag를 확인하고 BufferView 생성/row copy/swizzle/해제/unmap을 수행한다. 여기서 try/read는 GPU 대기를 하지 않는다는 뜻이며 큰 CPU copy를 UI에서 실행해도 된다는 뜻이 아니다. 실제 unmap 상태까지 owner drain은 Pending이다.
+
+readback handle Drop은 작은 abandon 신호만 보낸다. worker per-job guard와 반환된 GPU owner backstop이 실제 cleanup을 담당하며, CAS 등 상태 전환으로 worker가 BufferView를 가진 중에 owner가 unmap하지 못하게 한다. final buffer 해제·큰 backing 정리는 기존 CPU/encoder worker 경계에 두고 live window callback에 가져오지 않는다. callback·timeout·detach가 이 pin을 조기 해제하지 않는다. 최종 public state/cleanup-return signature는 renderer/host 구현 전에 동결한다.
+
+Ready에는 실제 확인한 format과 **최대 크기/pixel ceiling**을 넣으며, 현재 창 크기는 selected-frame metadata에만 넣는다. resize마다 one-shot Ready를 갱신하지 않는다. 실제 COPY_SRC 미지원은 정상 presentation을 유지하며 Unsupported로 보고한다. 이 감사는 source feasibility이고 실제 장치 capability/PNG/owner drain 테스트 통과가 아니다.
 
 ## 구현 순서와 검증
 

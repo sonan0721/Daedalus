@@ -147,6 +147,8 @@ manifest의 exact_commit은 main261812a이며 binary hash는 위 PR artifact와 
 
 추가 raw는 `p03-main261812a-mac-download-root-attempt01.log`·SHA-256 `56702f133fd6a9d523c8f4a1f31f7be2325af4f463c97528ee912e585edaabfe`, `p03-main261812a-mac-verify-root-attempt01.log`·`e0f7c9c780a02b417232a06d42cda57beec1b539fc67350b6ae78b53960b2567`, `p03-main261812a-binary-compare-root-attempt01.log`·`432cf1023ebb94957b2933ad1afbe9cfc8ace2480434e58376ab4022664b0880`다. 로컬 보관은 공개 tag/Release 발행이나 엔진 제품 인수를 뜻하지 않는다.
 
+검증한 버전 폴더를 가리키는 상대 symlink `dist/local/current-macos-arm64`를 새로 만들었다. 이제 `dist/local/current-macos-arm64/extracted/daedalus --version`으로 접근할 수 있고 실제0.1.0/exit0을 확인했다. raw `p03-main261812a-local-alias-version-root-attempt01.log` SHA-256은 `0eb8a05247ba33d3f522f6bde91d29e7124000d42435e01515b41eb6f485c894`다. 원본 버전 폴더를 보존하며 PATH/global 설치나 공개 릴리스는 수행하지 않았다.
+
 ## Runtime capture foundation 착수 계약
 
 Luna의 runtime API 제안을 검토해 첫 source 작업을 배정했다. `RequestTicketId.sequence`가 client별 값임을 source에서 확인해 artifact ID는 session/client/sequence 전체를 감싼다. client try_submit에는 현재 source의 일관된 관측 경계가 없고 latest frame이 commit 뒤에도 old generation일 수 있으므로, source bind는 actor의 한 dispatch turn으로 정정했다. queue admission은 normal/image reserve·ID·deadline/readiness만 고정하며 None tick floor는 dispatch 당시 authority tick이다. 근거 없이 새 atomic source 복제·추가 ledger를 만들지 않는다.

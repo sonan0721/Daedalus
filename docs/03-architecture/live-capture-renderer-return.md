@@ -96,4 +96,12 @@ host a.3는 기존 CPU worker의 per-iteration catch 바깥에 `{runtime Capture
 
 CPU 시험은 별도 lane 포화/Busy·거부 ownership, one-shot Ready, limit/alignment/format·serial 고갈, post-submit panic/cleanup state와 잔류 owner를 검증한다. 실제 GPU 시험은 같은 surface의 known pixels·PNG decode·RGBA/BGRA와 manual-sRGB·overlay·resize·old-ready packet·반복 capture·close와 map/queue/worker 정리까지 확인한다. synthetic CPU metadata나 별도 offscreen PNG는 이 gate를 대신하지 않는다. 실제 창/host/protocol 연결은 a.3/a.4의 후속 인수다.
 
+## Renderer 단독 native harness의 범위
+
+macOS main-thread event loop용 opt-in example `managed_live_capture`를 별도 파일로 둔다. `--out-dir <새 디렉터리> --scenario capture|close-held|worker-drop`를 명시해 실행하며, 기존 파일을 덮어쓰거나 기본 CLI를 활성화하지 않는다. renderer의 현재 dependency와 공개 content/CPU owner API로 작은 결정적 mesh fixture를 검증·준비하고, 공개 snapshot DTO를 `PacketCpuOwner::extract_validated`에 넣어 실제 frame handle을 얻는다. private handle을 만들거나 renderer에 runtime dependency를 추가하지 않는다. 이 snapshot은 fixture이며 실제 `SessionControlService` authority 대조는 a.3/a.4에 남는다.
+
+기본 scenario는 실제 initial stage의 source와 capture Ready를 확인해 첫 요청을 수락시킨 뒤 game frame을 게시한다. 첫 game draw의 loading overlay와 이후 반복 capture의 차이를 실제 pixels로 대조하며, 반환된 view/source/tick은 항상 actual selected frame에서 읽는다. 후속 요청은 실제 presented view에서 source/tick을 얻는다. CPU worker에서 반환 pixels를 PNG로 저장·decode해 크기·색·metadata를 대조한다. `close-held`는 반환 handle을 유지한 채 창을 닫고 GPU owner를 worker로 넘겨 첫 drain이 Pending임을 확인한 뒤 read/cleanup을 마감한다. `worker-drop`은 endpoint·handle Drop 순서와 최종 fallback drain을 확인한다. GPU Poll·PNG/file I/O는 지정한 owner/worker에서만 수행하며, UI callback에서 join/Wait/readback/파일 작업을 하지 않는다.
+
+출력은 fixture임을 표시하고 scenario·실제 surface format/physical size·선택 frame identity/view·raw RGBA와 PNG hash·색 sample·decode 결과·drain 관측을 기록한다. source·실행 파일·raw log hash는 실행 시 별도로 고정한다. 실제 장치에서 선택되지 않은 surface format, 아직 주입하지 않은 resize/old-ready/panic 경로를 성공으로 채우지 않는다. 이 첫 harness 자체로 전체 a.2를 닫지 않는다.
+
 관련 pinned wgpu Buffer/Device/types 1차 자료와 기존 source 제한은 [전체 계약의 자료](live-capture-and-artifacts.md#확인한-1차-자료)에 남겼다. channel/readback source의 lib-only compile checkpoint는 [작업 기록](../06-worklog/2026-10-18-live-capture-renderer.md)에 남기며, 실제 surface copy 연결과 GPU 인수 전이므로 a.2·상위 P02.3a·D1은 미통과다.

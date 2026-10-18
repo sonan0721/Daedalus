@@ -70,9 +70,9 @@ capture worker의 per-job panic catch 바깥에 readback/work lease 소유자를
 
 Luna의 읽기 전용 재검토는 기존 channel/server에 private optional lane을 추가하는 additive `managed_packet_window_capture_channel()` 형태를 제안했다. 반환은 기존 window client·별도 capture client·기존 server이며, frame/stage lane과 capture의 단일 request/completion 예약을 분리한다. 이는 아직 구현된 API가 아니다.
 
-첫 renderer 완료는 **Submitted(readback)** 의미로 draw/copy 제출과 present() 호출 직후, map 완료 전에 host의 durable worker로 전달한다. move-only readback handle과 PacketRenderer의 private owner pin이 같은 readback state를 공유한다. host worker가 map flag를 확인하고 BufferView 생성/row copy/swizzle/해제/unmap을 수행한다. 여기서 try/read는 GPU 대기를 하지 않는다는 뜻이며 큰 CPU copy를 UI에서 실행해도 된다는 뜻이 아니다. 실제 unmap 상태까지 owner drain은 Pending이다.
+첫 renderer 완료는 **Submitted(readback)** 의미로 draw/copy 제출과 present() 호출 직후, map 완료 전에 host의 durable worker로 전달한다. move-only readback handle과 PacketRenderer의 private drain pin은 미리 예약한 return cell을 참조한다. 실제 Buffer는 cell에 두고 worker만 take/drop하며, UI panic guard는 CleanupRequired만 표시한다. host worker가 map flag를 확인하고 BufferView 생성/row copy/swizzle/해제/unmap을 수행한다. 여기서 try/read는 GPU 대기를 하지 않는다는 뜻이며 큰 CPU copy를 UI에서 실행해도 된다는 뜻이 아니다. 실제 unmap뿐 아니라 copy의 queue fence와 worker의 final buffer drop까지 owner drain은 Pending이다.
 
-readback handle Drop은 작은 abandon 신호만 보낸다. worker per-job guard와 반환된 GPU owner backstop이 실제 cleanup을 담당하며, CAS 등 상태 전환으로 worker가 BufferView를 가진 중에 owner가 unmap하지 못하게 한다. final buffer 해제·큰 backing 정리는 기존 CPU/encoder worker 경계에 두고 live window callback에 가져오지 않는다. callback·timeout·detach가 이 pin을 조기 해제하지 않는다. 최종 public state/cleanup-return signature는 renderer/host 구현 전에 동결한다.
+readback handle Drop은 작은 abandon 신호만 보낸다. worker per-job guard와 반환된 GPU owner backstop이 실제 cleanup을 담당하며, worker가 BufferView를 가진 중에 UI/owner가 unmap하지 못하게 한다. final buffer 해제·큰 backing 정리는 기존 CPU/encoder worker 경계에 두고 live window callback에 가져오지 않는다. callback·timeout·detach가 이 pin을 조기 해제하지 않는다. map 오류나 Buffer Drop을 GPU 완료로 간주하지 않는 구체적인 반환 슬롯·serial fence·UI unwind 계약과 source 위치는 [renderer 반환 계약](live-capture-renderer-return.md)에 고정한다. 최종 public signature는 renderer/host 구현 전에 공유한다.
 
 Ready에는 실제 확인한 format과 **최대 크기/pixel ceiling**을 넣으며, 현재 창 크기는 selected-frame metadata에만 넣는다. resize마다 one-shot Ready를 갱신하지 않는다. 실제 COPY_SRC 미지원은 정상 presentation을 유지하며 Unsupported로 보고한다. 이 감사는 source feasibility이고 실제 장치 capability/PNG/owner drain 테스트 통과가 아니다.
 

@@ -19,7 +19,7 @@
 
 Luna A는 runtime의 session_capture 새 module·session_control/project_preparation/lib와 CLI project_view_control의 최소 exhaustive result/error mapping을 작성한다. Luna C는 별도 `tests/capture_public_api.rs`의 공개 SDK/real actor 통합 시험만 작성한다. private API를 추측하지 않고 공유한 public header를 소비한다. renderer/host 작업자는 읽기 전용 다음 경계 감사만 수행했다.
 
-한 Cargo lease는 A가 갖는다. source snapshot을 멈춘 뒤 library 집중 검사부터 실행하고 수정은 명령 종료 뒤 재개한다. C가 integration test를 작성하는 동안 해당 test/all-targets 빌드를 하지 않는다. C의 최종 test source는 SHA-256 `ac61443cb2657a9b6dc002b4d80528737f47cf3286f2dd235a7471cde408c1ed`로 freeze했으며 A에게 전달했다. 둘 다 source freeze 뒤 통합/전체 검사를 진행한다. root는 문서·source review·결과 대조·Git/CI 인수를 맡는다. 새 dependency·lockfile·test framework는 추가하지 않는다.
+한 Cargo lease는 A가 갖는다. source snapshot을 멈춘 뒤 library 집중 검사부터 실행하고 수정은 명령 종료 뒤 재개한다. C가 integration test를 작성하는 동안 해당 test/all-targets 빌드를 하지 않는다. C의 첫 test freeze는 SHA-256 `ac61443cb2657a9b6dc002b4d80528737f47cf3286f2dd235a7471cde408c1ed`였다. 실제 실행의 unused-mut 경고 한 곳만 제거한 후 최종 source는 `933743cb5824a23784b065d23555c82d7714796cdaa6c94a387151a5ac7fe53a`로 freeze해 A에게 전달했다. 둘 다 source freeze 뒤 통합/전체 검사를 진행한다. root는 문서·source review·결과 대조·Git/CI 인수를 맡는다. 새 dependency·lockfile·test framework는 추가하지 않는다.
 
 ## 첫 compiler 결과
 
@@ -47,3 +47,17 @@ runtime all-feature `--lib` 첫 실행은116통과·0 ignored, raw `p02-capture-
 | 실제 commit 전후 actor source binding·old-frame/current-generation 불일치 거부 | 집중 회귀 대기 |
 
 두 source 담당의 최종 freeze와 이 행별 실제 결과 뒤에 a.1 인수를 판단한다. renderer/host/실제 PNG는 별도 a.2~a.4이며 전체 capture gate는 계속 미완료다.
+
+## Lifecycle 집중 검사와 공개 API 첫 실행
+
+`runtime-capture-lifecycle-attempt02`는9통과·114 filtered·0실패, wrapper3.323초였다. SHA-256은 `d95b05aaf71e78cbe733d1881b2ecad8a6e2c61ea10531cc9417882d275766b8`이다. 각 fixture는 실제 actor의 readiness/권한·전체 ticket ID·Step·Busy deferral·take 전후 timeout·responder 소멸/중복/closed endpoint·panic·commit 뒤 source binding을 검사한다. format/크기와 encoding 검사도 이9개에 포함되며 별도로 합산하지 않는다.
+
+`runtime-allfeatures-tests-attempt01`은 내부123·공개 capture2·기타 integration2를 통과했다. raw SHA-256은 `f014d49dcca7d7848180c9933e9253eaa6597b737e33c53cb558c05413453fcc`다. 공개 test source의 unused-mut 경고 하나는 이후 제거했다. 이 실행의 성공을 경고 제거 뒤의 strict/전체 workspace 검사로 대신하지 않으며, capture consumer는 metadata만 제공하는 CPU fixture다.
+
+기본 feature library 검사01은111통과·0실패, SHA-256 `02511c80e630d90e832aaf23da2a9c0b5c1de3470ed2d846d88b8fd8c9c1cdaa`였다. CLI all-feature check01도 통과했으며 SHA-256은 `a459cf85fc065bcc81124e8361a7f24f8d2b16990d179c5dd1ca43a43ff2b22b`다. 이 source snapshot 뒤에도 아래 strict 수정이 있어 최종 인수 실행과 구분한다.
+
+## Strict 검사에서 찾은 구조 문제
+
+runtime all-target/all-feature Clippy01은exit101이었다. Captured metadata가264bytes인 enum,144bytes인 dispatch error, actor argument8개, 중첩 if와 같은 Cancelled 분기를 검출했다. raw SHA-256은 `6f1bc50a310db8fde1ab348761bf933c98f6aa93a6a00315a8e9fbff946afb0c`다.
+
+root는 새 public Captured payload를 `Box<CaptureFrameMetadata>`로 변경하고 private dispatch는 최초 생성한 같은 `Box<CaptureRequest>`를 Busy/Detached에도 돌려주는 수정 방향을 승인했다. Busy error 때마다 새 Box를 만들지 않는다. actor의 consumer port는 private 묶음으로 전달하며 나머지 조건은 간소화한다. 공개 SDK test 담당도 새 Captured constructor만 맞춰 freeze한다. 경고 억제로 통과시키지 않고 수정 후 strict를 다시 실행한다.

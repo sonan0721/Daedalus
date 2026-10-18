@@ -296,3 +296,17 @@ Ninja와 CMake executable은 이 Mac에 있다. 기존 `target/debug/build/oxijo
 
 
 첫 관찰은 renderer의 이미 필요한 all-features lib check 한 번에 `--timings`를 붙인 것이다. 전체8.2초 중 renderer check7.77초였고 의존성155개는 fresh였다. 이 실행에서 Jolt C++ 재빌드는 없었으므로 Ninja 전환 효과를 평가할 수 없다. executable link도 포함하지 않는다. 원본/HTML hash와 source 변경 범위는 [renderer 작업 기록](../06-worklog/2026-10-18-live-capture-renderer.md#frame-pin-보완-뒤-cpu-검증과-example-compile)에 보존한다. dependency warm reuse가 실제 작동한다는 관찰이며, debug profile/sccache/linker를 변경해 빨라졌다는 결과는 아니다.
+
+
+### DEV: package별 debug 정보의 제한된 비교
+
+2026-10-18 D1 재개에서 첫 후보를 renderer package의 `debug="line-tables-only"`로 한정한다. Cargo의 package override는 library/example 모두에 적용하며 pinned1.94가 지원하는 범위에서 확인한다. 기존6.0초 기록은 `cargo build`이며 `cargo check`가 아니다. 측정은 같은 source·feature·공유 target·toolchain/job 정책을 유지하고 두 설정을 각각 먼저 준비한다. 한 native label literal만 동일한 A/B 값으로 바꿔 renderer library와 example이 재빌드되는 두 번의 실제 수정 구간을 비교한다. 각 warm no-op과 최초 준비 비용은 별도 기록한다. 순서를 교차해 한쪽만 항상 먼저 실행하지 않는다. 이 작은 반복 실험은 일반적인 엔진 수정/CI 전체 성능을 대표하지 않는다.
+
+임시 probe 작성·실행 보조 코드는 Luna xhigh가 ignored evidence 아래에 작성한다. renderer source와 Cargo lease를 독점하는 동안만 exact original hash/단일 marker를 확인해 변경하고, 정상 종료·예외의 finally에서 원본 bytes를 복원한다. 강제 process kill은 복원 보장이 아니므로 root가 원본 hash와 Git diff를 독립 확인한다. 기존 raw는 exclusive runner로 보존하고 원본 복원 뒤 필요한 원래 설정 build를 실행한다. 다른 작업자의 source 수정과 동시에 측정하지 않는다.
+
+비교 동안 manifest/toolchain/lock/default profile을 바꾸지 않는다. 유용한 개선이 반복 관측되면 적용 범위를 해당 package의 개발 빌드로 한정하거나 명시적 빠른 빌드 경로를 제공한다. line-tables-only는 파일/행 backtrace를 남기지만 변수·인자 debug 정보를 줄인다. full-debug 경로와 release/check/overflow/panic 동작을 유지할 수 있는지 함께 결정한다. 측정 결과가 약하거나 상충하면 설정을 채택하지 않는다. [공식 package/config override](https://doc.rust-lang.org/cargo/reference/config.html), [profile debug 의미](https://doc.rust-lang.org/cargo/reference/profiles.html#debug)(확인2026-10-18).
+
+
+측정 결과(같은 renderer label literal의 A/B 두 수정, 각 profile warm): full은2.281/1.973초, line-tables-only는1.864/1.826초였다. no-op은각0.177~0.207초였다. 후보 최초 준비9.713초는 비교 편집 시간에 섞지 않는다. 실제 verbose rustc argv의 `-C debuginfo=2`/`line-tables-only`와 원본 source 복원을 확인했다. summary `dist/project-evidence/p02-dev-debug-measure-01-summary.json` SHA-256은 `dba3c988dfb7a2fac2bbbf2f608dbca523bc5871de148134ad16f76b8a8d0ab3`, runner raw는 `p02-dev-debug-measure-01-runner.log`/`b949ce3cd6075d7014c3ec3b51a91e063a1a3d3c7f16fde03b4488f16606f54d`다. 상세 per-run raw·timings hash·source/config hash는 summary에 있다. 원본 staging.rs는 `b188146202d930cde90abf3eee63bdd7f23ac3c076deb1446045e063e3a3174a`로 돌아왔고 normal build도 통과했다.
+
+절대 차이는 이 두 수정에서0.147~0.417초이며 일반적인 게임플레이 수정·check·cold/CI 전체 속도를 대표하지 않는다. 디버거 정보를 전역으로 줄일 만큼 큰 근거로 보지 않는다. 대신 `.cargo/config.toml`에 명시적 `cargo dev-build` alias를 추가해 renderer package에만 같은 임시 override를 적용하는 개발용 경로를 제공한다. 기존 `cargo build`의 full-debug·test/Clippy·release/packaging 설정과 안전 검사는 유지한다. alias 뒤에 기존 `-p`/`--example`/feature/`--locked` 선택을 그대로 전달하며, source 작업 중에는 이 alias 자체가 빌드 대상/검증 범위를 자동으로 고르지 않는다. Luna가 alias만 작성하고 compile은 renderer source 동결 뒤 단일 Cargo owner가 기존 필요한 example build에 사용해 확인한다. 이 선택적 경로와 측정 결과를 전체 DEV 또는 엔진 최적화 완료로 표시하지 않는다.

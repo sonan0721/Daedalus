@@ -110,3 +110,30 @@ macOS main-thread event loop용 opt-in example `managed_live_capture`를 별도 
 출력은 fixture임을 표시하고 scenario·실제 surface format/physical size·선택 frame identity/view·raw RGBA와 PNG hash·색 sample·decode 결과·drain 관측을 기록한다. source·실행 파일·raw log hash는 실행 시 별도로 고정한다. 실제 장치에서 선택되지 않은 surface format, 아직 주입하지 않은 resize/old-ready/panic 경로를 성공으로 채우지 않는다. 이 첫 harness 자체로 전체 a.2를 닫지 않는다.
 
 관련 pinned wgpu Buffer/Device/types 1차 자료와 기존 source 제한은 [전체 계약의 자료](live-capture-and-artifacts.md#확인한-1차-자료)에 남겼다. channel/readback source의 lib-only compile checkpoint는 [작업 기록](../06-worklog/2026-10-18-live-capture-renderer.md)에 남기며, 실제 surface copy 연결과 GPU 인수 전이므로 a.2·상위 P02.3a·D1은 미통과다.
+
+
+## a.2 잔여 검증의 구현 계약: resize·old-ready·실제 GPU 정리
+
+2026-10-18 첫 native checkpoint 뒤의 보완이다. library의 실제 copy/readback helper를 다시 구현하지 않고 native example과 private adapter test가 같은 경로를 사용한다. 다음 항목의 실행 성공 전에는 a.2를 체크하지 않는다.
+
+### 실제 창 resize control
+
+`ManagedPacketWindowControl::try_request_resize(width: u32, height: u32) -> Result<(), ManagedResizeRequestError>`를 additive로 제공한다. error는 Busy/Closed/InvalidSize다. width/height는 physical pixel이며 zero 또는 초기화 뒤 실제 device의 최대 축 초과는 InvalidSize다. 실제 한도를 아직 게시하지 않은 Starting과 slot try-lock 경합은 Busy다. 기존 channel/options/run signature는 그대로 둔다.
+
+slot은 작은 `Mutex<Option<(u32,u32)>>` 하나이며 최신 요청이 이전 미처리 요청을 대체한다. payload/GPU/source를 담지 않고 caller/UI 모두 blocking lock을 기다리지 않는다. 이 API의 Ok는 최신 resize 요청 접수이며 적용 ACK가 아니다. close가 우선하며 닫힘과 경합한 요청은 적용되지 않을 수 있다. 요청 ID나 per-request ledger는 만들지 않는다.
+
+window event loop가 기존 cadence에서 slot을 가져가 `Window::request_inner_size(PhysicalSize)`를 호출한다. pinned winit0.30.12 source의 `window.rs:764` 문서에 따르면 Some(actual size)는 즉시 적용/거부된 실제 크기이고 별도 Resized event가 없을 수 있다. None이면 실제 크기는 나중 Resized event로 온다. **Some의 actual size와 실제 event 모두 같은 reconfigure helper를 사용하며 요청 좌표를 실제 크기로 간주하지 않는다.** event counter는 실제 event만 세고, 최종 성공 증거는 실제 다음 `ManagedPresentedView`·PNG physical 크기다. OS가 크기를 거부/조정한 경우도 요청 자체를 성공 capture로 표시하지 않는다. 기존 zero-size configure 회피와 device-limit 검증은 유지한다.
+
+example `resize`는 첫 actual capture 뒤513×257 같은 odd physical 크기를 요청한다. 실제 다음 present를 기다린 뒤 capture해 row padding 제거·PNG decode·view/projection/physical size를 대조한다. ReadyInfo의 최대 크기는 negotiated ceiling이며 resize 때 current size로 덮어쓰지 않는다.
+
+### Old-ready의 실제 source 선택
+
+example `old-ready`는 실제로 다른 geometry/resource set을 갖는 두 번째 PreparedProject/CPU generation을 만들고, 유효한 create/upload quota로 여러 stage chunk를 발생시킨다. 첫 active frame을 계속 표시하면서 candidate를 준비한다. 실제 capture의 source/tick/view/selected-frame Weak는 old active frame과 같아야 하며 incoming candidate를 pin하면 실패다. 후보가 준비 중이었는지는 실제 stage progress와 관측 구간으로 기록하고, 이미 Ready이나 미commit인 경우를 Preparing 증거로 바꾸지 않는다. sleep 기간만으로 GPU 상태를 가정하지 않는다. 새 frame의 present를 막는 기존 generation ACK backpressure도 재사용할 수 있다. 후보 cancellation과 실제 owner drain까지 마감한다.
+
+### GPU format·failure 회귀
+
+새 private adapter test는 실제 CPU frame·GPU texture·buffer·copy submission·map callback과 새 managed capture helper를 사용한다. 네 mapped format(RGBA/BGRA·Unorm/sRGB)의 실제 texture-copy 결과를 known bytes/색과 대조한다. Unorm의 manual-sRGB draw/clear가 필요한 경우 실제 renderer의 같은 색 변환 경로도 검사한다. CPU byte test만으로 actual manual-sRGB draw를 인수하지 않는다. 실제 adapter가 지원하지 않는 format은 명시적으로 구분하고 지원 성공으로 채우지 않는다. native surface가 협상한 format과 adapter-backed texture test는 별도 증거다.
+
+`#[cfg(test)]` private one-shot interruption은 실제 queue.submit 직후 callback 등록 전, 실제 map 등록 후 같은 지점에서 unwind를 일으킨다. guard Drop은 durable cell을 보존하고 worker/반환 owner가 실제 queue-tail fence·map callback을 진행한 뒤만 buffer/frame pin을 해제한다. Empty/Drop/timeout을 GPU 완료로 쓰지 않는다. 일반 renderer package/CLI에는 fault setting API를 노출하지 않는다. 실제 map-error 경로는 실제 validation-safe failure를 주입할 수 있을 때 별도 검사하며 metadata flag 변경을 실제 adapter error로 표시하지 않는다.
+
+source 소유권은 D가 renderer library·private GPU test·manifest/export, C가 기존 example 시나리오다. public resize header를 먼저 공유하고 benchmark source probe를 복원한 뒤에만 두 source writer를 시작한다. Cargo는 한 담당만 소유하며 두 파일이 동결된 뒤 focused CPU/strict→private ignored GPU→main-thread native 순서로 확인한다. 기존 capture/close-held/worker-drop도 관련 source 변경 후 필요한 범위에서 회귀한다. full host/CLI/package 인수는 a.3/a.4에 남는다.

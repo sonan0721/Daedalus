@@ -1,6 +1,6 @@
 # 개발 반복 작업의 공통화와 자동화
 
-상태: 실제 중복 감사·적용 진행 중 · 2026-10-17 · A-039/A-041
+상태: 실제 중복 감사·적용 진행 중 · 2026-10-18 · A-039/A-041
 
 ## 목적
 
@@ -14,12 +14,12 @@
 | --- | --- | --- | --- | --- |
 | DEV01 | 별도 fixture/control/window마다 state·command·결과를 연결 | 공개 project lifecycle와 한 control service, CLI/MCP는 adapter | 같은 project/session·권한·tick·오류 의미, command 적용을 직접 state 변경으로 우회하지 않음 | P01.1 project/session·JSONL 확인, native owned-ticket service kernel 검증. native project view/protocol 2 연결 검증, legacy credit lease 공통화 로컬 검증, MCP/bridge attach 미완료 |
 | DEV02 | Rust/C#·JSON schema·binding을 수동으로 맞춤 | version 있는 단일 schema/등록 정보와 생성/검증 가능한 SDK 계약 | ABI layout·정수 정밀도·오류·capability 일치, stale generated file 검출 | 제안, 생성 도구 미구현 |
-| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | P03.1·model/sprite/audio·P03.3a persistent CPU 후보를 PR14까지 인수. warm decode/leaf cook0, read/parse는 남음. b.2 CPU 교체·combined72 검증, test-only wait 경계 수정 후 최종 인수 대기. render/audio 전환 후속 |
-| DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인, live capture/조건/trace 후속 |
+| DEV03 | 에셋을 매번 전부 변환·업로드 | dependency graph 기반 incremental import/cook·content hash·last-good generation | source뿐 아니라 importer/settings/target/dependencies 변경도 무효화, 취소·손상 결과를 cache hit로 채택하지 않음 | persistent CPU 후보·headless 교체 및 PR20 같은 native host의 render 세대/retirement 인수. warm decode/leaf cook0, read/parse는 남음. actual pixels·audio 세대 전환 후속 |
+| DEV04 | 수동 저장→build→실행→창 조작→screenshot 확인 | 동일 session의 edit/apply→wait→inspect/capture→assert→trace 재생 | 실제 정상 입력 경로, 적용 tick과 표시 frame 연결, timeout/실패는 명시 | native window/protocol-2 Step·상태·presented report 확인. capture runtime a.1 로컬 통합 인수, actual surface/PNG·조건/trace 후속 |
 | DEV05 | 실행 경로별 별도 scene/asset 검증·오류 처리 | content/project 공통 validation·한 loaded-project 모델 | 위치 있는 진단·원자적 patch·동일 지원 component 정책, fake fallback 없음 | 공통 resolver/catalog/CLI loader와 model·sprite·audio 실제 소비 인수. 실행 중 patch 후속 |
-| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | assets/audio/preparation/activation CPU62·양 package CI 확인. A-042 뒤 native-only19/clean package combined72 회복. 새 CI의 test wait 가정 수정 후 최종 CI/PR 대기. 통합 환경 진단/전체 gate 자동화 후속 |
+| DEV06 | 매번 환경·명령·전체 검사를 수동 조립 | 도구 탐지·focused checks·gate checks·machine-readable report | 실제 선행/영향 graph, 실패 전파, 필수 gate의 검사 생략 금지 | PR20 양 package CPU62·다운로드 Mac native/offline72·다섯 CI/main 동일 tree 인수. capture a.1 focused14→workspace414·Python72 로컬 검증. 통합 환경 진단/전체 gate 자동화·실제 capture 후속 |
 | DEV07 | 개발 빌드·패키지·게임 export를 따로 관리 | versioned build manifest와 공유 package/export backend | source/SDK/asset/target identity·hash·clean/dirty·archive smoke | CLI package만 구현 |
-| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh·model texture/sprite·native GPU cache·dirty instance/material 검증. 실행 중 세대 전환·skin 후속 |
+| DEV08 | 재생성·reload 때 resource 변환·scene 복사를 반복 | 불변 asset handle·generation별 CPU/GPU resource cache·dirty extraction | revision/stale·GPU lifetime·예산·취소·이전 정상 resource 유지 | 불변 mesh·model texture/sprite·native GPU cache·dirty instance/material·같은 host의 실행 중 render 세대 교체 검증. 일반 scene reload·skin 후속 |
 
 위 표는 backlog다. `제안/미구현`을 기존 기능으로 홍보하지 않는다. 현재 코드 근거와 우선순위는 readiness 감사에 보완한다.
 
@@ -258,3 +258,15 @@ host 구현 검토에서는 기존 digest validator·runtime compact publication
 source freeze 뒤 전체 Rust/Python과 원래 전체 flags의 실제 Mac65가 통과했다. 정확한 실패/수정/후속 결과와 raw hash는 [통합 기록](../06-worklog/2026-10-18-native-host-integration.md)을 따른다. 별도 framework·game fixture project·숨은 retry·deadline/예산 증가를 추가하지 않았다. 재시도 원인 하나를 명시적 엔진 API로 다룬 개선이며 일반 실행 시간 단축 배율이나 모든 OS의 focus 보장을 측정한 것은 아니다.
 
 PR20은 두 packaged CPU62와 다섯 CI 뒤 downloaded Mac package를 실제 native/offline-audio72에 재사용했다. main push package도 checksum/checkout/dirty=false·notices/inventory를 검증하고 extracted binary의 실제 bytes가 같음을 대조했다. 같은 bytes의 main 실행 파일은 버전별 `dist/local/`에 보관하면서 로컬 release rebuild와 동일 하드웨어 재검증을 생략했다. tree 동일성과 binary 동일성을 별도로 확인했으며 archive metadata까지 같다고 주장하지 않는다. 후속 source·toolchain/features·binary가 달라지면 이 재사용 근거를 그대로 적용하지 않는다.
+
+## Capture runtime의 반복 경계와 검증 순서
+
+`f3880d7`의 [a.1 인수](../06-worklog/2026-10-18-live-capture-foundation.md)는 같은 activation service·actor·preparation worker·RequestTicket·CreditPool을 확장했다. 별도 capture actor나 CLI ledger를 만들지 않았다. 독립 image reserve는 기존 RAII credit을 재사용하고, native capability/work lease는 작은 구체 타입으로 공개해 후속 adapter마다 수명 규칙을 다시 만들지 않게 한다.
+
+strict 검사에서 찾은 큰 dispatch error는 최초 생성한 request를 한 번 Box로 만들고 Busy에 같은 Box를 반환하도록 수정했다. Busy마다 error용 Box를 새로 만들지 않는다. 이 소유권 경계는 후속 renderer API에도 적용하되 일반 처리량·FPS 향상 수치는 아직 측정하지 않았다. pixels는 move하는 반환을 설계해 host 전달만을 위해 최대32MiB RGBA를 다시 복사하지 않는다. renderer source/GPU 검증 전이므로 마지막 항목은 아직 적용 결과가 아니다.
+
+실제 병렬 회귀에서 completion/ACK의 정상 Busy를 즉시 unwrap한 fixture와, production의 close-before-cancel 순서 결함을 구분했다. 성공 경로 helper는 Busy만 같은 payload로 유한 재시도하며 Stopped·잘못된 identity·취소 뒤 열린 responder는 실패로 유지한다. 정상 비동기 경합을 테스트에서 처리하는 일과 실제 결함을 retry로 가리는 일을 섞지 않는다.
+
+마지막 client-role/ID assertion-only 수정 뒤에는 담당자의 focused14·strict를 마치고 source hash와 Cargo lease를 root에게 넘겼다. package별 전체 검사를 또 반복하는 대신 root가 최종 workspace414·check/fmt/strict를 수행했다. Python72는 독립 source라 compile/test와 병행했다. 같은 shared target을 유지하고 cold workspace나 새 test framework를 만들지 않았다. 최종 workspace 실행의47.703초는 해당 snapshot 한 번의 관측이며 다른 범위의 과거 실행과 속도 배율로 비교하지 않는다.
+
+주기적인 source/doc commit은 유지하고 실제 GPU/host/CLI capture가 이어진 a.4에서 두 package·다섯 CI·다운로드 native proof·main 동일 tree를 인수한다. a.1의 로컬 checkpoint를 이유로 이 최종 gate를 생략하지 않는다. 실제 같은 frame의 edit→Step→capture→assert 자동화·MCP·trace와 전체 DEV04/06은 계속 미완료다.

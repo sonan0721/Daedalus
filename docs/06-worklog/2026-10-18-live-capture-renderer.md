@@ -1,10 +1,10 @@
 # P02.3a.2: actual surface capture renderer 작업 기록
 
-상태: renderer CPU·첫 실제 Metal surface/close checkpoint 통과, a.2 인수는 열림 · 2026-10-18
+상태: P02.3a.2 renderer 로컬 인수 통과 · host/CLI·최종 통합 인수는 열림 · 2026-10-18
 
 ## 만든 이유
 
-[runtime a.1 기록](2026-10-18-live-capture-foundation.md)의 CPU metadata fixture와 실제 surface 픽셀 복사를 구분한다. `f3880d7`은 요청·credit·수명 기반만 인수했으며 main의 기존 CLI는 여전히 `live_capture=false`다. 이번 기록은 [renderer 반환 계약](../03-architecture/live-capture-renderer-return.md)의 source·실패·CPU 검사·실제 native proof를 별도로 추적하기 위한 것이다. publication/frame pin을 보완한 renderer CPU103건과 no-default58건은 통과했다. 검증용 example의 strict/build와 실제 Metal 세 scenario가 통과했다. resize/old-ready/실제 GPU failure 경로와 host/CLI 연결은 후속이다.
+[runtime a.1 기록](2026-10-18-live-capture-foundation.md)의 CPU metadata fixture와 실제 surface 픽셀 복사를 구분한다. `f3880d7`은 요청·credit·수명 기반만 인수했으며 main의 기존 CLI는 여전히 `live_capture=false`다. 이번 기록은 [renderer 반환 계약](../03-architecture/live-capture-renderer-return.md)의 source·실패·CPU 검사·실제 native proof를 별도로 추적하기 위한 것이다. 첫103 CPU·세 native scenario 뒤 resize/old-ready·실제 GPU failure 보완을 마쳤다. 최종104 CPU·private GPU2·기존 생성자 회귀GPU1·native5 scenario가 통과해 a.2를 로컬 인수했다. host/CLI·workspace/package/CI 최종 통합은 후속이다.
 
 ## Source 소유권과 순서
 
@@ -27,10 +27,10 @@ source가 커지는 단계에서 별도 Luna A가 새 `window/capture/ownership_
 
 | Gate | 상태 |
 | --- | --- |
-| CPU lane/소유권/거부/limit/alignment·map/fence/cancel/panic | frame pin·byte/layout·metadata unwind 포함103 CPU 통과; 실제 GPU unwind 미검증 |
+| CPU lane/소유권/거부/limit/alignment·map/fence/cancel/panic | 최종104 CPU·actual submit/map unwind·map-abort callback 회귀 통과 |
 | 실제 surface capability·같은 acquired frame의 pixels/metadata | M3 Pro/Metal BGRA8 sRGB 640×480 실제 반복 capture 통과 |
-| known color·RGBA/BGRA·manual-sRGB·overlay·resize·old-ready view | 실제 BGRA8 sRGB/overlay 통과; 나머지 실제 GPU format·resize·old-ready 후속 |
-| close/worker drop·mapped view/queue fence·owner drain/final buffer drop | held readback/worker detach 실제 Pending→Drained 통과; 실제 GPU failure 주입 후속 |
+| known color·RGBA/BGRA·manual-sRGB·overlay·resize·old-ready view | 네 texture format clear/readback·Metal BGRA8 sRGB surface·resize/old-ready 통과. PBR shader format parity 전체는 P05 후속 |
+| close/worker drop·mapped view/queue fence·owner drain/final buffer drop | native held/drop Pending→Drained·private actual GPU unwind/abort cleanup 통과 |
 | host artifact·PNG/file/reader·CLI protocol capture | 후속 a.3/a.4, 미구현 |
 
 실제 실행 raw·source/binary hash·실패·장치 범위는 실행 뒤에만 추가한다. 별도 offscreen PNG를 이 gate의 증거로 쓰지 않는다. a.2·상위 P02.3a·D1/D2/D3는 미통과다.
@@ -129,3 +129,38 @@ root의 첫 executable build는6.081초에 통과했다. `--timings` HTML `targe
 | `p02-capture-renderer-native-close-held-01/capture-1.png` | 10,329 | `711e5779cffb26a54c17f478c081077e33ba6e9ce8ae81c7326e807a98be3ee8` |
 
 두 capture의 RGBA SHA-256은 각각 `50c5c5836f91b55931821ad14ed8fc91252fa0357fee09326ac125b9080bbb6e`·`6c730e97c625fb6b9196065636581be1c7af09377182b2655695f6213fc8d91c`다. 두 번째 clear sample은48/56/69/255, 첫 overlay probe는109/207/244/255이며 두 번째 같은 위치는48/56/69/255였다. 같은 actual frame을 copy하고 BGRA를 RGBA로 바꾸되 gamma를 다시 적용하지 않는 이 장치의 경로를 확인했다. 다른 surface format·resize·forced old-ready·실제 GPU failure/panic은 이번 세 scenario에서 미실행이다. a.2 전체, host a.3/CLI a.4, P02와 D1/D2/D3는 계속 열려 있다.
+
+
+## a.2 잔여 검증과 로컬 인수
+
+D가 latest-only physical resize control·actual device limit·winit Some(actual)/Resized 공통 reconfigure와 poisoned slot 복구를 구현했다. C는 native resize·64개 unique geometry 후보의 old-ready 시나리오를 추가했다. old-ready는 capture 후와 같거나 더 최신 present sequence를 가진 하나의 coherent status에서 active/staging을 읽는다. 첫 overlay 전환을 검사하는 validator와 같은 frame identity validator를 분리해 다른 시나리오가 불필요한 overlay 차이에 의존하지 않게 했다.
+
+private GPU test는 production copy/readback/fence 경로와 실제 buffer/map callback을 사용한다. 첫 submit 직후 callback 등록 전, map 등록 직후의 의도된 panic을 catch하고 cell/pin이 남는지 검사한다. 특히 첫 cleanup은 fence 등록/관측 전 false여야 한다. 이후 nonwaiting Poll·유한1ms test-worker backoff로 실제 fence/map을 마감한다. pending map의 unmap 취소는 실제 wgpu error callback을 발생시키며 synthetic flag를 성공 근거로 쓰지 않는다. 네 texture format은 실제 rendered clear/manual-sRGB clear·채널 순서·padding 제거를 검사한다. 이 fixture는 mesh가 없는 clear pass이므로 PBR mesh shader parity를 증명하지 않는다.
+
+compiler attempt26은 test fixture의 빠진 mutable binding1건으로 실패했다. 수정 뒤 test-target compile27/29, strict28/30/31을 거쳐 아래 최종 snapshot을 검증했다. source를 바꾼 뒤의 focused 재검사이며 실패 원본을 보존했다. 최종 source/config/lock·binary·attempt25~35 raw hash는 ignored `p02-capture-renderer-root-gpu-freeze-02.json`에 동결했다. inventory SHA-256은 `11f601d11ad75c016e5f2b38ba0ccf4fa6de5cc3a1dd720f647b68edb250b480`, example source는 `25dd6e8aa5e1c6b587ac806d0b09c13aae82b7ae7259b610be106723763f1955`, actual executable은 **`3aab00347cb1865b99b47e6c195046083b1fcc00978630c50b22762f98756d70`**이다.
+
+| 최종 source 검사 | raw (`dist/project-evidence/`) | SHA-256 | 결과 |
+| --- | --- | --- | --- |
+| renderer all-feature lib test | `p02-capture-renderer-luna-attempt32.log` | `c54e077de95e14931a2b50fb19784b058238c45f9da596633b6245651965a8fe` | 104passed/0failed/31hardware ignored |
+| 실제 dev-build example | `p02-capture-renderer-luna-attempt33.log` | `38e54ed14cc0acbd1f482c44c771f2b3e02e68df94de9158671482bcfd47b6ec` | 통과,5.258초. alias의 첫 통합 build이며 범위가 다른 과거 build와 속도 비교하지 않음 |
+| all-target/all-feature strict | `p02-capture-renderer-luna-attempt34.log` | `1ff32d8efc0d83279f1443ba37c89d4ec8f1376c3f8c8ae169ec980a12b887cc` | 통과 |
+| all-target/no-default strict | `p02-capture-renderer-luna-attempt35.log` | `69ecb54e37caf2c424740aca9d484354a8e58b4a0ffd9f6a018078ed18aab3a7` | 통과 |
+| root full-workspace fmt | `p02-capture-renderer-root-fmt-02.log` | `6eebc123677b84ec958334e9b9d19398b69651dc64e19fffa2b2528ceaa07aa5` | 통과 |
+| root private adapter GPU | `p02-capture-renderer-native-gpu-01.log` | `27d83e634309ed7b57e1a363d496a0c8ff264e408156898751d95faf71de2529` | 2passed/0failed, 네 format과 실제 submit/map/abort 경로. 의도한 panic trace2개는 catch된 test 입력 |
+| 기존 default offscreen ctor/alpha GPU | `p02-capture-renderer-default-constructor-gpu-01.log` | `5c747699659c163877f427e53798185c95ab69eaff95e61534d68a4c431a3a78` | 정확한 기존 test1passed, public ctor의 adapter 공통화 회귀 |
+
+같은 dev-build executable의 native 검증은 Apple M3 Pro·Metal·BGRA8UnormSrgb surface에서 순서대로 실행했다.
+
+| Native scenario | raw (`dist/project-evidence/`) | SHA-256 | 실제 관측 |
+| --- | --- | --- | --- |
+| resize | `p02-capture-renderer-native-resize-01.log` | `93a2b4bf248700e5128c02378431d63b34f9b6ba9fad24544e6c85ac94029075` | actual640×480→513×257, actual aspect projection 변경, tightly packed RGBA/PNG 일치 |
+| old-ready | `p02-capture-renderer-native-old-ready-01.log` | `b497310ebfcf55bdaafc615584776653d5ae258b0b6ef403ce29ef89be92e9b0` | 후보 key2 Uploading의 create calls2→48, initial generation1 capture present22, coherent afterstatus present43, 후보 미commit·취소·drain |
+| capture regression | `p02-capture-renderer-native-capture-03.log` | `91fda43cc4084f6e4ec10249bc9525e08189f796207a3ef1763c4afd95e09c79` | 첫 overlay/후속 기본 화면 pixels·identity·decode·drain |
+| close-held regression | `p02-capture-renderer-native-close-held-02.log` | `e4fb86fe92b62a78e732ffa326317e6852230c33a4bcb22b74fbb2d8b56175cf` | held readback 동안 Pending, close 뒤 readback 해제 후 Drained |
+| worker-drop regression | `p02-capture-renderer-native-worker-drop-02.log` | `25b893a5e922293f995d75aadde6f543cd2a7ed1351683b694d77d18aa37f08d` | actual endpoint/handle Drop 뒤 fallback Drained |
+
+native 다섯 report는 success/cleanup_complete=true·unresolved owner=false다. old-ready 시점의 uploaded_bytes는0이며 실제 GPU resource create 단계의 Uploading 관측이다. 이미 texture/geometry bytes가 제출된 시점이라고 바꾸지 않는다. resize의 copy row pitch2304/tight2052/padding252는 wgpu alignment에 따라 계산한 값이며 API가 raw mapped pitch를 별도로 보고한 값은 아니다. 실제513×257 tightly packed pixels와 saved PNG가 일치함은 독립 확인했다.
+
+root는 saved PNG7개를 디스크에서 다시 decode해 PNG/RGBA hash·크기·세 sample을 report와 대조했다. raw `p02-capture-renderer-native-disk-verify-02.log` SHA-256은 `84fa02483d29201347ef1d2949db8beb42de295bccc052765e1acdd9d45ec772`다. resize·old-ready 최종 이미지도 직접 열어 봤다. resize 최종 PNG `dd11e5322d78c5a5b34ad3d66d46b2b9aad2a005b2a9aaa4dd28fa8f3c4988c1`(5,380bytes), old-ready 최종 PNG `970b7946336d64186181f8ea6400e5489e2aea6d138a67e1844852a03ae24b61`이다.
+
+위 범위로 **a.2 renderer 로컬 인수**를 통과한다. 네 format은 adapter texture proof이고 negotiated native surface는 위 format 하나다. 실제 runtime authority·host artifact/encoder·CLI wire capture는 a.3/a.4이며 아직 미구현이다. 다른 OS/browser·전체 PBR shader parity·OS scanout·144fps·최종 workspace/package/CI 인수까지 완료한 것으로 확장하지 않는다. P02.3a·P02와 D1/D2/D3는 계속 미통과다.

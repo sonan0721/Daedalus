@@ -2,11 +2,12 @@
 
 use std::sync::{
     Arc, Mutex, MutexGuard, TryLockError,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     mpsc::{self, Receiver, SyncSender, TrySendError},
 };
 
 use daedalus_core::{SessionId, Tick};
+use thiserror::Error;
 
 use crate::packet::valid_source_digest;
 use crate::{
@@ -632,6 +633,20 @@ pub struct ManagedPacketWindowControl {
     shared: Arc<ManagedWindowShared>,
 }
 
+/// A resize request could not be accepted by the managed window control slot.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ManagedResizeRequestError {
+    /// The physical size is zero or exceeds the published device limit.
+    #[error("requested physical size is invalid")]
+    InvalidSize,
+    /// The window is closed or has begun closing.
+    #[error("managed window is closed")]
+    Closed,
+    /// The device limit is not published yet or the nonblocking resize slot is busy.
+    #[error("managed resize slot is busy")]
+    Busy,
+}
+
 impl ManagedPacketWindowControl {
     pub fn request_view_close(&self) {
         self.shared.view_close.store(true, Ordering::Release);
@@ -645,6 +660,44 @@ impl ManagedPacketWindowControl {
         self.shared
             .cancel_through
             .fetch_max(key.get(), Ordering::AcqRel);
+    }
+
+    /// Queues the latest requested physical size for the managed window.
+    ///
+    /// `Ok(())` means the latest-only request slot accepted the size. The OS may
+    /// adjust or reject it; callers observe the actual dimensions from a later
+    /// [`ManagedPresentedView`].
+    pub fn try_request_resize(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ManagedResizeRequestError> {
+        if width == 0 || height == 0 {
+            return Err(ManagedResizeRequestError::InvalidSize);
+        }
+        if self.shared.resize_is_closed() {
+            return Err(ManagedResizeRequestError::Closed);
+        }
+        let max_dimension = self
+            .shared
+            .max_device_texture_dimension
+            .load(Ordering::Acquire);
+        if max_dimension == 0 {
+            return Err(ManagedResizeRequestError::Busy);
+        }
+        if width > max_dimension || height > max_dimension {
+            return Err(ManagedResizeRequestError::InvalidSize);
+        }
+        let mut slot = match self.shared.resize_request.try_lock() {
+            Ok(slot) => slot,
+            Err(TryLockError::WouldBlock) => return Err(ManagedResizeRequestError::Busy),
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        };
+        if self.shared.resize_is_closed() {
+            return Err(ManagedResizeRequestError::Closed);
+        }
+        *slot = Some((width, height));
+        Ok(())
     }
 
     pub fn try_status(&self) -> ManagedWindowRead<ManagedWindowStatus> {
@@ -688,6 +741,8 @@ pub(super) struct ManagedWindowShared {
     stage_event: Mutex<Option<ManagedStageEvent>>,
     presented: Mutex<Option<ManagedPresentedView>>,
     status: Mutex<ManagedWindowStatus>,
+    resize_request: Mutex<Option<(u32, u32)>>,
+    max_device_texture_dimension: AtomicU32,
 }
 
 impl ManagedWindowShared {
@@ -711,7 +766,32 @@ impl ManagedWindowShared {
                 physical_width: 0,
                 physical_height: 0,
             }),
+            resize_request: Mutex::new(None),
+            max_device_texture_dimension: AtomicU32::new(0),
         }
+    }
+
+    pub(super) fn set_max_device_texture_dimension(&self, max_dimension: u32) {
+        self.max_device_texture_dimension
+            .store(max_dimension, Ordering::Release);
+    }
+
+    pub(super) fn try_take_resize_request(&self) -> Option<(u32, u32)> {
+        let mut slot = match self.resize_request.try_lock() {
+            Ok(slot) => slot,
+            Err(TryLockError::WouldBlock) => return None,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        };
+        if self.resize_is_closed() {
+            slot.take();
+            None
+        } else {
+            slot.take()
+        }
+    }
+
+    fn resize_is_closed(&self) -> bool {
+        self.is_closed() || self.view_close_requested() || self.host_stop_requested()
     }
 
     pub(super) fn view_close_requested(&self) -> bool {
@@ -927,9 +1007,9 @@ mod tests {
     use crate::{Camera, DirectionalLight, RenderPacket};
 
     use super::{
-        ManagedGenerationIdentity, ManagedPresentedView, ManagedStageEvent, ManagedStageKey,
-        ManagedWindowError, ManagedWindowErrorCode, ManagedWindowLifecycle, ManagedWindowRead,
-        managed_packet_window_channel,
+        ManagedGenerationIdentity, ManagedPresentedView, ManagedResizeRequestError,
+        ManagedStageEvent, ManagedStageKey, ManagedWindowError, ManagedWindowErrorCode,
+        ManagedWindowLifecycle, ManagedWindowRead, managed_packet_window_channel,
     };
 
     fn packet(generation: u64, sequence: u64) -> RenderPacket {
@@ -1054,6 +1134,61 @@ mod tests {
         control.request_host_stop();
         assert!(server.shared.host_stop_requested());
         assert!(!control.is_closed());
+    }
+
+    #[test]
+    fn resize_requests_are_physical_bounded_latest_only_and_nonblocking() {
+        let (client, server) = managed_packet_window_channel();
+        let control = client.control();
+
+        assert_eq!(
+            control.try_request_resize(0, 1),
+            Err(ManagedResizeRequestError::InvalidSize),
+            "zero is invalid even before device initialization"
+        );
+        assert_eq!(
+            control.try_request_resize(513, 257),
+            Err(ManagedResizeRequestError::Busy),
+            "a caller cannot exceed an unpublished device limit by assumption"
+        );
+
+        server.shared.set_max_device_texture_dimension(1024);
+        assert_eq!(
+            control.try_request_resize(1025, 257),
+            Err(ManagedResizeRequestError::InvalidSize)
+        );
+        control.try_request_resize(513, 257).unwrap();
+        control.try_request_resize(640, 360).unwrap();
+        assert_eq!(
+            server.shared.try_take_resize_request(),
+            Some((640, 360)),
+            "a later size replaces the single unconsumed request"
+        );
+        assert_eq!(server.shared.try_take_resize_request(), None);
+
+        let _slot = server.shared.resize_request.lock().unwrap();
+        assert_eq!(
+            control.try_request_resize(320, 240),
+            Err(ManagedResizeRequestError::Busy),
+            "contention is reported without waiting"
+        );
+        drop(_slot);
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = server.shared.resize_request.lock().unwrap();
+            panic!("poison the resize slot for recovery coverage");
+        }));
+        assert!(poisoned.is_err());
+        control
+            .try_request_resize(320, 240)
+            .expect("the nonblocking producer recovers the poisoned metadata slot");
+        assert_eq!(server.shared.try_take_resize_request(), Some((320, 240)));
+
+        control.request_view_close();
+        assert_eq!(
+            control.try_request_resize(320, 240),
+            Err(ManagedResizeRequestError::Closed)
+        );
     }
 
     #[test]

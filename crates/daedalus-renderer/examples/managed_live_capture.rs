@@ -30,10 +30,11 @@ use daedalus_renderer::{
     ManagedCaptureSource, ManagedCaptureState, ManagedCaptureSubmitError,
     ManagedCaptureSurfaceFormat, ManagedCaptureWorker, ManagedCaptureWorkerError,
     ManagedPacketWindowClient, ManagedPacketWindowInput, ManagedPacketWindowOptions,
-    ManagedPresentedView, ManagedStageEvent, ManagedStageKey, ManagedWindowRead, ManagedWindowRun,
-    PacketCpuLimits, PacketCpuOwner, PacketStageInput, PacketStageLimits, PacketStageState,
-    RenderView, SourcePin, WindowGpuOwner, WindowInputPolicy, WindowOptions,
-    managed_packet_window_capture_channel, run_packet_windowed_managed_with_input_policy,
+    ManagedPresentedView, ManagedResizeRequestError, ManagedStageEvent, ManagedStageKey,
+    ManagedWindowRead, ManagedWindowRun, PacketCpuLimits, PacketCpuOwner, PacketStageInput,
+    PacketStageLimits, PacketStageState, PacketStageStatusSummary, RenderView, SourcePin,
+    WindowGpuOwner, WindowInputPolicy, WindowOptions, managed_packet_window_capture_channel,
+    run_packet_windowed_managed_with_input_policy,
 };
 use sha2::{Digest, Sha256};
 
@@ -43,6 +44,10 @@ const WORKER_RETURN_DEADLINE: Duration = Duration::from_secs(55);
 const DRAIN_DEADLINE: Duration = Duration::from_secs(18);
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 const CLEAR_COLOR: [f32; 4] = [0.03, 0.04, 0.06, 1.0];
+const RESIZE_WIDTH: u32 = 513;
+const RESIZE_HEIGHT: u32 = 257;
+const OLD_READY_MESH_COUNT: usize = 64;
+const COPY_BYTES_PER_ROW_ALIGNMENT: usize = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
 const OWNER_AWAITING: u8 = 0;
 const OWNER_HELD: u8 = 1;
 const OWNER_DRAINED: u8 = 2;
@@ -72,6 +77,8 @@ enum Scenario {
     Capture,
     CloseHeld,
     WorkerDrop,
+    Resize,
+    OldReady,
 }
 
 impl Scenario {
@@ -80,6 +87,8 @@ impl Scenario {
             "capture" => Some(Self::Capture),
             "close-held" => Some(Self::CloseHeld),
             "worker-drop" => Some(Self::WorkerDrop),
+            "resize" => Some(Self::Resize),
+            "old-ready" => Some(Self::OldReady),
             _ => None,
         }
     }
@@ -89,6 +98,8 @@ impl Scenario {
             Self::Capture => "capture",
             Self::CloseHeld => "close-held",
             Self::WorkerDrop => "worker-drop",
+            Self::Resize => "resize",
+            Self::OldReady => "old-ready",
         }
     }
 }
@@ -104,6 +115,13 @@ struct Fixture {
     frame: Arc<CpuFrameHandle>,
     initial_stage: PacketStageInput,
     initial_source: ManagedCaptureSource,
+    candidate_generation: Option<CpuGenerationId>,
+    candidate_source_digest: Option<String>,
+}
+
+struct CandidateProject {
+    project: Arc<daedalus_content::project::PreparedProject>,
+    handles: BTreeMap<daedalus_content::scene::StableId, EntityHandle>,
 }
 
 struct WorkerContext {
@@ -111,6 +129,8 @@ struct WorkerContext {
     out_dir: PathBuf,
     cpu_owner: PacketCpuOwner,
     generation: CpuGenerationId,
+    candidate_generation: Option<CpuGenerationId>,
+    candidate_source_digest: Option<String>,
     frame: Arc<CpuFrameHandle>,
     initial_source: ManagedCaptureSource,
     capture_client: ManagedCaptureClient,
@@ -157,6 +177,64 @@ struct CaptureRecord {
     overlay_sample: PixelSample,
     red_mesh_sample: PixelSample,
     red_mesh_pixel_count: usize,
+    rgba_row_bytes: usize,
+    copy_row_pitch_bytes: usize,
+    stripped_padding_bytes_per_row: usize,
+}
+
+#[derive(Clone)]
+struct StageObservation {
+    key: u64,
+    state: String,
+    project_generation: u64,
+    source_digest: String,
+    total_upload_bytes: usize,
+    uploaded_bytes: usize,
+    create_calls_completed: usize,
+    initialization_complete: bool,
+}
+
+impl StageObservation {
+    fn from_summary(status: &PacketStageStatusSummary) -> Self {
+        Self {
+            key: status.key().get(),
+            state: format!("{:?}", status.state()),
+            project_generation: status.project_generation(),
+            source_digest: status.source_digest().to_owned(),
+            total_upload_bytes: status.total_upload_bytes(),
+            uploaded_bytes: status.uploaded_bytes(),
+            create_calls_completed: status.create_calls_completed(),
+            initialization_complete: status.initialization_complete(),
+        }
+    }
+}
+
+struct OldReadyObservation {
+    candidate: StageObservation,
+    after_capture: StageObservation,
+    coherent_status_present_sequence: Option<u64>,
+    old_frame_still_active: bool,
+    old_frame_selected: bool,
+    candidate_cancelled: bool,
+}
+
+struct CandidateAfterCapture {
+    status: PacketStageStatusSummary,
+    last_presented_sequence: u64,
+    old_frame_still_active: bool,
+}
+
+struct ResizeObservation {
+    requested_width: u32,
+    requested_height: u32,
+    previous_width: u32,
+    previous_height: u32,
+    actual_width: u32,
+    actual_height: u32,
+    row_bytes: usize,
+    copy_row_pitch_bytes: usize,
+    stripped_padding_bytes_per_row: usize,
+    view_projection_changed: bool,
 }
 
 #[derive(Clone)]
@@ -175,6 +253,8 @@ struct ReportData {
     captures: Vec<CaptureRecord>,
     observed_view: Option<ManagedPresentedView>,
     capture_ready: Option<daedalus_renderer::ManagedCaptureReadyInfo>,
+    resize: Option<ResizeObservation>,
+    old_ready: Option<OldReadyObservation>,
     readback_submitted: bool,
     drain_observations: Vec<String>,
     cleanup_complete: bool,
@@ -260,13 +340,15 @@ fn join_reported_worker(worker: thread::JoinHandle<()>) -> HarnessResult<()> {
 
 fn run() -> HarnessResult<bool> {
     let args = parse_args()?;
-    let fixture = build_fixture()?;
+    let fixture = build_fixture(args.scenario)?;
     let Fixture {
         cpu_owner,
         generation,
         frame,
         initial_stage,
         initial_source,
+        candidate_generation,
+        candidate_source_digest,
     } = fixture;
     let (window_client, capture_client, server) = managed_packet_window_capture_channel();
     let capture_worker = capture_client
@@ -287,6 +369,8 @@ fn run() -> HarnessResult<bool> {
         out_dir: args.out_dir.clone(),
         cpu_owner,
         generation,
+        candidate_generation,
+        candidate_source_digest,
         frame,
         initial_source,
         capture_client,
@@ -421,7 +505,9 @@ fn parse_args() -> HarnessResult<Args> {
             }
             "--scenario" => {
                 let value = arguments.next().ok_or_else(|| {
-                    HarnessError::new("--scenario requires capture|close-held|worker-drop")
+                    HarnessError::new(
+                        "--scenario requires capture|close-held|worker-drop|resize|old-ready",
+                    )
                 })?;
                 if scenario.replace(value).is_some() {
                     return Err(HarnessError::new("--scenario may be specified only once"));
@@ -435,12 +521,14 @@ fn parse_args() -> HarnessResult<Args> {
         .as_deref()
         .and_then(Scenario::parse)
         .ok_or_else(|| {
-            HarnessError::new("--scenario must be capture, close-held, or worker-drop")
+            HarnessError::new(
+                "--scenario must be capture, close-held, worker-drop, resize, or old-ready",
+            )
         })?;
     Ok(Args { out_dir, scenario })
 }
 
-fn build_fixture() -> HarnessResult<Fixture> {
+fn build_fixture(scenario: Scenario) -> HarnessResult<Fixture> {
     let manifest = br#"{"schema_version":1,"name":"managed live capture fixture","scene":"scene.json","presentation":{"clear":[0.03,0.04,0.06,1.0]}}"#;
     let scene = br#"{
         "schema_version":1,
@@ -537,13 +625,128 @@ fn build_fixture() -> HarnessResult<Fixture> {
             "fixture frame identity did not match its source",
         ));
     }
+    let (candidate_generation, candidate_source_digest) = if scenario == Scenario::OldReady {
+        let candidate = build_candidate_project(session)?;
+        let candidate_pin: Arc<dyn Send + Sync> = candidate.project.clone();
+        let candidate_generation = cpu_owner
+            .prepare_generation(
+                &candidate.project,
+                2,
+                session,
+                &candidate.handles,
+                SourcePin::new(candidate_pin),
+                &cancelled,
+            )
+            .map_err(|error| {
+                HarnessError::new(format!("prepare candidate CPU generation: {error}"))
+            })?;
+        let candidate_stage = cpu_owner
+            .stage_input(candidate_generation)
+            .map_err(|error| HarnessError::new(format!("prepare candidate GPU stage: {error}")))?;
+        if candidate_stage.geometry_count() != OLD_READY_MESH_COUNT
+            || candidate_stage.project_generation() != 2
+            || candidate_stage.source_digest() == initial_source.source_digest()
+        {
+            return Err(HarnessError::new(
+                "candidate fixture did not produce a distinct multi-geometry generation",
+            ));
+        }
+        (
+            Some(candidate_generation),
+            Some(candidate_stage.source_digest().to_owned()),
+        )
+    } else {
+        (None, None)
+    };
+
     Ok(Fixture {
         cpu_owner,
         generation,
         frame,
         initial_stage,
         initial_source,
+        candidate_generation,
+        candidate_source_digest,
     })
+}
+
+fn build_candidate_project(session: SessionId) -> HarnessResult<CandidateProject> {
+    let manifest = br#"{"schema_version":1,"name":"managed live capture candidate","scene":"scene.json","presentation":{"clear":[0.03,0.04,0.06,1.0]}}"#;
+    let mut entities = Vec::with_capacity(OLD_READY_MESH_COUNT);
+    let mut assets = Vec::with_capacity(OLD_READY_MESH_COUNT);
+    let mut files = BTreeMap::new();
+    for index in 0..OLD_READY_MESH_COUNT {
+        let asset_id = format!("asset:candidate:{index:03}");
+        let entity_id = format!("entity:candidate:{index:03}");
+        let component_id = format!("component:candidate:{index:03}:mesh");
+        let uri = format!("candidate-{index:03}.json");
+        let shift = index as f32 * 0.001;
+        let mesh = serde_json::json!({
+            "schema_version": 1,
+            "vertices": [
+                {"position": [-0.9 + shift, -0.75, 0.0], "normal": [0.0, 0.0, 1.0]},
+                {"position": [0.9 + shift, -0.75, 0.0], "normal": [0.0, 0.0, 1.0]},
+                {"position": [shift, 0.9, 0.0], "normal": [0.0, 0.0, 1.0]}
+            ],
+            "indices": [0, 1, 2]
+        });
+        let mesh_bytes = serde_json::to_vec(&mesh)
+            .map_err(|error| HarnessError::new(format!("encode candidate mesh: {error}")))?;
+        files.insert(uri.clone(), mesh_bytes);
+        assets.push(serde_json::json!({
+            "id": asset_id,
+            "kind": "daedalus.mesh",
+            "uri": uri,
+            "metadata": {}
+        }));
+        entities.push(serde_json::json!({
+            "id": entity_id,
+            "components": [{
+                "id": component_id,
+                "type_id": "daedalus.mesh_renderer",
+                "asset_refs": [asset_id],
+                "data": {
+                    "mesh": asset_id,
+                    "material": {
+                        "base_color": [0.95, 0.06, 0.035],
+                        "metallic": 0.0,
+                        "roughness": 0.82
+                    }
+                }
+            }]
+        }));
+    }
+    let scene = serde_json::json!({
+        "schema_version": 1,
+        "revision": 2,
+        "entities": entities,
+        "assets": assets
+    });
+    let scene_bytes = serde_json::to_vec(&scene)
+        .map_err(|error| HarnessError::new(format!("encode candidate scene: {error}")))?;
+    let project = Arc::new(
+        prepare_project_from_bytes(manifest, &scene_bytes, &files, ProjectLimits::default())
+            .map_err(|error| HarnessError::new(format!("prepare candidate project: {error}")))?,
+    );
+    if project.entities().len() != OLD_READY_MESH_COUNT {
+        return Err(HarnessError::new(
+            "candidate project loader changed its authored entity count",
+        ));
+    }
+    let mut handles = BTreeMap::new();
+    for (index, entity) in project.entities().iter().enumerate() {
+        let index = u32::try_from(index)
+            .map_err(|_| HarnessError::new("candidate entity index overflow"))?;
+        handles.insert(
+            entity.id.clone(),
+            EntityHandle {
+                session,
+                index,
+                generation: 2,
+            },
+        );
+    }
+    Ok(CandidateProject { project, handles })
 }
 
 fn window_summary_from(
@@ -604,6 +807,8 @@ fn worker_entry(
         captures: Vec::new(),
         observed_view: None,
         capture_ready: None,
+        resize: None,
+        old_ready: None,
         readback_submitted: false,
         drain_observations: Vec::new(),
         cleanup_complete: false,
@@ -616,8 +821,22 @@ fn worker_entry(
     }));
     match open_result {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => report.error = Some(error.to_string()),
-        Err(_) => report.error = Some("capture worker panicked during open-window phase".into()),
+        Ok(Err(error)) => {
+            report.error = Some(error.to_string());
+            if let Some(key) = ManagedStageKey::INITIAL.checked_next()
+                && context.candidate_generation.is_some()
+            {
+                context.control.request_cancel_through(key);
+            }
+        }
+        Err(_) => {
+            report.error = Some("capture worker panicked during open-window phase".into());
+            if let Some(key) = ManagedStageKey::INITIAL.checked_next()
+                && context.candidate_generation.is_some()
+            {
+                context.control.request_cancel_through(key);
+            }
+        }
     }
     context.control.request_view_close();
 
@@ -698,6 +917,14 @@ fn worker_entry(
         gpu_owner.retain_unresolved();
     }
     drop(context.frame);
+    if let Some(candidate_generation) = context.candidate_generation
+        && let Err(error) = context.cpu_owner.retire_generation(candidate_generation)
+    {
+        set_error(
+            &mut report,
+            format!("retire candidate CPU generation: {error}"),
+        );
+    }
     if let Err(error) = context.cpu_owner.retire_generation(context.generation) {
         set_error(
             &mut report,
@@ -838,6 +1065,154 @@ fn open_window_phase(context: &mut WorkerContext, report: &mut ReportData) -> Ha
                 Some((&second_source, first_record.view.tick())),
             )?;
             validate_repeat_capture(&first_record, &second_record)?;
+            report.captures.push(first_record);
+            report.captures.push(second_record);
+        }
+        Scenario::Resize => {
+            let first_pixels = wait_for_pixels(context, first_key, report)?;
+            let first_record = capture_to_record(
+                first_pixels,
+                &context.out_dir,
+                1,
+                readiness.surface_format(),
+                Some((&context.initial_source, context.frame.tick())),
+            )?;
+            report.observed_view = Some(first_record.view.clone());
+
+            request_resize_with_busy_retry(context)?;
+            let resized_view =
+                wait_for_resized_view(context, first_record.view.present_sequence())?;
+            let resized_source = ManagedCaptureSource::from_presented(&resized_view);
+            let second_key = ManagedCaptureKey::new(2)
+                .ok_or_else(|| HarnessError::new("capture key two is invalid"))?;
+            let second_request = ManagedCaptureRequest::new(
+                second_key,
+                resized_source.clone(),
+                resized_view.tick(),
+                Instant::now() + CAPTURE_DEADLINE,
+            )
+            .map_err(|error| {
+                HarnessError::new(format!("create resized capture request: {error}"))
+            })?;
+            submit_with_busy_retry(context, second_request)?;
+            let resized_pixels = wait_for_pixels(context, second_key, report)?;
+            let resized_record = capture_to_record(
+                resized_pixels,
+                &context.out_dir,
+                2,
+                readiness.surface_format(),
+                Some((&resized_source, resized_view.tick())),
+            )?;
+            let resize_observation = validate_resize_capture(&first_record, &resized_record)?;
+            report.resize = Some(resize_observation);
+            report.observed_view = Some(resized_record.view.clone());
+            report.captures.push(first_record);
+            report.captures.push(resized_record);
+        }
+        Scenario::OldReady => {
+            let first_pixels = wait_for_pixels(context, first_key, report)?;
+            let first_record = capture_to_record(
+                first_pixels,
+                &context.out_dir,
+                1,
+                readiness.surface_format(),
+                Some((&context.initial_source, context.frame.tick())),
+            )?;
+            report.observed_view = Some(first_record.view.clone());
+            let candidate_key = ManagedStageKey::INITIAL
+                .checked_next()
+                .ok_or_else(|| HarnessError::new("candidate stage key exhausted"))?;
+            send_candidate_stage(context, candidate_key)?;
+            let candidate_before = wait_for_candidate_activity(context, candidate_key)?;
+            let active_before = read_status(context)?.active().is_some_and(|active| {
+                active.key() == first_record.view.key()
+                    && active.session() == first_record.view.session()
+                    && active.project_generation() == first_record.view.project_generation()
+                    && active.source_digest() == first_record.view.source_digest()
+            });
+            if !active_before {
+                return Err(HarnessError::new(
+                    "old frame was not the active generation before its staging-time capture",
+                ));
+            }
+            if !is_pending_stage(&candidate_before) {
+                let cancelled = cancel_candidate_stage(context, candidate_key).is_ok();
+                report.old_ready = Some(OldReadyObservation {
+                    candidate: StageObservation::from_summary(&candidate_before),
+                    after_capture: StageObservation::from_summary(&candidate_before),
+                    coherent_status_present_sequence: None,
+                    old_frame_still_active: active_before,
+                    old_frame_selected: false,
+                    candidate_cancelled: cancelled,
+                });
+                return Err(HarnessError::new(format!(
+                    "candidate was already {:?} before capture admission; no old-ready staging interval was observed",
+                    candidate_before.state()
+                )));
+            }
+
+            // No generation-2 Frame is submitted: a Ready stage alone never
+            // commits the source or replaces the old visible packet.
+            let old_source = ManagedCaptureSource::from_presented(&first_record.view);
+            let second_key = ManagedCaptureKey::new(2)
+                .ok_or_else(|| HarnessError::new("capture key two is invalid"))?;
+            let second_request = ManagedCaptureRequest::new(
+                second_key,
+                old_source.clone(),
+                first_record.view.tick(),
+                Instant::now() + CAPTURE_DEADLINE,
+            )
+            .map_err(|error| {
+                HarnessError::new(format!("create old-ready capture request: {error}"))
+            })?;
+            submit_with_busy_retry(context, second_request)?;
+            let old_pixels = wait_for_pixels(context, second_key, report)?;
+            let second_record = capture_to_record(
+                old_pixels,
+                &context.out_dir,
+                2,
+                readiness.surface_format(),
+                Some((&old_source, first_record.view.tick())),
+            )?;
+            validate_old_ready_capture(&first_record, &second_record)?;
+            let candidate_after =
+                read_candidate_status_after_capture(context, candidate_key, &second_record.view)?;
+            let old_frame_selected = second_record.view.key() == first_record.view.key()
+                && second_record.view.session() == first_record.view.session()
+                && second_record.view.project_generation()
+                    == first_record.view.project_generation()
+                && second_record.view.source_digest() == first_record.view.source_digest()
+                && second_record.view.publication_sequence()
+                    == first_record.view.publication_sequence()
+                && second_record.view.tick() == first_record.view.tick();
+
+            let cancelled = cancel_candidate_stage(context, candidate_key).is_ok();
+            report.old_ready = Some(OldReadyObservation {
+                candidate: StageObservation::from_summary(&candidate_before),
+                after_capture: StageObservation::from_summary(&candidate_after.status),
+                coherent_status_present_sequence: Some(candidate_after.last_presented_sequence),
+                old_frame_still_active: active_before && candidate_after.old_frame_still_active,
+                old_frame_selected,
+                candidate_cancelled: cancelled,
+            });
+            if !cancelled {
+                return Err(HarnessError::new(
+                    "candidate stage did not cancel before the old-ready window closed",
+                ));
+            }
+            if !is_pending_stage(&candidate_before) || !is_pending_stage(&candidate_after.status) {
+                return Err(HarnessError::new(format!(
+                    "candidate stage was not still pending across the old-frame capture (before={:?}, after={:?}); it was not reported as an old-ready staging interval",
+                    candidate_before.state(),
+                    candidate_after.status.state()
+                )));
+            }
+            if !candidate_after.old_frame_still_active || !old_frame_selected {
+                return Err(HarnessError::new(
+                    "candidate staging changed the active source or selected a non-old frame",
+                ));
+            }
+            report.observed_view = Some(second_record.view.clone());
             report.captures.push(first_record);
             report.captures.push(second_record);
         }
@@ -1037,6 +1412,407 @@ fn send_initial_stage(
     }
 }
 
+fn send_candidate_stage(context: &WorkerContext, key: ManagedStageKey) -> HarnessResult<()> {
+    let generation = context
+        .candidate_generation
+        .ok_or_else(|| HarnessError::new("old-ready scenario has no candidate generation"))?;
+    let input = context
+        .cpu_owner
+        .stage_input(generation)
+        .map_err(|error| HarnessError::new(format!("rebuild candidate stage input: {error}")))?;
+    let limits = PacketStageLimits::default().with_max_resource_creates_per_submission(2);
+    let mut message = ManagedPacketWindowInput::BeginStage { key, input, limits };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match context.window_client.try_send(message) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(returned)) => {
+                message = returned;
+                if Instant::now() >= deadline {
+                    return Err(HarnessError::new(
+                        "candidate stage lane remained full through its deadline",
+                    ));
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(HarnessError::new(
+                    "managed window closed before candidate stage admission",
+                ));
+            }
+        }
+    }
+}
+
+fn wait_for_candidate_activity(
+    context: &WorkerContext,
+    key: ManagedStageKey,
+) -> HarnessResult<PacketStageStatusSummary> {
+    let deadline = Instant::now() + CAPTURE_DEADLINE;
+    loop {
+        match context.window_client.try_stage_event() {
+            ManagedWindowRead::Value(ManagedStageEvent::Deferred {
+                key: deferred_key, ..
+            }) if deferred_key == key => send_candidate_stage(context, key)?,
+            ManagedWindowRead::Value(ManagedStageEvent::Failed {
+                key: failed_key,
+                error,
+            }) if failed_key == key => {
+                return Err(HarnessError::new(format!(
+                    "candidate stage failed: {}",
+                    error.message()
+                )));
+            }
+            ManagedWindowRead::Value(ManagedStageEvent::Cancelled { key: cancelled_key })
+                if cancelled_key == key =>
+            {
+                return Err(HarnessError::new(
+                    "candidate stage was cancelled before its capture interval",
+                ));
+            }
+            ManagedWindowRead::Value(ManagedStageEvent::Ready { key: ready_key, .. })
+                if ready_key == key =>
+            {
+                let status = read_candidate_status(context, key)?;
+                return Ok(status);
+            }
+            ManagedWindowRead::Value(_) | ManagedWindowRead::Empty | ManagedWindowRead::Busy => {}
+            ManagedWindowRead::Closed => {
+                return Err(HarnessError::new(
+                    "window closed before candidate stage made observable progress",
+                ));
+            }
+        }
+
+        match context.window_client.try_status() {
+            ManagedWindowRead::Value(status) => {
+                if !status.active().is_some_and(|active| {
+                    active.project_generation() == context.frame.project_generation()
+                        && active.source_digest() == context.frame.source_digest()
+                }) {
+                    return Err(HarnessError::new(
+                        "candidate staging replaced the active generation before a candidate frame was sent",
+                    ));
+                }
+                if let Some(candidate) = status.staging().filter(|candidate| candidate.key() == key)
+                {
+                    validate_candidate_status(context, key, candidate)?;
+                    if candidate.state() == PacketStageState::Ready
+                        || candidate.state() == PacketStageState::Failed
+                        || candidate.state() == PacketStageState::Cancelled
+                    {
+                        return Ok(candidate.clone());
+                    }
+                    if candidate.uploaded_bytes() > 0 || candidate.create_calls_completed() > 0 {
+                        return Ok(candidate.clone());
+                    }
+                }
+            }
+            ManagedWindowRead::Empty | ManagedWindowRead::Busy => {}
+            ManagedWindowRead::Closed => {
+                return Err(HarnessError::new(
+                    "window closed before candidate stage made observable progress",
+                ));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(HarnessError::new(
+                "candidate stage did not expose progress before the old-ready capture deadline",
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn read_status(context: &WorkerContext) -> HarnessResult<daedalus_renderer::ManagedWindowStatus> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match context.window_client.try_status() {
+            ManagedWindowRead::Value(status) => return Ok(status),
+            ManagedWindowRead::Empty | ManagedWindowRead::Busy => {}
+            ManagedWindowRead::Closed => {
+                return Err(HarnessError::new("managed window status is closed"));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::new("managed window status stayed busy"));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn read_candidate_status(
+    context: &WorkerContext,
+    key: ManagedStageKey,
+) -> HarnessResult<PacketStageStatusSummary> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match context.window_client.try_status() {
+            ManagedWindowRead::Value(status) => {
+                if let Some(candidate) = status.staging().filter(|candidate| candidate.key() == key)
+                {
+                    validate_candidate_status(context, key, candidate)?;
+                    return Ok(candidate.clone());
+                }
+            }
+            ManagedWindowRead::Empty | ManagedWindowRead::Busy => {}
+            ManagedWindowRead::Closed => {
+                return Err(HarnessError::new(
+                    "managed window closed before candidate status was available",
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::new(
+                "candidate stage status was not available before the deadline",
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn read_candidate_status_after_capture(
+    context: &WorkerContext,
+    key: ManagedStageKey,
+    selected: &ManagedPresentedView,
+) -> HarnessResult<CandidateAfterCapture> {
+    let deadline = Instant::now() + CAPTURE_DEADLINE;
+    loop {
+        match context.window_client.try_status() {
+            ManagedWindowRead::Value(status) => {
+                let presented = status.last_presented();
+                if let Some(presented) = presented
+                    && presented.present_sequence() >= selected.present_sequence()
+                    && presented_summary_matches_view(presented, selected)
+                    && let Some(candidate) =
+                        status.staging().filter(|candidate| candidate.key() == key)
+                {
+                    validate_candidate_status(context, key, candidate)?;
+                    let old_frame_still_active = status.active().is_some_and(|active| {
+                        active.key() == selected.key()
+                            && active.session() == selected.session()
+                            && active.project_generation() == selected.project_generation()
+                            && active.source_digest() == selected.source_digest()
+                    });
+                    return Ok(CandidateAfterCapture {
+                        status: candidate.clone(),
+                        last_presented_sequence: presented.present_sequence(),
+                        old_frame_still_active,
+                    });
+                }
+            }
+            ManagedWindowRead::Empty | ManagedWindowRead::Busy => {}
+            ManagedWindowRead::Closed => {
+                return Err(HarnessError::new(
+                    "window closed before a coherent post-capture status was available",
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::new(
+                "no coherent status containing the selected old-frame present and candidate stage arrived before the deadline",
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn presented_summary_matches_view(
+    summary: &daedalus_renderer::ManagedPresentedSummary,
+    view: &ManagedPresentedView,
+) -> bool {
+    summary.key() == view.key()
+        && summary.session() == view.session()
+        && summary.project_generation() == view.project_generation()
+        && summary.source_digest() == view.source_digest()
+        && summary.publication_sequence() == view.publication_sequence()
+        && summary.authority_snapshot_sequence() == view.authority_snapshot_sequence()
+        && summary.tick() == view.tick()
+}
+
+fn validate_candidate_status(
+    context: &WorkerContext,
+    key: ManagedStageKey,
+    status: &PacketStageStatusSummary,
+) -> HarnessResult<()> {
+    if status.key() != key
+        || status.project_generation() != 2
+        || context
+            .candidate_source_digest
+            .as_deref()
+            .is_none_or(|digest| status.source_digest() != digest)
+    {
+        return Err(HarnessError::new(
+            "observed candidate stage identity disagrees with the prepared generation",
+        ));
+    }
+    Ok(())
+}
+
+fn is_pending_stage(status: &PacketStageStatusSummary) -> bool {
+    matches!(
+        status.state(),
+        PacketStageState::Admitted
+            | PacketStageState::Uploading
+            | PacketStageState::AwaitingCompletion
+    ) && (status.uploaded_bytes() > 0 || status.create_calls_completed() > 0)
+}
+
+fn cancel_candidate_stage(context: &WorkerContext, key: ManagedStageKey) -> HarnessResult<()> {
+    context.control.request_cancel_through(key);
+    let deadline = Instant::now() + CAPTURE_DEADLINE;
+    loop {
+        match context.window_client.try_stage_event() {
+            ManagedWindowRead::Value(ManagedStageEvent::Cancelled { key: cancelled_key })
+                if cancelled_key == key =>
+            {
+                return Ok(());
+            }
+            ManagedWindowRead::Value(ManagedStageEvent::Failed {
+                key: failed_key,
+                error,
+            }) if failed_key == key => {
+                return Err(HarnessError::new(format!(
+                    "candidate stage failed while cancelling: {}",
+                    error.message()
+                )));
+            }
+            ManagedWindowRead::Value(ManagedStageEvent::Ready { key: ready_key, .. })
+                if ready_key == key => {}
+            ManagedWindowRead::Value(ManagedStageEvent::Deferred {
+                key: deferred_key, ..
+            }) if deferred_key == key => {}
+            ManagedWindowRead::Value(_) | ManagedWindowRead::Empty | ManagedWindowRead::Busy => {}
+            ManagedWindowRead::Closed => {
+                return Err(HarnessError::new(
+                    "window closed before candidate cancellation was acknowledged",
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::new(
+                "candidate stage cancellation stayed pending through its deadline",
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn request_resize_with_busy_retry(context: &WorkerContext) -> HarnessResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match context
+            .control
+            .try_request_resize(RESIZE_WIDTH, RESIZE_HEIGHT)
+        {
+            Ok(()) => return Ok(()),
+            Err(ManagedResizeRequestError::Busy) => {}
+            Err(error) => {
+                return Err(HarnessError::new(format!(
+                    "resize request {RESIZE_WIDTH}x{RESIZE_HEIGHT} rejected: {error}"
+                )));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::new(
+                "resize control slot stayed Busy through its deadline",
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn wait_for_resized_view(
+    context: &WorkerContext,
+    previous_present_sequence: u64,
+) -> HarnessResult<ManagedPresentedView> {
+    let deadline = Instant::now() + CAPTURE_DEADLINE;
+    let mut last_actual = None;
+    loop {
+        match context.window_client.try_presented() {
+            ManagedWindowRead::Value(view)
+                if view.present_sequence() > previous_present_sequence =>
+            {
+                if (view.physical_width(), view.physical_height()) == (RESIZE_WIDTH, RESIZE_HEIGHT)
+                {
+                    return Ok(view);
+                }
+                last_actual = Some((view.physical_width(), view.physical_height()));
+            }
+            ManagedWindowRead::Value(_) | ManagedWindowRead::Empty | ManagedWindowRead::Busy => {}
+            ManagedWindowRead::Closed => {
+                return Err(HarnessError::new(
+                    "window closed before a later actual resized presentation",
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::new(format!(
+                "resize was not observed in an actual later present: requested {RESIZE_WIDTH}x{RESIZE_HEIGHT}, last actual size {:?}",
+                last_actual
+            )));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn validate_resize_capture(
+    first: &CaptureRecord,
+    resized: &CaptureRecord,
+) -> HarnessResult<ResizeObservation> {
+    let actual = (
+        resized.view.physical_width(),
+        resized.view.physical_height(),
+    );
+    if actual != (RESIZE_WIDTH, RESIZE_HEIGHT) {
+        return Err(HarnessError::new(format!(
+            "OS actual size {actual:?} did not match the requested {RESIZE_WIDTH}x{RESIZE_HEIGHT}"
+        )));
+    }
+    if resized.view.present_sequence() <= first.view.present_sequence()
+        || resized.view.key() != first.view.key()
+        || resized.view.session() != first.view.session()
+        || resized.view.project_generation() != first.view.project_generation()
+        || resized.view.source_digest() != first.view.source_digest()
+        || resized.view.publication_sequence() != first.view.publication_sequence()
+        || resized.view.authority_snapshot_sequence() != first.view.authority_snapshot_sequence()
+        || resized.view.tick() != first.view.tick()
+        || resized.view.view() != first.view.view()
+        || resized.view.view_projection() == first.view.view_projection()
+    {
+        return Err(HarnessError::new(
+            "resize capture did not preserve the frame/camera identity while updating its actual aspect projection",
+        ));
+    }
+    if resized.rgba_row_bytes != RESIZE_WIDTH as usize * 4
+        || resized.copy_row_pitch_bytes <= resized.rgba_row_bytes
+        || resized.stripped_padding_bytes_per_row == 0
+    {
+        return Err(HarnessError::new(
+            "odd-width capture did not exercise padded copy rows and tightly packed RGBA output",
+        ));
+    }
+    let expected_clear = CLEAR_COLOR.map(linear_to_srgb_byte);
+    if !near_rgba(resized.background_sample.rgba, expected_clear, 3) {
+        return Err(HarnessError::new(
+            "resized capture background no longer matches the authored clear color",
+        ));
+    }
+    Ok(ResizeObservation {
+        requested_width: RESIZE_WIDTH,
+        requested_height: RESIZE_HEIGHT,
+        previous_width: first.view.physical_width(),
+        previous_height: first.view.physical_height(),
+        actual_width: resized.view.physical_width(),
+        actual_height: resized.view.physical_height(),
+        row_bytes: resized.rgba_row_bytes,
+        copy_row_pitch_bytes: resized.copy_row_pitch_bytes,
+        stripped_padding_bytes_per_row: resized.stripped_padding_bytes_per_row,
+        view_projection_changed: resized.view.view_projection() != first.view.view_projection(),
+    })
+}
+
 fn wait_for_readback(
     context: &WorkerContext,
     key: ManagedCaptureKey,
@@ -1142,6 +1918,8 @@ fn capture_to_record(
             rgba.len()
         )));
     }
+    let (rgba_row_bytes, copy_row_pitch_bytes, stripped_padding_bytes_per_row) =
+        capture_row_layout(width)?;
 
     let mut encoded = Vec::new();
     {
@@ -1224,7 +2002,23 @@ fn capture_to_record(
         overlay_sample,
         red_mesh_sample,
         red_mesh_pixel_count,
+        rgba_row_bytes,
+        copy_row_pitch_bytes,
+        stripped_padding_bytes_per_row,
     })
+}
+
+fn capture_row_layout(width: u32) -> HarnessResult<(usize, usize, usize)> {
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| HarnessError::new("capture row byte count overflow"))?;
+    let alignment = COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = row_bytes
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| HarnessError::new("padded capture row byte count overflow"))?;
+    Ok((row_bytes, padded, padded - row_bytes))
 }
 
 fn validate_view(
@@ -1248,7 +2042,10 @@ fn validate_view(
     Ok(())
 }
 
-fn validate_repeat_capture(first: &CaptureRecord, second: &CaptureRecord) -> HarnessResult<()> {
+fn validate_same_presented_frame(
+    first: &CaptureRecord,
+    second: &CaptureRecord,
+) -> HarnessResult<()> {
     if first.view.key() != second.view.key()
         || first.view.session() != second.view.session()
         || first.view.project_generation() != second.view.project_generation()
@@ -1261,7 +2058,7 @@ fn validate_repeat_capture(first: &CaptureRecord, second: &CaptureRecord) -> Har
         || second.view.present_sequence() <= first.view.present_sequence()
     {
         return Err(HarnessError::new(
-            "repeat captures did not preserve source/frame identity or advance actual presents",
+            "captures did not preserve source/frame identity or advance actual presents",
         ));
     }
     if first.surface_format != second.surface_format
@@ -1269,9 +2066,14 @@ fn validate_repeat_capture(first: &CaptureRecord, second: &CaptureRecord) -> Har
         || first.view.physical_height() != second.view.physical_height()
     {
         return Err(HarnessError::new(
-            "surface format or physical size changed between repeat captures",
+            "surface format or physical size changed between captures of the same presented frame",
         ));
     }
+    Ok(())
+}
+
+fn validate_repeat_capture(first: &CaptureRecord, second: &CaptureRecord) -> HarnessResult<()> {
+    validate_same_presented_frame(first, second)?;
     if first.background_sample.rgba == second.background_sample.rgba
         || first.overlay_sample.rgba == second.overlay_sample.rgba
     {
@@ -1286,6 +2088,22 @@ fn validate_repeat_capture(first: &CaptureRecord, second: &CaptureRecord) -> Har
             second.background_sample.rgba, expected_clear
         )));
     }
+    Ok(())
+}
+
+fn validate_old_ready_capture(first: &CaptureRecord, second: &CaptureRecord) -> HarnessResult<()> {
+    validate_same_presented_frame(first, second)?;
+    let expected_clear = CLEAR_COLOR.map(linear_to_srgb_byte);
+    if !near_rgba(second.background_sample.rgba, expected_clear, 3) {
+        return Err(HarnessError::new(format!(
+            "old-ready capture background {:?} did not match authored clear color {:?}",
+            second.background_sample.rgba, expected_clear
+        )));
+    }
+    // `capture_to_record` already requires a red-dominant mesh sample in each
+    // image. The initial loading overlay may darken that first capture, so
+    // this scenario checks the later known clear scene without imposing the
+    // capture scenario's overlay-transition pixel comparison.
     Ok(())
 }
 
@@ -1380,6 +2198,25 @@ fn finish_with_returned_owner(
         Scenario::CloseHeld if report.captures.len() != 1 || !report.readback_submitted => {
             return Err(HarnessError::new(
                 "close-held scenario did not read one submitted capture",
+            ));
+        }
+        Scenario::Resize if report.captures.len() != 2 || report.resize.is_none() => {
+            return Err(HarnessError::new(
+                "resize scenario did not produce two verified captures and actual-size metadata",
+            ));
+        }
+        Scenario::OldReady
+            if report.captures.len() != 2
+                || report.old_ready.as_ref().is_none_or(|observation| {
+                    !observation.old_frame_still_active
+                        || !observation.old_frame_selected
+                        || !observation.candidate_cancelled
+                        || observation.candidate.state == "Ready"
+                        || observation.after_capture.state == "Ready"
+                }) =>
+        {
+            return Err(HarnessError::new(
+                "old-ready scenario did not preserve and capture the active old frame during a pending candidate stage",
             ));
         }
         Scenario::WorkerDrop
@@ -1554,6 +2391,32 @@ fn write_report(
     let captures = report.captures.iter().map(capture_json).collect::<Vec<_>>();
     let window = report.window.as_ref().map(window_json);
     let observed_view = report.observed_view.as_ref().map(presented_json);
+    let resize = report.resize.as_ref().map(|observation| {
+        serde_json::json!({
+            "requested_physical_width": observation.requested_width,
+            "requested_physical_height": observation.requested_height,
+            "previous_actual_physical_width": observation.previous_width,
+            "previous_actual_physical_height": observation.previous_height,
+            "actual_physical_width": observation.actual_width,
+            "actual_physical_height": observation.actual_height,
+            "rgba_row_bytes": observation.row_bytes,
+            "copy_row_pitch_bytes": observation.copy_row_pitch_bytes,
+            "stripped_padding_bytes_per_row": observation.stripped_padding_bytes_per_row,
+            "view_projection_changed_for_actual_aspect": observation.view_projection_changed,
+        })
+    });
+    let old_ready = report.old_ready.as_ref().map(|observation| {
+        serde_json::json!({
+            "candidate_before_capture": stage_observation_json(&observation.candidate),
+            "candidate_after_capture": stage_observation_json(&observation.after_capture),
+            "coherent_status_present_sequence_after_capture": observation
+                .coherent_status_present_sequence
+                .map(|sequence| sequence.to_string()),
+            "old_frame_remained_active": observation.old_frame_still_active,
+            "captured_selected_old_frame": observation.old_frame_selected,
+            "candidate_cancelled_before_close": observation.candidate_cancelled,
+        })
+    });
     let renderer = report
         .window
         .as_ref()
@@ -1581,12 +2444,14 @@ fn write_report(
         })),
         "window": window,
         "observed_capture_view": observed_view,
+        "resize": resize,
+        "old_ready": old_ready,
         "readback_submitted": report.readback_submitted,
         "cleanup_complete": report.cleanup_complete,
         "unresolved_gpu_owner_retained": report.unresolved_gpu_owner_retained,
         "captures": captures,
         "drain_observations": report.drain_observations,
-        "limitations": ["no runtime SessionControl authority claim", "no resize or alternate-format claim", "no OS scanout claim"],
+        "limitations": scenario_limitations(scenario),
     });
     let text = serde_json::to_string_pretty(&json)
         .map_err(|error| HarnessError::new(format!("serialize report: {error}")))?;
@@ -1625,8 +2490,39 @@ fn capture_json(capture: &CaptureRecord) -> serde_json::Value {
         "loading_overlay_probe": sample_json(&capture.overlay_sample),
         "red_mesh_sample": sample_json(&capture.red_mesh_sample),
         "red_mesh_pixel_count": capture.red_mesh_pixel_count,
+        "rgba_row_bytes": capture.rgba_row_bytes,
+        "copy_row_pitch_bytes": capture.copy_row_pitch_bytes,
+        "stripped_padding_bytes_per_row": capture.stripped_padding_bytes_per_row,
         "presented": presented_json(&capture.view),
     })
+}
+
+fn stage_observation_json(observation: &StageObservation) -> serde_json::Value {
+    serde_json::json!({
+        "key": observation.key.to_string(),
+        "state": observation.state,
+        "project_generation": observation.project_generation.to_string(),
+        "source_digest": observation.source_digest,
+        "total_upload_bytes": observation.total_upload_bytes,
+        "uploaded_bytes": observation.uploaded_bytes,
+        "create_calls_completed": observation.create_calls_completed,
+        "initialization_complete": observation.initialization_complete,
+    })
+}
+
+fn scenario_limitations(scenario: Scenario) -> [&'static str; 3] {
+    match scenario {
+        Scenario::Resize => [
+            "no runtime SessionControl authority claim",
+            "no alternate surface-format claim",
+            "no OS scanout claim",
+        ],
+        Scenario::Capture | Scenario::CloseHeld | Scenario::WorkerDrop | Scenario::OldReady => [
+            "no runtime SessionControl authority claim",
+            "no resize or alternate-format claim",
+            "no OS scanout claim",
+        ],
+    }
 }
 
 fn presented_json(view: &ManagedPresentedView) -> serde_json::Value {

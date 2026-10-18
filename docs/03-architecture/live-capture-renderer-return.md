@@ -1,6 +1,6 @@
 # Live capture renderer의 반환 슬롯과 GPU 완료 경계
 
-상태: P02.3a.2 구현 중 계약, 실제 GPU 인수 전 · 2026-10-18
+상태: P02.3a.2 renderer 로컬 인수 통과 · 실제 범위는 [작업 기록](../06-worklog/2026-10-18-live-capture-renderer.md#a2-잔여-검증과-로컬-인수) · 2026-10-18
 
 ## 만든 이유
 
@@ -137,3 +137,12 @@ example `old-ready`는 실제로 다른 geometry/resource set을 갖는 두 번�
 `#[cfg(test)]` private one-shot interruption은 실제 queue.submit 직후 callback 등록 전, 실제 map 등록 후 같은 지점에서 unwind를 일으킨다. guard Drop은 durable cell을 보존하고 worker/반환 owner가 실제 queue-tail fence·map callback을 진행한 뒤만 buffer/frame pin을 해제한다. Empty/Drop/timeout을 GPU 완료로 쓰지 않는다. 일반 renderer package/CLI에는 fault setting API를 노출하지 않는다. 실제 map-error 경로는 실제 validation-safe failure를 주입할 수 있을 때 별도 검사하며 metadata flag 변경을 실제 adapter error로 표시하지 않는다.
 
 source 소유권은 D가 renderer library·private GPU test·manifest/export, C가 기존 example 시나리오다. public resize header를 먼저 공유하고 benchmark source probe를 복원한 뒤에만 두 source writer를 시작한다. Cargo는 한 담당만 소유하며 두 파일이 동결된 뒤 focused CPU/strict→private ignored GPU→main-thread native 순서로 확인한다. 기존 capture/close-held/worker-drop도 관련 source 변경 후 필요한 범위에서 회귀한다. full host/CLI/package 인수는 a.3/a.4에 남는다.
+
+
+추가 source 경계: 기존 offscreen 생성자는 Rgba8UnormSrgb를 고정하므로 실제 Unorm shader/clear 경로 검증에는 format 선택이 필요하다. D가 `renderer.rs`에 `#[cfg(test)] pub(crate)` format-selecting blocking constructor 하나를 추가하는 범위까지 소유한다. 기존 adapter/renderer 초기화 경로를 재사용하고 pipeline/shader 구현을 복제하지 않는다. production public 생성자의 기본 format·signature·런타임 동작은 유지하며 이 test helper를 renderer의 새 공개 format 선택 기능으로 계산하지 않는다. native surface의 실제 협상 증거와도 구분한다.
+
+
+old-ready 관측이 오래된 cached status를 새 결과로 오인하지 않도록, after-capture stage bracket은 같은 coherent `ManagedWindowStatus`의 `last_presented.present_sequence >= captured.present_sequence`를 만족할 때까지 기다린다. stage key/session/source도 일치해야 한다. window는 capture copy/present 뒤 staging과 last-presented를 status에 함께 게시하므로, 이 조건 없이 이전 pending summary를 다시 읽은 것만으로 capture 시점의 pending을 증명하지 않는다. 구현·기록에 이 최신성을 명시하며 status Busy를 성공이나 Ready 되돌리기로 숨기지 않는다.
+
+
+2026-10-18 후속 결과: 위 잔여 계약의 CPU104·실제 adapter GPU2·기존 생성자 GPU1·Metal native5 scenario를 통과해 a.2를 로컬 인수했다. 상세 source/binary/raw hash·기기/format 범위·미검증 제한은 작업 기록에 둔다. 이 문서 안의 구현 전/미통과 문장은 각 당시 순서의 기록이며 현재 host a.3 source 착수의 선행 renderer gate는 충족됐다. a.3/a.4와 상위 제품 게이트는 계속 열려 있다.

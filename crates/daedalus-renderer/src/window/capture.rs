@@ -1979,7 +1979,7 @@ pub(super) mod tests {
 
     use daedalus_content::{
         ByteMapSourceResolver, ImportCancellation, ImportLimits, MemoryCookCache, ProjectManifest,
-        prepare_project_with_assets,
+        ProjectPresentation, prepare_project_with_assets,
     };
     use daedalus_core::{RenderSnapshot, SessionId, Tick};
 
@@ -2005,8 +2005,12 @@ pub(super) mod tests {
     }
 
     pub(super) fn actual_cpu_frame() -> Arc<crate::CpuFrameHandle> {
-        let manifest = serde_json::to_vec(&ProjectManifest::new("capture-frame-pin"))
-            .expect("manifest serializes");
+        let mut manifest = ProjectManifest::new("capture-frame-pin");
+        manifest.presentation = Some(ProjectPresentation {
+            clear: Some([0.13, 0.34, 0.72, 0.37]),
+            ..ProjectPresentation::default()
+        });
+        let manifest = serde_json::to_vec(&manifest).expect("manifest serializes");
         let scene = br#"{"schema_version":1,"revision":0,"entities":[],"assets":[]}"#;
         let mut resolver = ByteMapSourceResolver::default();
         let mut cache = MemoryCookCache::default();
@@ -2343,3 +2347,7 @@ pub(super) mod tests {
 #[cfg(test)]
 #[path = "capture/ownership_tests.rs"]
 mod ownership_tests;
+
+#[cfg(test)]
+#[path = "capture/gpu_tests.rs"]
+mod gpu_tests;

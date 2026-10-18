@@ -38,6 +38,14 @@ const MAX_STAGE_DIAGNOSTIC_CODE_BYTES: usize = 64;
 const MAX_STAGE_DIAGNOSTIC_MESSAGE_BYTES: usize = 2048;
 static NEXT_RENDERER_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(all(test, feature = "window"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ManagedCaptureTestFault {
+    PanicAfterSubmitBeforeCallback,
+    PanicAfterMapRegistration,
+    AbortMapBeforePoll,
+}
+
 /// Per-combined-submit work limits for a GPU resource stage.
 ///
 /// Builders only lower the defaults. The upload limit is measured in raw
@@ -1303,6 +1311,14 @@ impl PacketRenderer {
             bytes: 0,
             _cpu_frame: None,
         });
+
+        #[cfg(all(test, feature = "window"))]
+        if self.take_managed_capture_test_fault(
+            ManagedCaptureTestFault::PanicAfterSubmitBeforeCallback,
+        ) {
+            panic!("injected unwind after capture copy submit and before callbacks");
+        }
+
         let watermark = Arc::clone(&self.completion_watermark);
         let callback_cell = Arc::clone(cell);
         self.renderer.queue.on_submitted_work_done(move || {
@@ -1322,7 +1338,32 @@ impl PacketRenderer {
                 move |result| callback_cell.set_map_result(key, result.is_ok())
             });
         cell.set_map_registered(key);
+
+        #[cfg(all(test, feature = "window"))]
+        if self.take_managed_capture_test_fault(ManagedCaptureTestFault::PanicAfterMapRegistration)
+        {
+            panic!("injected unwind after capture map registration");
+        }
+        #[cfg(all(test, feature = "window"))]
+        if self.take_managed_capture_test_fault(ManagedCaptureTestFault::AbortMapBeforePoll) {
+            // wgpu's documented unmap path completes a pending map callback with an error.
+            // This is a real map-abort exercise; queue completion remains a separate fence.
+            guard
+                .buffer()
+                .map_err(|_| ManagedCaptureFailure::CopyFailed)?
+                .unmap();
+        }
         Ok(true)
+    }
+
+    #[cfg(all(test, feature = "window"))]
+    fn take_managed_capture_test_fault(&mut self, fault: ManagedCaptureTestFault) -> bool {
+        if self.managed_capture_test_fault == Some(fault) {
+            self.managed_capture_test_fault = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Admits one resource-only CPU generation without creating GPU objects or

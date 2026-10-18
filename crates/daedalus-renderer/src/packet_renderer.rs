@@ -252,6 +252,8 @@ pub struct PacketRenderer {
     stage_state: staging::StageState,
     #[cfg(feature = "window")]
     managed_capture_cell: Option<Arc<ManagedCaptureCell>>,
+    #[cfg(all(test, feature = "window"))]
+    managed_capture_test_fault: Option<staging::ManagedCaptureTestFault>,
 }
 
 /// The packet and exact camera/projection used for one successful submission.
@@ -594,6 +596,8 @@ impl PacketRendererInitOwner {
             stage_state: plan.stage_state,
             #[cfg(feature = "window")]
             managed_capture_cell: None,
+            #[cfg(all(test, feature = "window"))]
+            managed_capture_test_fault: None,
         }
     }
 }
@@ -622,6 +626,24 @@ impl PacketRenderer {
     #[cfg(any(feature = "window", test))]
     pub(crate) fn device(&self) -> &wgpu::Device {
         &self.renderer.device
+    }
+
+    #[cfg(all(test, feature = "window"))]
+    pub(crate) fn panic_after_capture_submit_for_test(&mut self) {
+        self.managed_capture_test_fault =
+            Some(staging::ManagedCaptureTestFault::PanicAfterSubmitBeforeCallback);
+    }
+
+    #[cfg(all(test, feature = "window"))]
+    pub(crate) fn panic_after_capture_map_registration_for_test(&mut self) {
+        self.managed_capture_test_fault =
+            Some(staging::ManagedCaptureTestFault::PanicAfterMapRegistration);
+    }
+
+    #[cfg(all(test, feature = "window"))]
+    pub(crate) fn abort_capture_map_before_poll_for_test(&mut self) {
+        self.managed_capture_test_fault =
+            Some(staging::ManagedCaptureTestFault::AbortMapBeforePoll);
     }
 
     #[cfg(test)]

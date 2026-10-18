@@ -12,7 +12,7 @@ use std::{
 use glam::Vec3;
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalPosition},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -1528,6 +1528,73 @@ impl WindowApp {
         }
     }
 
+    fn reconfigure_surface_to_actual_size(
+        &mut self,
+        size: PhysicalSize<u32>,
+        observed_resize_event: bool,
+    ) -> Result<(), RendererError> {
+        if observed_resize_event {
+            self.counters.resize_count = self.counters.resize_count.saturating_add(1);
+        }
+        self.final_width = size.width;
+        self.final_height = size.height;
+        if size.width > 0 && size.height > 0 {
+            self.validate_current_dimensions(size.width, size.height)?;
+            let device = self
+                .renderer
+                .as_ref()
+                .map(|renderer| &renderer.device)
+                .or_else(|| self.packet_renderer.as_ref().map(PacketRenderer::device))
+                .or_else(|| {
+                    self.gpu_owner.as_mut().and_then(|owner| {
+                        if owner.phase() == WindowGpuOwnerPhase::PacketRendererReady {
+                            owner
+                                .packet_renderer_mut()
+                                .map(|renderer| renderer.device())
+                        } else {
+                            owner.renderer().map(|renderer| &renderer.device)
+                        }
+                    })
+                });
+            if let (Some(device), Some(surface_state)) = (device, &mut self.surface) {
+                surface_state.config.width = size.width;
+                surface_state.config.height = size.height;
+                surface_state
+                    .surface
+                    .configure(device, &surface_state.config);
+            }
+        }
+        if observed_resize_event {
+            self.emit_input(WindowInput::Resized {
+                width: size.width,
+                height: size.height,
+            });
+        }
+        Ok(())
+    }
+
+    fn apply_pending_managed_resize(&mut self, event_loop: &ActiveEventLoop) {
+        let request = self
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.server.shared.try_take_resize_request());
+        let Some((width, height)) = request else {
+            return;
+        };
+        let actual_size = self
+            .window
+            .as_ref()
+            .and_then(|window| window.request_inner_size(PhysicalSize::new(width, height)));
+        if let Some(actual_size) = actual_size
+            && let Err(error) = self.reconfigure_surface_to_actual_size(actual_size, false)
+        {
+            self.fail_managed(
+                event_loop,
+                ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string()),
+            );
+        }
+    }
+
     fn is_loading(&self) -> bool {
         self.loading_since.is_some()
     }
@@ -1737,6 +1804,11 @@ impl WindowApp {
                 "renderer initialization did not produce a ready renderer",
             )
         })?;
+        if let Some(managed) = &self.managed {
+            managed.server.shared.set_max_device_texture_dimension(
+                renderer.device.limits().max_texture_dimension_2d,
+            );
+        }
         renderer
             .validate_dimensions(config.width, config.height)
             .map_err(|error| {
@@ -3391,42 +3463,19 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             WindowEvent::Resized(size) => {
-                self.counters.resize_count = self.counters.resize_count.saturating_add(1);
-                self.final_width = size.width;
-                self.final_height = size.height;
-                if size.width > 0 && size.height > 0 {
-                    if let Err(error) = self.validate_current_dimensions(size.width, size.height) {
+                if let Err(error) = self.reconfigure_surface_to_actual_size(size, true) {
+                    if self.mode == WindowMode::Managed {
+                        self.fail_managed(
+                            event_loop,
+                            ManagedWindowError::new(
+                                ManagedWindowErrorCode::Renderer,
+                                error.to_string(),
+                            ),
+                        );
+                    } else {
                         self.fail(event_loop, error);
-                        return;
-                    }
-                    let device = self
-                        .renderer
-                        .as_ref()
-                        .map(|renderer| &renderer.device)
-                        .or_else(|| self.packet_renderer.as_ref().map(PacketRenderer::device))
-                        .or_else(|| {
-                            self.gpu_owner.as_mut().and_then(|owner| {
-                                if owner.phase() == WindowGpuOwnerPhase::PacketRendererReady {
-                                    owner
-                                        .packet_renderer_mut()
-                                        .map(|renderer| renderer.device())
-                                } else {
-                                    owner.renderer().map(|renderer| &renderer.device)
-                                }
-                            })
-                        });
-                    if let (Some(device), Some(surface_state)) = (device, &mut self.surface) {
-                        surface_state.config.width = size.width;
-                        surface_state.config.height = size.height;
-                        surface_state
-                            .surface
-                            .configure(device, &surface_state.config);
                     }
                 }
-                self.emit_input(WindowInput::Resized {
-                    width: size.width,
-                    height: size.height,
-                });
             }
             WindowEvent::Focused(focused) => {
                 if !focused {
@@ -3589,6 +3638,10 @@ impl ApplicationHandler for WindowApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.mode == WindowMode::Managed {
             self.drain_managed_inputs(event_loop);
+            if self.managed_failure.is_some() || self.exit_reason.is_some() {
+                return;
+            }
+            self.apply_pending_managed_resize(event_loop);
             if self.managed_failure.is_some() || self.exit_reason.is_some() {
                 return;
             }

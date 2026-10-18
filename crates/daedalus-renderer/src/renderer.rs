@@ -299,6 +299,15 @@ impl Renderer {
     /// Adapter absence is an explicit error; the renderer never substitutes a
     /// placeholder image or a no-op backend.
     pub async fn new_offscreen() -> Result<Self, RendererError> {
+        Self::new_offscreen_with_format(wgpu::TextureFormat::Rgba8UnormSrgb).await
+    }
+
+    async fn new_offscreen_with_format(format: wgpu::TextureFormat) -> Result<Self, RendererError> {
+        let (instance, adapter) = Self::request_offscreen_adapter().await?;
+        Self::from_adapter(instance, adapter, format).await
+    }
+
+    async fn request_offscreen_adapter() -> Result<(wgpu::Instance, wgpu::Adapter), RendererError> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -308,12 +317,34 @@ impl Renderer {
             })
             .await
             .map_err(|error| RendererError::NoAdapter(error.to_string()))?;
-        Self::from_adapter(instance, adapter, wgpu::TextureFormat::Rgba8UnormSrgb).await
+        Ok((instance, adapter))
     }
 
     /// Synchronous convenience constructor for command-line capture tools.
     pub fn new_offscreen_blocking() -> Result<Self, RendererError> {
         pollster::block_on(Self::new_offscreen())
+    }
+
+    /// Test-only format selection for checking linear/sRGB and RGBA/BGRA paths
+    /// against the same initialized renderer implementation.
+    #[cfg(all(test, feature = "window"))]
+    pub(crate) fn new_offscreen_blocking_with_format_for_test(
+        format: wgpu::TextureFormat,
+    ) -> Result<Self, RendererError> {
+        pollster::block_on(async move {
+            let (instance, adapter) = Self::request_offscreen_adapter().await?;
+            let required = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+            if !adapter
+                .get_texture_format_features(format)
+                .allowed_usages
+                .contains(required)
+            {
+                return Err(RendererError::InvalidScene(format!(
+                    "test adapter does not support {format:?} with {required:?}"
+                )));
+            }
+            Self::from_adapter(instance, adapter, format).await
+        })
     }
 
     pub fn info(&self) -> &RendererInfo {

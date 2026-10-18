@@ -1,6 +1,6 @@
 # Live capture host·encoder·artifact reader 계약
 
-상태: P02.3a.3 구현 전 source 감사·root 설계, a.2 인수 대기 · 2026-10-18
+상태: P02.3a.3 header 동결·source 착수 승인, a.2 로컬 인수 통과 · 2026-10-18
 
 ## 만든 이유
 
@@ -103,3 +103,26 @@ facade Drop은 stop 요청만 하고 window callback에서 wait/join/I/O를 하�
 필수 CPU 회귀는 default unavailable·real readiness 전달·정확한 generation→stage routing·coordinator take/transfer panic·stop race·Busy completion 시 encode1회·write 상한/실패·partial 삭제·weak cycle 부재·각 strong owner 단독 retention·reader-held shutdown이다. 실제 PNG는 decode/hash/색/identity를 검사하고, 실제 GPU/host 연결은 a.2/3 native proof와 a.4 같은 창의 mutation→Step→capture→ACK→다음 capture로 확인한다. source 제안이나 CPU synthetic metadata를 실제 PNG/장치 검증으로 계산하지 않는다.
 
 이번 문서는 host 구현 승인이 아니다. a.2 미통과, a.3/a.4·상위 P02.3a·D1/D2/D3도 미통과다.
+
+
+## a.3 소유자 사이의 header·실패 순서 보완
+
+2026-10-18 현재 source 대조에서 확인한 연결 조건이다. 구현 승인은 여전히 a.2 뒤이며, 이 보완은 세 파일을 병렬 작성할 때 필수 routing/metadata가 빠져 다시 작성하는 반복을 줄이기 위한 것이다.
+
+| Private 경계 | 고정할 소유권/호출 조건 |
+| --- | --- |
+| `RoutedCapture` | 원래 `Box<CaptureRequest>`와 coordinator가 실제 generation record에서 찾은 `ManagedStageKey`를 함께 전달. ingress Busy는 같은 struct/Box 반환. CPU가 generation 숫자로 stage key를 재구성하지 않음 |
+| `CaptureIngress` | 시작 전 만든 공유 slot1·OOB transfer fence. `try_send/try_take`는 nonwaiting. `close_transfer_fence`는 coordinator가 take한 요청의 transfer/typed 처분 뒤만 호출. `is_drained`는 fence closed AND slot empty이며 lock Busy는 false |
+| `CapturePublicationRegistry` | 실제 `PacketCpuOwner::status().frame_slots_limit`을 한도로 사용. frame 송신 전 same pointer/opaque identity/key를 idempotent 등록, expired Weak만 prune. selected lookup은 readback read/cleanup 전에 수행하고 Busy는 원래 handle 보존 |
+| `EncodeJob` | actual publication·**actual present_sequence**·view·format/encoding·ID·weak interest·독립 work lease와 move된 RGBA Vec. strong request/capability/responder를 encoder에 넘기지 않음 |
+| encoder client/owner | capacity1 job/result·Starting/Ready/Stopping/Stopped/Failed 상태. submit Busy는 같은 job/Vec 반환. request_stop은 OOB, owner try_finish는 is_finished 뒤만 join |
+| immutable artifact binding | ID/path/완결 metadata만 공유. registry는 weak interest+work lease, public lease/reader는 strong capability+binding. 서로 강한 참조 cycle을 만들지 않음 |
+
+encoder spawn caller는 thread 생성만 하며 spool directory create/open/delete는 encoder worker의 비동기 bootstrap에서 수행한다. renderer Ready와 encoder의 실제 Ready를 모두 확인한 뒤만 runtime Ready를 게시한다. bootstrap I/O 실패는 capture Failed·handoff detach로 보고하고 unrelated Unsupported 사유나 성공으로 바꾸지 않는다. host/CPU/window callback에서 bootstrap 파일 작업을 대신하지 않는다.
+
+partial/unpublished 파일은 실패 시 interest가 살아 있어도 삭제한다. CPU의 pending request 자체가 strong capability를 보유하기 때문에 weak interest 소멸만 기다리면 실패 cleanup이 자기 자신을 기다릴 수 있다. encoder는 partial path·work lease·정리 상태를 per-job catch 바깥에 설치하고, 실제 삭제 뒤만 work lease를 해제한다. 성공해 공개된 파일만 weak interest 소멸을 기다린다. responder Busy는 같은 completion을 재시도하며 다시 encode하지 않는다. responder Closed/timeout 뒤 request를 처분해도 독립 cleanup work lease는 실제 GPU/파일 정리까지 남는다.
+
+host startup 오류에도 fence가 열린 채 CPU owner를 남기지 않는다. coordinator spawn 이전 실패는 transfer를 소유한 startup guard가 detach/이미 취득한 요청 처분/transfer-fence close를 마감한다. encoder thread 생성 뒤 다른 초기화가 실패한 경우에도 encoder stop·private spool 정리 ownership을 남긴다. 이 경계는 constructor 성공 경로와 별도로 회귀한다. source/actual publication 비교는 public session/generation/digest getter를 사용하는 host의 한 helper로 통일하며 runtime private matcher의 visibility를 추측해 호출하지 않는다.
+
+
+2026-10-18 승인 갱신: [a.2 실제 인수](../06-worklog/2026-10-18-live-capture-renderer.md#a2-잔여-검증과-로컬-인수)를 확인했으므로 위 보완 header와 소유권으로 a.3 source 작성을 승인한다. 이는 실제 host PNG/reader/shutdown 성공 또는 a.3 완료가 아니다. 과거 본문의 미승인/대기 문장은 당시 계약 작성 순서의 기록이다.

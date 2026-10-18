@@ -75,3 +75,10 @@ Luna xhigh device 작업자는 `packet_renderer.rs`, 필요 시 그 private subm
 CPU planning/admission·union victim·partial coverage·checked serial/ledger·quota·cancel·foreign IDs·Ready/last-use 구분·max slots1/2의 회귀를 검사한다. 실제 GPU ignored tests는 old-ready pixels를 유지한 여러 pump→Ready→새 actual frame pixels·resource reuse·취소 partial의 cache 미승격·drain을 확인한다. ledger/completion 주입은 deterministic saturation 근거로만 기록하며 실제 stall 시간을 측정한 것으로 부르지 않는다. existing public model/sprite pixel tests도 보존한다. native host/SDK·package/CI/main과 전체 b.3 인수는 후속이다.
 
 2026-10-17 source 감사는 낮춘 scratch1MiB에서도 raw quota4MiB chunk를 그대로 예약해 streamable geometry를 거부하고, padded256byte texture를 staging cap128에 접수한 뒤 clear 경로에서 영구 Busy가 되는 결함을 확인했다. 위 effective/headroom 규칙은 이 결함의 수정 계약이며 아직 통과 증거가 아니다. 기본 quota 그대로의 lowered scratch/staging 진행, dirty active frame과 한 submit의 headroom 공유, padded 최소 단위의 효과 전 영구 거부·정직한 transient Busy 회귀를 추가한 뒤 인수한다.
+
+
+## 2026-10-18 혼합 pipeline 초기화의 create-call 계산
+
+실제 model+sprite CLI bootstrap에서 기존 per-task preflight가 공유 texture layout을 두 번 예약하는 source 결함을 확인했다. 빈 renderer에서 model task와 sprite task를 각각 계산하면4+4이지만, 실제 실행은 첫 task가 layout을 만든 뒤4+3의7개 호출이다. 기존 실행의 actual/planned 동등성 검사가 이를 CounterExhausted로 거부했다. 이는 실제 정수 고갈·메모리 한도 부족의 근거가 아니다. 실패 raw와 후속 검증은 [통합 기록](../06-worklog/2026-10-18-native-host-integration.md)에 남긴다.
+
+batch 계획과 effect 전 preflight는 선택한 앞선 task가 생성할 공유 layout을 같은 작은 가상 상태로 반영한다. 같은 batch에서 공유 layout create를 한 번만 세며 다음 batch는 renderer의 실제 현재 상태에서 다시 시작한다. execution의 실제 create-call 계수와 일치 검사는 유지한다. 개별 pipeline task의 atomic 최소 비용, pump 한도8, 부분 handle 보존과 실패 소유권 계약을 약화하지 않는다. 예산을 늘리거나 비교를 지우지 않는다. 기존 model-only/sprite-only와 빈 renderer의 혼합 initial stage/실제 frame 회귀를 검사한 뒤 실제 CLI를 다시 실행한다.

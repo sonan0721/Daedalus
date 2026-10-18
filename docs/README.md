@@ -64,6 +64,7 @@
 | [Headless CPU 세대 commit](03-architecture/headless-asset-generation.md) | P03.3b.2의 동일 authority·Stage/Commit/replay·초기 source consume·worker 회수·frame identity를 장치 연결 전에 검증 |
 | [Render 세대 staged 준비·표시](03-architecture/staged-render-asset-generation.md) | P03.3b.3의 제한된 GPU 업로드·last-good pin·native lease/CPU 회수·실제 present ACK를 동결하기 위한 source 기반 상세 초안 |
 | [Native project host](03-architecture/native-project-host.md) | typed 실행·consumer port·publication·CPU backing/종료를 CLI 밖의 공개 엔진 조합 경계로 만드는 구체 설계안 |
+| [Native host 실제 통합 기록](06-worklog/2026-10-18-native-host-integration.md) | 혼합 모델·스프라이트의 실제 CLI 창/세대 교체에서 발견한 결함과 수정·인수 범위를 추적 |
 | [Native renderer owner 수명](03-architecture/native-renderer-owner-lifecycle.md) | device/packet 부분 초기화·paired create panic·managed 창 반환·worker final drop의 구현 전 소유권 계약 |
 | [Managed packet 창](03-architecture/managed-packet-window.md) | resource-only 초기 loading·유한 stage/frame 전달·OOB 취소·실제 present ACK·오류에도 owner를 반환하는 기존 창 확장 계약 |
 | [CLI view activation](03-architecture/native-project-view-activation.md) | host를 유일한 실행 owner로 소비하는 CLI 경계·flag·report v2·실제 표시/종료 관측과 기존 경로 호환 계약 |

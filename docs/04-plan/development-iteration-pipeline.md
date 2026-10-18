@@ -93,7 +93,7 @@ P02의 [공통 service](../03-architecture/session-control-service.md)와 [ADR-0
 
 P02.1c는 [legacy 결과 수명](../03-architecture/legacy-session-result-lifetimes.md)의 CreditPool/RAII를 사용해 제출·소비·실패마다 수동 반환하는 중복을 줄인다. fixture actor/일반 project의 의미는 그대로 나눈다. pop 직후 panic의 lost ID는 단순 accounting 변경과 별개로 Unknown terminal을 검증한다. 공통 credit 구현과 failure/종료 회귀는 root workspace CPU 200건·기존 project CPU18·실제 loading window 종료로 확인했다. 코드량·개발 시간 개선율을 측정한 것은 아니며 전체 DEV01 완료도 아니다.
 
-P02.3a의 [live capture 계약](../03-architecture/live-capture-and-artifacts.md)은 동일 ticket→render handoff→실제 frame PNG→artifact lease로 AI 관찰 경로를 만든다. image bytes는 별도 budget이며 blocking batch capture로 대체하지 않는다. 아직 설계 리뷰 중이다. 기존 smoke backend를 확장하고 필요한 실제 GPU/OS 검증을 유지해 새로운 자동화가 검증을 생략하지 않도록 한다.
+P02.3a의 [live capture 계약](../03-architecture/live-capture-and-artifacts.md)은 동일 ticket→render handoff→실제 frame PNG→artifact lease로 AI 관찰 경로를 만든다. image bytes는 별도 budget이며 blocking batch capture로 대체하지 않는다. runtime a.1과 renderer a.2는 로컬 인수를 통과했고 host a.3 연결 중이다. 기존 smoke backend를 확장하고 필요한 실제 GPU/OS 검증을 유지해 새로운 자동화가 검증을 생략하지 않도록 한다.
 
 P03.1은 네 포맷마다 별도 project reader·cache·CLI를 만드는 반복을 줄이는 구현이다. native/byte resolver→bounded 공통 context→포맷 driver→immutable catalog를 한 pipeline으로 만들고 CLI cook은 adapter만 둔다. 새 smoke framework 대신 기존 helper의 opt-in `--assets`를 사용한다. 실제 공개 원본 확인은 별도 [출처 기록](../02-research/asset-validation-provenance.md)에 두며 CI smoke에 네트워크 의존을 추가하지 않는다.
 
@@ -270,6 +270,10 @@ strict 검사에서 찾은 큰 dispatch error는 최초 생성한 request를 한
 마지막 client-role/ID assertion-only 수정 뒤에는 담당자의 focused14·strict를 마치고 source hash와 Cargo lease를 root에게 넘겼다. package별 전체 검사를 또 반복하는 대신 root가 최종 workspace414·check/fmt/strict를 수행했다. Python72는 독립 source라 compile/test와 병행했다. 같은 shared target을 유지하고 cold workspace나 새 test framework를 만들지 않았다. 최종 workspace 실행의47.703초는 해당 snapshot 한 번의 관측이며 다른 범위의 과거 실행과 속도 배율로 비교하지 않는다.
 
 주기적인 source/doc commit은 유지하고 실제 GPU/host/CLI capture가 이어진 a.4에서 두 package·다섯 CI·다운로드 native proof·main 동일 tree를 인수한다. a.1의 로컬 checkpoint를 이유로 이 최종 gate를 생략하지 않는다. 실제 같은 frame의 edit→Step→capture→assert 자동화·MCP·trace와 전체 DEV04/06은 계속 미완료다.
+
+[a.2 로컬 인수](../06-worklog/2026-10-18-live-capture-renderer.md#a2-잔여-검증과-로컬-인수)는 renderer CPU104·실제 GPU2/기존 ctor1·Metal native5 scenario를 확인했다. RGBA Vec의 move 반환은 renderer API에 구현됐고, 이를 encoder까지 복사 없이 연결하는 host 경로는 a.3에서 별도로 인수한다. native proof는 frozen binary 한 개를 여러 scenario에 재사용했으며 각 실행을 build와 묶지 않았다. 실제 host/CLI authority와 연결하지 않은 fixture라는 제한도 유지한다.
+
+a.3에서는 coordinator·CPU owner·encoder를 각각 다른 source 소유자에게 배정하고, 같은 ignored API artifact의 version/hash를 공유한 뒤 구현한다. 첫 header 리뷰에서 빠진 renderer client·CPU ingress drain·실제 session binding·renderer/encoder readiness 전달을 source 결합 전에 고쳤다. 완료한 API02를 기준으로 독립 source 작업을 진행하고, crate 전체가 동결된 뒤 한 담당자만 Cargo를 실행한다. 이 방식은 재작성·cache/lock 경쟁을 줄이기 위한 조정이며 개발 시간 감소율을 실측한 것은 아니다. [host 작업 기록](../06-worklog/2026-10-18-live-capture-host.md)에 actual PNG/reader/shutdown 결과를 후속 기록한다.
 
 ## Rust 컴파일 가속 조사와 적용 순서
 

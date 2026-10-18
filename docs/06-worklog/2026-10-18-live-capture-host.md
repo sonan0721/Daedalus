@@ -17,11 +17,14 @@
 
 A가 public/private DTO·constructor·error variants·getter를 먼저 동결하고 C/D가 그 실제 header를 사용한다. 같은 file을 여러 담당이 수정하지 않는다. Cargo.lock은 A만 소유하며 pinned graph의 png0.18.1/sha2 0.10.9를 재사용한다. compiler lease는 A 한 명이며 다른 담당 source가 해당 crate의 compiler 입력을 바꿀 때는 기다린다. renderer source는 a.2 commit084bb83으로 동결했다. a.3에서 CLI protocol/source나 외부 게임을 만들지 않는다.
 
+API02 합의 원본은 ignored `dist/project-evidence/p02-capture-host-api-02.md`, SHA-256 `df1addfb3f068bc75e526c752e4f81c615391ea2ee0082a179c995579d87c82c`다. 앞선 API01도 덮어쓰지 않았다. review에서 실제 session binding·CPU ingress-drain/renderer client·encoder와 renderer 상태 전달·실패 health/실제 종료 구분을 보완한 뒤 세 담당자의 source 착수를 확정했다. 이 artifact는 통신 중 가정을 맞추기 위한 header이며 실행 증거가 아니다.
+
 ## 동결한 핵심 경계
 
 - capture opt-in default off, 기존 service/actor/consumer를 확장한다. actual renderer와 encoder bootstrap이 Ready인 뒤만 runtime Ready다.
 - capture 모드는 host start에서 channel/worker를 CPU spawn 전에 준비하고 window client/server만 `run_view`까지 보관한다. 채널 생성은 장치 Ready가 아니며, 창을 열지 않은 종료도 검증한다. capture-off의 기존 channel 생성 시점은 유지한다.
 - runtime request는 take 직후 durable coordinator slot에 설치하고 실제 stage key와 함께 같은 Box로 ingress를 통과한다. fence는 take한 요청의 transfer/확정 처분 뒤만 닫는다.
+- renderer key는 channel 전체의 checked 단조 counter로 할당한다. client별 runtime sequence와 혼용하지 않고 Busy 때 같은 key를 유지한다.
 - frame 송신 전 actual opaque publication/key/Weak binding을 예약한다. CPU owner는 selected Weak를 대조하고 실제 token을 고정한 뒤 pixels를 읽는다.
 - CPU loop는 readback/fence·준비/GPU poll을 계속 진행하고 RGBA Vec를 단일 encoder로 move한다. PNG encode·파일 작업을 CPU/window callback에 넣지 않는다.
 - 독립 work lease와 partial path/cleanup 상태는 job catch 바깥에 둔다. partial 실패 정리는 interest가 살아 있어도 진행하고, 완결 file은 마지막 interest 뒤 실제 삭제해야 credit을 반환한다.

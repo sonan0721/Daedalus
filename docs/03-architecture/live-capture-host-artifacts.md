@@ -15,7 +15,7 @@ Luna의 읽기 전용 감사는 `host.rs::NativeProjectHost::start`·`run_coordi
 ```rust
 NativeProjectHostOptions::with_live_capture(self) -> Self
 NativeProjectHostControl::try_capture_status()
-    -> Result<NativeProjectCaptureStatus, HostControlError>
+    -> Result<NativeProjectCaptureStatus, NativeCaptureStatusError>
 NativeProjectHostControl::try_acquire_capture_artifact(
     &self, capability: &CaptureArtifactCapability,
 ) -> Result<NativeCaptureArtifactLease, NativeArtifactAccessError>
@@ -27,7 +27,7 @@ NativeCaptureArtifactLease::copy_to(&self, writer: &mut impl Write)
     -> Result<(), NativeArtifactIoError>
 ```
 
-이는 source 착수용 역할/signature 제안이며 정확한 type/enum·getter는 담당자가 consumer에게 먼저 공유한다. `capture` feature는 기존 `window`와 optional direct `png=0.18.1`, `sha2=0.10.9`를 활성화하는 안이다. 두 crate는 현재 lock graph에 이미 있으며 새 버전을 추정 추가하지 않는다. CLI feature/package 연결은 a.4에서 별도로 동결한다.
+이는 source 착수용 동결 header다. `NativeProjectCaptureLifecycle`은 Starting/Ready(info)/Unsupported(reason)/Detached/Stopping/Stopped/Failed(failure)를 구분한다. status는 session/lifecycle/encoder_state/pending_jobs/retained_png_bytes/cleanup_pending/failure getter를 제공하며 공개 getter의 반환 type도 공개 re-export한다. `NativeCaptureStatusError`는 Unavailable/Busy/Poisoned다. 정확한 private DTO·enum/getter는 API02를 기준으로 담당자 사이에 공유했다. `capture` feature는 기존 `window`와 optional direct `png=0.18.1`, `sha2=0.10.9`를 활성화한다. 두 crate는 현재 lock graph에 이미 있으며 새 버전을 추정 추가하지 않는다. CLI feature/package 연결은 a.4에서 별도로 동결한다. header 합의가 구현·검증 성공은 아니다.
 
 status는 Starting/Ready/Unsupported/Detached와 작은 작업 phase·byte count·cleanup 상태만 담는다. 실제 renderer handshake를 반영하며 초기 flag만으로 Ready를 만들지 않는다. path·image payload·GPU object를 넣지 않는다. capture를 요청하는 경로는 기존 SessionOperation/RequestTicket이다.
 
@@ -43,6 +43,8 @@ status는 Starting/Ready/Unsupported/Detached와 작은 작업 phase·byte count
 
 `PendingCapture`는 runtime request/responder·독립 work lease·renderer key·readback/cleanup handle·encoder 상태·재시도할 compact completion을 소유한다. coordinator나 encoder job 하나의 unwind로 이 record가 먼저 떨어지지 않는다. 원래 boxed renderer request도 Busy 재시도에 그대로 보존한다.
 
+renderer의 `ManagedCaptureKey`는 channel 전체에서 0이 아니며 단조 증가해야 한다. runtime ticket sequence는 client별이므로 그 값만 renderer key로 재사용하지 않는다. CPU owner가 별도 checked counter로 pending capture마다 한 번 할당하고 Busy에는 같은 key/Box를 재사용한다. full runtime artifact ID와 renderer key의 역할을 구분하며, counter 소진은 wrap 없이 typed failure로 처리한다. 서로 다른 client의 같은 ticket sequence도 별개 capture로 진행하는 CPU 회귀를 포함한다.
+
 ## CPU owner와 단일 encoder/I/O subworker
 
 capture opt-in 때만 **capacity1 job/result lane을 가진 encoder/I/O subworker 하나**를 만든다. 일반 job pool이나 두 번째 actor가 아니다. session image slot1개와 같은 부하 상한이며, 기존 CPU owner의 frame/stage/GPU Poll을 blocking 파일 작업에서 분리하기 위한 것이다.
@@ -53,6 +55,24 @@ capture opt-in 때만 **capacity1 job/result lane을 가진 encoder/I/O subworke
 | 기존 CPU owner | runtime cancellation/deadline 관측·renderer return/fence·worker-side map/view/rowcopy/unmap/final buffer drop·completion retry·GPU owner drain |
 | encoder/I/O subworker | 전달받은 RGBA의 PNG encode·증분 SHA-256·spool 생성/완결/삭제·job panic 정리 |
 | registry/reader | immutable file binding과 weak interest·work lease, 검증된 native 읽기 수명 |
+
+```mermaid
+flowchart LR
+    Actor[기존 runtime actor / ticket] --> Coordinator[coordinator의 durable request]
+    Coordinator -->|원래 request와 실제 stage key| CPU[기존 CPU owner / PendingCapture]
+    CPU -->|capture 요청| GPU[같은 window / device]
+    GPU -->|실제 readback / fence| CPU
+    CPU -->|RGBA Vec move| Encoder[encoder / I/O worker 하나]
+    Encoder -->|완결 파일과 weak interest / work| Registry[artifact registry]
+    Encoder -->|완결 metadata / typed failure| CPU
+    CPU -->|compact completion| Actor
+    Actor -->|strong capability| Reader[native lease / reader]
+    Registry -->|인증된 immutable binding| Reader
+    Reader -. 마지막 interest 해제 .-> Encoder
+    Encoder -. 실제 파일 삭제 뒤 work 해제 .-> Registry
+```
+
+이 흐름에서 PNG encode·파일 작업은 encoder에만 있다. reader의 명시적 open/read는 registry lock 밖의 SDK 호출이다. GPU return과 renderer-cell 정리는 계속 CPU owner가 진행한다.
 
 `ManagedCapturePixels::into_parts()`의 Vec를 move해 encoder job으로 넘긴다. 전달만을 위한 최대32MiB 복사를 추가하지 않는다. encoder의 per-job catch 바깥에 partial/final spool cleanup 상태를 둔다. job이 panic해도 partial 제거와 typed failure를 마감한다. runtime request/work lease는 CPU owner의 durable record에 계속 남는다. 전체 owner thread/process abort까지 회복한다고 선언하지 않는다.
 
@@ -100,6 +120,8 @@ registry는 full opaque CaptureArtifactId·session/host binding·weak interest·
 
 facade Drop은 stop 요청만 하고 window callback에서 wait/join/I/O를 하지 않는다. `try_shutdown`은 reader-held/cleanup 상태 동안 Stopping이며 finished worker만 join한다.
 
+public capture Stopped도 encoder thread 종료만으로 게시하지 않는다. CPU owner가 ingress fence·pending responder·renderer cell/readback·encoder result/파일 작업의 정리와 encoder join을 모두 확인한 final drained 신호를 요구한다. encoder health Failed는 정리 완료를 뜻하지 않으며 실제 남은 cleanup은 별도 상태로 유지한다.
+
 필수 CPU 회귀는 default unavailable·real readiness 전달·정확한 generation→stage routing·coordinator take/transfer panic·stop race·Busy completion 시 encode1회·write 상한/실패·partial 삭제·weak cycle 부재·각 strong owner 단독 retention·reader-held shutdown이다. 실제 PNG는 decode/hash/색/identity를 검사하고, 실제 GPU/host 연결은 a.2/3 native proof와 a.4 같은 창의 mutation→Step→capture→ACK→다음 capture로 확인한다. source 제안이나 CPU synthetic metadata를 실제 PNG/장치 검증으로 계산하지 않는다.
 
 이번 문서는 host 구현 승인이 아니다. a.2 미통과, a.3/a.4·상위 P02.3a·D1/D2/D3도 미통과다.
@@ -121,6 +143,8 @@ facade Drop은 stop 요청만 하고 window callback에서 wait/join/I/O를 하�
 encoder spawn caller는 thread 생성만 하며 spool directory create/open/delete는 encoder worker의 비동기 bootstrap에서 수행한다. renderer Ready와 encoder의 실제 Ready를 모두 확인한 뒤만 runtime Ready를 게시한다. bootstrap I/O 실패는 capture Failed·handoff detach로 보고하고 unrelated Unsupported 사유나 성공으로 바꾸지 않는다. host/CPU/window callback에서 bootstrap 파일 작업을 대신하지 않는다.
 
 capture 모드의 renderer channel은 `NativeProjectHost::start`에서 CPU worker spawn 전에 만든다. 그 시점에 capture worker를 등록하고 capture client/worker를 CPU owner에 이동한다. 일반 window client/server는 host가 보유하다 기존 `run_view(&mut self)`에서 한 번 소비한다. 채널 생성만으로 장치나 Ready가 생기는 것은 아니며 실제 창/장치 handshake를 기다린다. default capture-off 경로는 기존처럼 `run_view`에서 일반 채널을 만든다. 창을 한 번도 열지 않은 capture host도 stop 때 미사용 endpoint와 encoder를 정리해야 하며, 새 actor·device·늦은 worker-binding 채널을 추가하지 않는다.
+
+renderer client는 CPU owner 단독 소유다. CPU는 그 실제 상태를 runtime-neutral `CaptureHandoffState`로 변환해 기존 작은 pipeline status의 `renderer_state`에 nonwaiting 게시한다. Busy에는 최신 작은 상태를 유지해 재시도한다. coordinator는 같은 status에서 encoder/renderer 상태를 함께 읽고 양쪽 Ready를 확인해 runtime handoff를 연다. 별도 renderer client 복제나 또 하나의 status mailbox를 만들지 않는다. pipeline 시작은 실제 `SessionId`에도 묶으며, artifact registry가 비어 있을 때도 다른 session의 capability를 거부한다.
 
 partial/unpublished 파일은 실패 시 interest가 살아 있어도 삭제한다. CPU의 pending request 자체가 strong capability를 보유하기 때문에 weak interest 소멸만 기다리면 실패 cleanup이 자기 자신을 기다릴 수 있다. encoder는 partial path·work lease·정리 상태를 per-job catch 바깥에 설치하고, 실제 삭제 뒤만 work lease를 해제한다. 성공해 공개된 파일만 weak interest 소멸을 기다린다. responder Busy는 같은 completion을 재시도하며 다시 encode하지 않는다. responder Closed/timeout 뒤 request를 처분해도 독립 cleanup work lease는 실제 GPU/파일 정리까지 남는다.
 

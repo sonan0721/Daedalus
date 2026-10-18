@@ -34,3 +34,8 @@ Luna의 첫 작업은 읽기 전용 진단이며 아직 root cause/fix 성공으
 Luna의 읽기 전용 진단과 root의 해당 source 대조는 `prepare_stage_create_batch`/`preflight_stage_create_batch`의 공유 texture-layout 중복 계산을 찾았다. ModelPipeline과 SpritePipeline은 각각3개의 pipeline을 만들고 layout이 없을 때1개를 더 만든다. 두 task를 같은 초기 상태에서 따로 예상하면8이지만 실제 첫 task 뒤에는 layout이 있으므로7개다. `create_stage_resources`의 실제7/계획8 불일치가 CounterExhausted를 반환한다. 단일 모델 SDK가 통과한 범위와 혼합 bootstrap 실패를 설명하는 source 원인이며 아직 수정 실행 성공은 아니다.
 
 [Device 계약](../03-architecture/render-device-generation.md)에 batch-aware 공유 자원 계산을 먼저 명시했다. Luna xhigh는 `packet_renderer/staging.rs`의 공통 batch estimator/preflight와 기존 `staged_gpu_tests.rs`의 좁은 혼합 회귀만 소유한다. 필요하면 `renderer.rs`의 existing pipeline-call helper에 작은 내부 accessor만 제안한다. host/runtime/CLI·예산·timeout은 이 수정에 포함하지 않는다. 집중 source 동결 뒤 검사와 실제 CLI를 한 소유자가 순서대로 실행한다.
+
+
+## 후속 live capture의 읽기 전용 감사
+
+별도 Luna 감사는 existing activation factory·RequestTicket의 normal credit·managed actual view를 확인했다. root는 [capture 계약](../03-architecture/live-capture-and-artifacts.md)에 additive 같은-load factory·renderer의 runtime 독립성·host bridge pending/backstop·concrete image lease와 artifact reader·정확한 camera/projection/format 복사를 명시했다. runtime ACK DTO만으로는 tagged projection/camera 전체를 얻을 수 없음을 기록했다. source 구현과 capability 활성화는 하지 않았으며 이번 혼합 pipeline 수정과 별도 인수한다. 정확한 close/panic/backstop 소유권 signature는 다음 코드 착수 전 남은 동결 항목이다.

@@ -4,7 +4,7 @@
 
 ## 만든 이유
 
-[runtime a.1 기록](2026-10-18-live-capture-foundation.md)의 CPU metadata fixture와 실제 surface 픽셀 복사를 구분한다. `f3880d7`은 요청·credit·수명 기반만 인수했으며 main의 기존 CLI는 여전히 `live_capture=false`다. 이번 기록은 [renderer 반환 계약](../03-architecture/live-capture-renderer-return.md)의 source·실패·CPU 검사·실제 native proof를 별도로 추적하기 위한 것이다. 아직 테스트 성공 결과는 없다.
+[runtime a.1 기록](2026-10-18-live-capture-foundation.md)의 CPU metadata fixture와 실제 surface 픽셀 복사를 구분한다. `f3880d7`은 요청·credit·수명 기반만 인수했으며 main의 기존 CLI는 여전히 `live_capture=false`다. 이번 기록은 [renderer 반환 계약](../03-architecture/live-capture-renderer-return.md)의 source·실패·CPU 검사·실제 native proof를 별도로 추적하기 위한 것이다. 첫 renderer CPU checkpoint는 통과했지만 실제 GPU는 미실행이며 publication/frame pin 보완은 재검증 전이다.
 
 ## Source 소유권과 순서
 
@@ -27,7 +27,7 @@ source가 커지는 단계에서 별도 Luna A가 새 `window/capture/ownership_
 
 | Gate | 상태 |
 | --- | --- |
-| CPU lane/소유권/거부/limit/alignment·map/fence/cancel/panic | 구현·실행 전 |
+| CPU lane/소유권/거부/limit/alignment·map/fence/cancel/panic | 첫98 CPU 통과, 아래 frame pin·byte/layout·unwind 보완과 재검증 전 |
 | 실제 surface capability·같은 acquired frame의 pixels/metadata | native harness 전 |
 | known color·RGBA/BGRA·manual-sRGB·overlay·resize·old-ready view | 실제 GPU 검증 전 |
 | close/worker drop·mapped view/queue fence·owner drain/final buffer drop | 구현·실제 검증 전 |
@@ -63,3 +63,22 @@ raw `dist/project-evidence/p02-capture-renderer-luna-attempt01.log` SHA-256은 `
 후속 읽기 전용 감사에서 per-request reserve가 영구 worker-detached flag를 false로 되돌리는 경합을 확인했다. submit의 worker-alive 관측 뒤 worker가 Drop되고 reserve가 실행되면 fallback이 영구 종료 신호를 놓칠 수 있었다. source는 영구 flag를 요청 초기화에서 제외하도록 수정했다. detached ingress의 실제 동작은 요청을 소비·거부하고 None을 반환하는 것이므로, test도 None→abandoned no-copy cleanup의 실제 Released→추가 요청 불가 순서로 맞췄다. 수정 test freeze SHA-256은 `364e76318e827fca20a315c9adf95867e67e047447abf3b471730f4194c7b059`이며 scoped rustfmt·diff-check만 통과했다. 아직 Cargo 회귀 결과는 없다.
 
 native harness는 별도 Luna C가 새 `examples/managed_live_capture.rs`만 소유하도록 나눴다. D는 manifest와 renderer 연결·유일한 Cargo lease를 유지한다. harness는 main-thread 창과 공개 content/CPU owner/capture API를 사용해 반복 pixels·overlay·close-held·worker-drop을 검증하는 fixture이며 runtime authority 검증은 a.3/a.4에 남는다. C는 별도 Cargo/GPU를 실행하지 않고 파일 freeze를 전달한 뒤 D가 통합한다. 아직 harness source·native 실행 결과는 없다.
+
+window 연결 초안의 후속 리뷰에서는 PacketRendererReady 전환 뒤 RendererReady 전용 accessor를 호출해 Ready를 게시하지 못하는 경로, pre-copy 취소/worker cleanup 뒤 재사용된 cell과 UI에 남은 이전 request의 경합을 확인했다. source는 실제 packet renderer의 장치 제한을 읽고, no-redraw pump에서 stale local key·취소·deadline을 처리하며 Busy는 보존하도록 수정 중이다. 별도로 frame interval이 길어도 pending map/cleanup과 deadline을 진행할 bounded capture wake가 필요한지 대조한다. 이들은 아직 실행된 회귀 결과가 아니다.
+
+actual copy/present·반환 owner 연결 뒤 세 번째 lib-only check는 exit101·6.777초,3errors·1warning이었다. staging module의 StagingSubmission import 누락, callback helper visibility, UI guard보다 늦게 선언된 cell backing의 Drop 순서/lifetime을 검출했다. raw `dist/project-evidence/p02-capture-renderer-luna-attempt03.log` SHA-256은 `6e50424f76ea31e556174f0326abae69dd3ac077964fcf6e2e9c3ac041bf9ca6`다. source를 수정한 뒤 새 attempt로 재검사하며 실제 GPU 검증은 아직 하지 않았다.
+
+## 첫 renderer CPU checkpoint와 후속 보완
+
+수정 뒤 lib-only check attempt04는 exit0·3.151초,8warnings로 통과했다. 첫 lib test attempt05는98passed/0failed/29hardware ignored였다. 이후 strict attempt06은 private interface/미사용 항목·인자 수·조건/산술 진단11건, attempt07은 제거한 private Poisoned variant의 잔여 match2건으로 실패했다. 각각의 raw를 보존하고 원인 수정 뒤 아래 snapshot을 동결했다. 98에는 ownership6·source/readiness2·window stale-key/wake2가 포함되며 별도로 합산하지 않는다.
+
+| 검사 | raw (`dist/project-evidence/`) | SHA-256 | 실제 결과 |
+| --- | --- | --- | --- |
+| all-features lib check | `p02-capture-renderer-luna-attempt04.log` | `e30d4ac4cf364bca4c86be31dfde06a5e5e4a8c4bb69f80caa056d7f43490101` | 통과, strict 전 snapshot |
+| all-features strict lib Clippy | `p02-capture-renderer-luna-attempt08.log` | `174c529931dd06a9d1b002fff508e0728d5aa8c5d70d8340d74fb950b4a31bc1` | 통과 |
+| all-features lib test | `p02-capture-renderer-luna-attempt09.log` | `c03460d90105a524497ef217c883c2f47c7fed69bea8e53a9c020bbeee6c160d` | 98통과/0failed/29hardware ignored |
+| no-default-features lib check | `p02-capture-renderer-luna-attempt10.log` | `fce896d20943baf85d7d505f4cf34ce8f887371325375caea5d45af23e3882b8` | 통과 |
+
+이 snapshot은 actual window/pixels·harness·workspace/package 인수가 아니다. 후속 host source 감사에서 present ACK metadata가 async capture 완료 전에 제거될 수 있음을 확인했다. [명세 보완](../03-architecture/live-capture-host-artifacts.md#실제-publication의-상관관계와-수명)은 actual selected frame을 renderer cell이 strong pin하고 readback은 Weak만 반환해 host가 실제 opaque publication을 read/cleanup 전에 고정하도록 한다. UI/handle Drop이 큰 frame backing을 해제하지 않으며 worker release만 Buffer와 pin을 함께 마감한다. D가 해당 source와 byte/layout·post-submit unwind CPU 회귀를 추가하며, 새 focused Cargo lease도 D만 보유한다. 이 변경은 위98건의 snapshot 뒤이므로 재검증 전이다.
+
+harness의 실패 정책도 source 리뷰했다. report 전송 직후 thread 종료를 단 한 번 검사하면 scheduler 경합으로 실패할 수 있어 bounded 종료 확인 뒤 join하도록 했다. returned owner 전달 실패·GPU poll/drain deadline을 실제 정리로 바꿔서는 안 된다. 이 예제의 회복 불가능한 경우는 `cleanup_complete:false`·`unresolved_gpu_owner_retained:true`인 실패로 표시하고 process 수명까지 owner를 보존한다. UI에서 Drop하거나 Pending을 Drained로 바꾸지 않는다. 정상 인수는 actual Drained 뒤 worker final Drop만 허용하며, 이 fatal 예제 정책을 production host의 graceful cleanup 구현으로 계산하지 않는다.

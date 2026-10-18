@@ -40,6 +40,7 @@ runtime a.1은 `f3880d7`에서 로컬 통합 인수했다. Luna가 정확한 ren
 | `ManagedCaptureWorker` | `try_take_return() -> Result<Option<Return>, WorkerError>`와 keyed cell progress. readiness와 queue/map progress를 혼동하지 않음 |
 | `ManagedCaptureReturn` | Submitted(readback) / Cleanup(cleanup) / Failed { key, failure, cleanup }. pre-copy 실패도 같은 cleanup handle로 return 소비·실제 Released를 마감한다. 한 return reserve이며 큰 inline payload는 쓰지 않음 |
 | `ManagedCaptureReadback` | actual view/format getter, borrowed `try_read_rgba8()`는 Pending(None)/Busy/typed production failure/성공 pixels. 성공 후 재호출은 InvalidState. `into_cleanup(self)`가 같은 cell을 옮겨 실패에도 정리 소유권 보존 |
+| `ManagedCaptureReadback::selected_frame` | 선택된 실제 `CpuFrameHandle`의 작은 Weak 참조. host가 readback/read/cleanup 전에 실제 publication binding을 찾는 용도. serialized scalar에서 권한을 만들지 않음 |
 | `ManagedCaptureCleanup` | borrowed `try_finish()`는 실제 Released 뒤에만 true. Pending/Busy/DevicePollFailed 등을 성공으로 바꾸지 않음 |
 | `ManagedCapturePixels::into_parts` | key·actual view·format·RGBA Vec를 move해 host가 전달 때문에 큰 복사를 한 번 더 하지 않음 |
 
@@ -79,6 +80,10 @@ Submitted/Cleanup handle은 cell/key를 가리키는 move-only 작은 handle이�
 창이 열려 있을 때 Device Poll 소유자는 event loop다. `about_to_wait`에서 pending map/cleanup/deadline을 nonwaiting Poll로 진행하고 bounded wake를 사용한다. worker는 callback의 Release/Acquire 상태를 관찰한다. native BufferView는 worker에서 생성·사용·해제하며 다른 스레드로 전달하지 않는다.
 
 worker는 BufferView drop→unmap을 수행하고, copy의 queue fence 완료도 확인한 뒤 cell에서 Buffer를 take/drop한다. 이 두 조건 뒤에만 Released다. return/result가 소비되고 cleanup도 Released여야 다음 renderer admission을 허용한다. runtime의 artifact/reader retention은 그 뒤에도 image slot을 유지할 수 있다.
+
+cell은 실제 selected `Arc<CpuFrameHandle>` 하나도 함께 유지한다. UI가 pin하는 frame은 검증한 actual `PacketViewSubmission::packet()`과 같은 packet 객체여야 하며 incoming candidate를 대신 pin하지 않는다. pin은 최초 설치 뒤 교체하지 않고, 기존 buffer처럼 worker의 실제 read/cleanup/fallback release에서 take/drop한다. 다음 reserve는 이전 buffer와 frame pin이 모두 없어야 한다. UI unwind·handle Drop은 pin을 해제하지 않는다. readback 자체는 immutable view와 Weak만 갖기 때문에 Drop에서 큰 frame backing의 마지막 해제를 하지 않는다.
+
+host는 `selected_frame` Weak와 성공 enqueue 전에 등록한 bounded frame→opaque publication binding을 대조하고, 실제 `ProjectPublicationIdentity`를 pending capture에 복사한 **뒤** pixels read/cleanup을 진행한다. 이 시점까지 cell의 strong pin이 binding을 살린다. 픽셀 성공 뒤에는 이 pin이 풀리므로 Weak를 나중에 lookup하거나 PNG encode 완료 때 최신 identity로 대신하지 않는다. readback의 expired/missing/nonmatching Weak는 typed stale/unknown-publication failure이며 scalar를 조합해 opaque token을 새로 만들지 않는다. 자세한 host metadata 수명은 [host 계약](live-capture-host-artifacts.md#실제-publication의-상관관계와-수명)에 둔다.
 
 창 종료 뒤에는 기존 `ManagedWindowRun → GpuOwnerReturnSlot → cpu_worker::poll_gpu_owner → WindowGpuOwner::try_drain_after_window`로 Poll 소유권을 넘긴다. 같은 CPU worker가 반환 owner를 poll하고 pending cell을 정리한다. PacketRenderer drain은 capture cell/fence가 남아 있으면 Pending이다. 정상 창 종료나 facade Drop을 미리 Stopped로 보고하지 않는다.
 

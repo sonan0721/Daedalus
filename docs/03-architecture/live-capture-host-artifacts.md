@@ -58,6 +58,20 @@ capture opt-in 때만 **capacity1 job/result lane을 가진 encoder/I/O subworke
 
 responder Busy에는 같은 compact completion을 보유하고 재시도한다. encode/hash/file을 다시 시작하지 않는다. timeout/abandon/stop이 먼저 terminal이어도 이미 제출한 GPU work·encoder·파일 정리 전 work lease를 반환하지 않는다. encoder result lane도 포화 시 원래 결과/파일 소유권을 보존한다.
 
+## 실제 publication의 상관관계와 수명
+
+runtime `ProjectPublicationIdentity`는 실제 actor의 `SessionFrame`에서만 얻는다. 현재 CPU worker는 이 token과 추출한 `Arc<CpuFrameHandle>`을 함께 coordinator에 전달하지만, 기존 present ACK deque는 ACK 뒤 예전 항목을 제거한다. readback/PNG가 늦게 끝나면 최신 ACK만으로 캡처 원본을 찾을 수 없으므로 해당 deque를 capture history로 사용하지 않는다.
+
+host는 성공 enqueue할 각 frame에 `{actual ProjectPublicationIdentity, ManagedStageKey, Weak<CpuFrameHandle>}` metadata binding을 **전송 전에** 예약한다. bounded registry의 limit은 실제 CPU frame slot 한도와 맞추며, expired Weak만 제거한다. live binding을 eviction하거나 무제한 history를 만들지 않고 자리가 없으면 원래 frame을 보존해 defer한다. runtime frame/source payload Arc를 이 registry에 넣지 않는다. 이는 기존 실제 frame object의 metadata 상관관계이며 ticket/authority ledger가 아니다.
+
+registry의 durable 참조는 CPU owner가 시작부터 보유하고 coordinator는 작은 공유 참조로 등록한다. coordinator의 per-iteration unwind/종료가 이미 renderer에 보낸 frame의 binding을 지우지 않는다. window 전송 전에 예약을 마치고, Busy면 같은 frame/binding을 보존해 재시도한다. source/정상 Frame lane과 동일하게 이 공유 경계도 nonwaiting try-lock을 사용한다.
+
+renderer cell은 actual drawn packet과 대조한 `Arc<CpuFrameHandle>` 하나를 capture read/cleanup까지 유지한다. public readback은 이 frame의 작은 Weak를 제공한다. CPU owner는 readback을 받으면 pixels read/cleanup **전에** host registry의 Weak와 pointer identity를 대조하고 session·stage key·publication/authority sequence·tick·generation/digest도 검증한다. 맞는 실제 opaque publication을 단일 pending capture에 복사한 뒤 read/PNG 작업으로 진행한다. lookup Busy는 같은 readback/원래 작업을 유지하며 재시도한다. cell strong pin 때문에 lookup 동안 원본 frame과 live binding이 사라지지 않는다.
+
+worker가 GPU/map/BufferView·buffer와 frame pin을 실제로 해제하면 frame binding은 이후 expired Weak로 정리할 수 있다. pending capture는 이미 복사한 작은 actual publication token을 terminalization까지 보유하므로 그 뒤 present ACK나 새 frame/세대가 진행돼도 바뀌지 않는다. renderer handle은 frame backing을 직접 소유하지 않아 Drop에서 큰 backing을 해제하지 않는다. missing/expired/mismatched binding은 typed stale/unknown-publication 실패이며 최신 status·요청 metadata·scalar를 조합한 token으로 성공을 위조하지 않는다.
+
+CPU 회귀는 capture frame 뒤 더 최신 frame/present ACK가 진행돼도 원래 opaque token을 유지하는지, lookup Busy·capacity·stale/foreign frame과 pin release 뒤 metadata 회수가 되는지 확인한다. 실제 host 인수는 캡처 pixels의 actual view/publication/authority와 이 token을 대조한다. 이 bridge는 source 감사에서 발견한 설계 보완이며 아직 구현 성공 근거가 아니다.
+
 ## Bounded PNG와 spool
 
 입력은 실제 view의 width/height·format·checked row/raw size를 사용한다. [전체 ceiling](live-capture-and-artifacts.md)은 축8192·8,388,608pixels·raw reserve128MiB·PNG40MiB·작업/retained 합계1개다. Renderer가 이미 sRGB-encoded한 native UNORM bytes에 gamma 변환을 한 번 더 하지 않는다. 출력은 RGBA8/sRGB PNG이며 색 metadata도 기록한다.

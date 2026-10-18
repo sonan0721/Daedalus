@@ -321,6 +321,16 @@ The public SDK example checks actual presentation metadata, repeated redraw of o
 
 The [2026-10-18 worklog](docs/06-worklog/2026-10-18-native-host-integration.md) records a 35-check focused CLI pass plus the preceding shared-pipeline/report defects. Broader native invocation encountered local camera input during an assumption of no input; that failure is retained. After implementing the explicit [viewer input policy](docs/03-architecture/native-view-input-policy.md), the original full native flag combination passed all 65 checks, including the quiet authority-camera assertions. Final local Rust tests passed 398 cases with 34 device cases ignored; Python discovery passed 72. PR20 passed all five checks and both packaged CPU62 suites; the checksum-verified downloaded Mac package then passed 72 native/offline-audio checks. Main and the verified CI tree match. Same-window pixels, performance, and D1 gates remain open.
 
+The optional host `capture` feature adds bounded routing, one PNG encoder worker, and capability-backed artifact readers. Its focused CPU suite passes 34 tests; default host tests pass four. Final all-target/all-feature check and strict Clippy also pass. These are host-library checks, not a CLI live-capture acceptance.
+
+```sh
+cargo test -p daedalus-project-host --features capture --lib --locked
+cargo dev-build -p daedalus-project-host --example native_host_smoke --features capture --locked
+target/debug/examples/native_host_smoke --observe-ms 300 --capture-out-dir /path/to/fresh-output /path/to/project
+```
+
+The native example needs the OS UI thread and a real window; its output directory must not exist. Capture mode uses protocol-only input. It obtained two real 1280×720 PNGs with independently checked pixels and metadata, then failed its initial reader-held shutdown observation. The example now waits for actual encoder cleanup before the separate 500 ms retention interval, but that final native revision has not been executed. Work stopped at the user's request; rebuild that example and finish the native proof before accepting P02.3a.3 or enabling CLI `live_capture`. The [host capture worklog](docs/06-worklog/2026-10-18-live-capture-host.md) preserves failures, hashes, and the exact restart point. The distributed CLI/package remains unchanged.
+
 ## Physics/audio integration
 
 The initial physics/audio adapters can be checked independently:

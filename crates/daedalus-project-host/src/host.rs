@@ -17,6 +17,10 @@ use std::{
 
 use daedalus_content::scene::StableId;
 use daedalus_core::{EntityHandle, SessionId};
+#[cfg(feature = "capture")]
+use daedalus_renderer::ManagedPacketWindowServer;
+#[cfg(feature = "capture")]
+use daedalus_renderer::managed_packet_window_capture_channel;
 #[cfg(feature = "window")]
 use daedalus_renderer::{
     ManagedPacketWindowClient, ManagedPacketWindowControl, ManagedPacketWindowInput,
@@ -28,6 +32,12 @@ use daedalus_renderer::{
 use daedalus_renderer::{
     PacketAssetLimits, PacketCpuLimits, PacketCpuOwner, PacketCpuStatus, PacketRenderError,
     PacketRendererLimits,
+};
+#[cfg(feature = "capture")]
+use daedalus_runtime::{
+    CaptureArtifactCapability, CaptureCompletion, CaptureFailure, CaptureHandoffError,
+    CaptureHandoffPort, CaptureHandoffState, CaptureReadyInfo, CaptureRequest,
+    CaptureResponderError, CaptureUnsupportedReason,
 };
 use daedalus_runtime::{
     NativeProjectActivationService, NativeProjectActivationShutdown,
@@ -44,6 +54,13 @@ use daedalus_runtime::{
 };
 use thiserror::Error;
 
+#[cfg(feature = "capture")]
+use crate::capture::{
+    CaptureControlPort, CaptureCoordinatorPort, CaptureEncoderShutdown, CaptureEncoderState,
+    CapturePipelineFailure, CapturePipelineOwner, CapturePipelineStatus, CaptureStatusReadError,
+};
+#[cfg(feature = "capture")]
+use crate::cpu_worker::CpuCapturePorts;
 use crate::cpu_worker::{
     self, CpuFailure, CpuWorker, CpuWorkerClient, PrepareRequest, PrepareResult, RetireRequest,
 };
@@ -71,6 +88,8 @@ pub struct NativeProjectHostOptions {
     cpu_limits: PacketCpuLimits,
     packet_limits: PacketRendererLimits,
     asset_limits: PacketAssetLimits,
+    #[cfg(feature = "capture")]
+    live_capture: bool,
 }
 
 impl NativeProjectHostOptions {
@@ -81,6 +100,8 @@ impl NativeProjectHostOptions {
             cpu_limits: PacketCpuLimits::default(),
             packet_limits: PacketRendererLimits::default(),
             asset_limits: PacketAssetLimits::default(),
+            #[cfg(feature = "capture")]
+            live_capture: false,
         }
     }
 
@@ -109,6 +130,13 @@ impl NativeProjectHostOptions {
     #[must_use]
     pub fn with_asset_limits(mut self, limits: PacketAssetLimits) -> Self {
         self.asset_limits = limits;
+        self
+    }
+
+    #[cfg(feature = "capture")]
+    #[must_use]
+    pub fn with_live_capture(mut self) -> Self {
+        self.live_capture = true;
         self
     }
 }
@@ -142,6 +170,112 @@ pub enum NativeProjectHostLifecycle {
 pub struct NativeProjectHostFailure {
     code: String,
     message: String,
+}
+
+/// Bounded capture-pipeline failure copied from the private encoder status.
+#[cfg(feature = "capture")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeCaptureFailure {
+    code: String,
+    message: String,
+}
+
+#[cfg(feature = "capture")]
+impl NativeCaptureFailure {
+    fn new(code: &'static str, message: &'static str) -> Self {
+        Self {
+            code: bounded(code.to_owned(), 64),
+            message: bounded(message.to_owned(), MAX_FAILURE_MESSAGE_BYTES),
+        }
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Capture readiness lifecycle projected from the actual renderer and encoder owners.
+#[cfg(feature = "capture")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeProjectCaptureLifecycle {
+    Starting,
+    Ready(CaptureReadyInfo),
+    Unsupported(CaptureUnsupportedReason),
+    Detached,
+    Stopping,
+    Stopped,
+    Failed(NativeCaptureFailure),
+}
+
+/// Public encoder state. Private pipeline error variants are mapped to bounded stable metadata.
+#[cfg(feature = "capture")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeCaptureEncoderState {
+    Starting,
+    Ready,
+    Stopping,
+    Stopped,
+    Failed(NativeCaptureFailure),
+}
+
+/// Nonwaiting, bounded capture status for the existing host/session.
+#[cfg(feature = "capture")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeProjectCaptureStatus {
+    session: SessionId,
+    lifecycle: NativeProjectCaptureLifecycle,
+    encoder_state: NativeCaptureEncoderState,
+    pending_jobs: u8,
+    retained_png_bytes: u64,
+    cleanup_pending: bool,
+    failure: Option<NativeCaptureFailure>,
+}
+
+#[cfg(feature = "capture")]
+impl NativeProjectCaptureStatus {
+    pub fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub fn lifecycle(&self) -> &NativeProjectCaptureLifecycle {
+        &self.lifecycle
+    }
+
+    pub fn encoder_state(&self) -> &NativeCaptureEncoderState {
+        &self.encoder_state
+    }
+
+    pub fn pending_jobs(&self) -> u8 {
+        self.pending_jobs
+    }
+
+    pub fn retained_png_bytes(&self) -> u64 {
+        self.retained_png_bytes
+    }
+
+    pub fn cleanup_pending(&self) -> bool {
+        self.cleanup_pending
+    }
+
+    pub fn failure(&self) -> Option<&NativeCaptureFailure> {
+        self.failure.as_ref()
+    }
+}
+
+/// Errors from nonwaiting capture status reads on the host facade.
+#[cfg(feature = "capture")]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum NativeCaptureStatusError {
+    #[error("live capture is not enabled for this host")]
+    Unavailable,
+    #[error("capture status is busy; retry without waiting")]
+    Busy,
+    #[error("capture status is poisoned")]
+    Poisoned,
 }
 
 impl NativeProjectHostFailure {
@@ -324,6 +458,8 @@ pub struct NativeProjectHostControl {
     status: Arc<Mutex<NativeProjectHostStatus>>,
     #[cfg(feature = "window")]
     window: Arc<Mutex<Option<ManagedPacketWindowControl>>>,
+    #[cfg(feature = "capture")]
+    capture_control: Option<CaptureControlPort>,
 }
 
 impl std::fmt::Debug for NativeProjectHostControl {
@@ -345,6 +481,8 @@ impl std::fmt::Debug for NativeProjectHostControl {
 impl NativeProjectHostControl {
     pub fn request_stop(&self) {
         self.signal.stop_requested.store(true, Ordering::Release);
+        #[cfg(feature = "capture")]
+        self.signal.capture_stopping.store(true, Ordering::Release);
         #[cfg(feature = "window")]
         if let Ok(window) = self.window.try_lock()
             && let Some(window) = window.as_ref()
@@ -375,12 +513,49 @@ impl NativeProjectHostControl {
             Err(TryLockError::Poisoned(_)) => Err(NativeProjectHostStatusReadError::Poisoned),
         }
     }
+
+    #[cfg(feature = "capture")]
+    pub fn try_capture_status(
+        &self,
+    ) -> Result<NativeProjectCaptureStatus, NativeCaptureStatusError> {
+        let control = self
+            .capture_control
+            .as_ref()
+            .ok_or(NativeCaptureStatusError::Unavailable)?;
+        let status = control.try_status().map_err(map_capture_status_error)?;
+        Ok(project_capture_status(
+            &status,
+            self.signal.capture_stopping.load(Ordering::Acquire),
+            self.signal.capture_runtime_ready.load(Ordering::Acquire),
+            self.signal.capture_drained.load(Ordering::Acquire),
+        ))
+    }
+
+    #[cfg(feature = "capture")]
+    pub fn try_acquire_capture_artifact(
+        &self,
+        capability: &CaptureArtifactCapability,
+    ) -> Result<crate::NativeCaptureArtifactLease, crate::NativeArtifactAccessError> {
+        let control = self
+            .capture_control
+            .as_ref()
+            .ok_or(crate::NativeArtifactAccessError::Stopped)?;
+        control.try_acquire_artifact(capability)
+    }
 }
 
 pub(super) struct HostLifecycleSignal {
     pub stop_requested: AtomicBool,
     pub view_close_requested: AtomicBool,
     pub prepare_handoff_pending: AtomicBool,
+    #[cfg(feature = "capture")]
+    pub capture_stopping: AtomicBool,
+    #[cfg(feature = "capture")]
+    pub capture_runtime_ready: AtomicBool,
+    #[cfg(feature = "capture")]
+    pub capture_drained: AtomicBool,
+    #[cfg(feature = "capture")]
+    pub capture_cpu_started: AtomicBool,
     #[cfg(feature = "window")]
     pub window_owner_expected: AtomicBool,
     #[cfg(feature = "window")]
@@ -393,6 +568,14 @@ impl HostLifecycleSignal {
             stop_requested: AtomicBool::new(false),
             view_close_requested: AtomicBool::new(false),
             prepare_handoff_pending: AtomicBool::new(false),
+            #[cfg(feature = "capture")]
+            capture_stopping: AtomicBool::new(false),
+            #[cfg(feature = "capture")]
+            capture_runtime_ready: AtomicBool::new(false),
+            #[cfg(feature = "capture")]
+            capture_drained: AtomicBool::new(false),
+            #[cfg(feature = "capture")]
+            capture_cpu_started: AtomicBool::new(false),
             #[cfg(feature = "window")]
             window_owner_expected: AtomicBool::new(false),
             #[cfg(feature = "window")]
@@ -465,6 +648,10 @@ pub struct NativeProjectHost {
     unpublished_gpu_owner: Option<WindowGpuOwner>,
     pending_shutdown_failure: Option<NativeProjectHostFailure>,
     pending_shutdown_lifecycle: Option<NativeProjectHostLifecycle>,
+    #[cfg(feature = "capture")]
+    capture_pipeline: Option<CapturePipelineOwner>,
+    #[cfg(feature = "capture")]
+    capture_window: Option<(ManagedPacketWindowClient, ManagedPacketWindowServer)>,
 }
 
 impl std::fmt::Debug for NativeProjectHost {
@@ -490,6 +677,26 @@ impl NativeProjectHost {
             options.packet_limits,
             options.asset_limits,
         )?;
+        #[cfg(feature = "capture")]
+        let live_capture = options.live_capture;
+        #[cfg(feature = "capture")]
+        let frame_slots_limit = cpu_owner.status().frame_slots_limit;
+        #[cfg(feature = "capture")]
+        let (service, consumer, capture_handoff) = if live_capture {
+            let (service, consumer, handoff) =
+                NativeProjectActivationService::start_with_render_consumer_and_capture(
+                    options.preparation,
+                    options.session,
+                )?;
+            (service, consumer, Some(handoff))
+        } else {
+            let (service, consumer) = NativeProjectActivationService::start_with_render_consumer(
+                options.preparation,
+                options.session,
+            )?;
+            (service, consumer, None)
+        };
+        #[cfg(not(feature = "capture"))]
         let (service, consumer) = NativeProjectActivationService::start_with_render_consumer(
             options.preparation,
             options.session,
@@ -512,32 +719,182 @@ impl NativeProjectHost {
         #[cfg(feature = "window")]
         let (command_tx, command_rx) = mpsc::sync_channel(1);
 
+        #[cfg(feature = "capture")]
+        let mut capture_pipeline = if live_capture {
+            match crate::capture::start_capture_pipeline(session, frame_slots_limit) {
+                Ok(capture) => Some(capture),
+                Err(error) => {
+                    consumer.request_close();
+                    service.request_stop();
+                    set_failure(&status, "capture_pipeline_start_failed", error.to_string());
+                    return Ok(Self::failed(service, signal, status, None, None, None));
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(feature = "capture")]
+        let mut capture_endpoints = if live_capture {
+            let (window_client, capture_client, server) = managed_packet_window_capture_channel();
+            let worker = match capture_client.register_worker() {
+                Ok(worker) => worker,
+                Err(error) => {
+                    consumer.request_close();
+                    service.request_stop();
+                    if let Some(capture) = capture_pipeline.as_ref() {
+                        capture.request_stop();
+                    }
+                    set_failure(&status, "capture_endpoint_start_failed", error.to_string());
+                    return Ok(Self::failed(
+                        service,
+                        signal,
+                        status,
+                        None,
+                        capture_pipeline,
+                        None,
+                    ));
+                }
+            };
+            Some((window_client, capture_client, server, worker))
+        } else {
+            None
+        };
+
         let cpu_client = match service.session().attach() {
             Ok(client) => client,
             Err(error) => {
                 consumer.request_close();
                 service.request_stop();
+                #[cfg(feature = "capture")]
+                {
+                    if let Some(handoff) = capture_handoff.as_ref() {
+                        handoff.request_detach();
+                    }
+                    if let Some(capture) = capture_pipeline.as_ref() {
+                        capture.request_stop();
+                        capture.coordinator_port().close_transfer_fence();
+                    }
+                }
                 set_failure(&status, "cpu_attach_failed", error.to_string());
-                return Ok(Self::failed(service, signal, status, None));
+                return Ok(Self::failed(
+                    service,
+                    signal,
+                    status,
+                    None,
+                    #[cfg(feature = "capture")]
+                    capture_pipeline,
+                    #[cfg(feature = "capture")]
+                    None,
+                ));
             }
         };
-        let cpu = match cpu_worker::spawn(cpu_owner, cpu_client, Arc::clone(&signal)) {
+
+        #[cfg(feature = "capture")]
+        let (capture_window, capture_ports) =
+            if let Some((window, client, server, worker)) = capture_endpoints.take() {
+                let Some(pipeline) = capture_pipeline.as_mut() else {
+                    consumer.request_close();
+                    service.request_stop();
+                    if let Some(handoff) = capture_handoff.as_ref() {
+                        handoff.request_detach();
+                    }
+                    set_failure(
+                        &status,
+                        "capture_pipeline_missing",
+                        "capture endpoints were started without their pipeline owner",
+                    );
+                    return Ok(Self::failed(service, signal, status, None, None, None));
+                };
+                let pipeline_port = match pipeline.take_cpu_worker_port() {
+                    Ok(port) => port,
+                    Err(error) => {
+                        consumer.request_close();
+                        service.request_stop();
+                        handoff_detach(&capture_handoff);
+                        pipeline.request_stop();
+                        capture_fail(&status, "capture_pipeline_take_failed", error.to_string());
+                        return Ok(Self::failed(
+                            service,
+                            signal,
+                            status,
+                            None,
+                            capture_pipeline,
+                            None,
+                        ));
+                    }
+                };
+                (
+                    Some((window, server)),
+                    Some(CpuCapturePorts {
+                        pipeline: pipeline_port,
+                        renderer_client: client,
+                        renderer_worker: worker,
+                    }),
+                )
+            } else {
+                (None, None)
+            };
+
+        #[cfg(feature = "capture")]
+        let cpu_result =
+            cpu_worker::spawn(cpu_owner, cpu_client, Arc::clone(&signal), capture_ports);
+        #[cfg(not(feature = "capture"))]
+        let cpu_result = cpu_worker::spawn(cpu_owner, cpu_client, Arc::clone(&signal));
+        let cpu = match cpu_result {
             Ok(cpu) => cpu,
             Err(error) => {
                 consumer.request_close();
                 service.request_stop();
+                #[cfg(feature = "capture")]
+                {
+                    handoff_detach(&capture_handoff);
+                    if let Some(capture) = capture_pipeline.as_ref() {
+                        capture.request_stop();
+                        capture.coordinator_port().close_transfer_fence();
+                    }
+                }
                 set_failure(&status, "cpu_worker_start_failed", error.to_string());
-                return Ok(Self::failed(service, signal, status, None));
+                return Ok(Self::failed(
+                    service,
+                    signal,
+                    status,
+                    None,
+                    #[cfg(feature = "capture")]
+                    capture_pipeline,
+                    #[cfg(feature = "capture")]
+                    capture_window,
+                ));
             }
         };
+        #[cfg(feature = "capture")]
+        if live_capture {
+            signal.capture_cpu_started.store(true, Ordering::Release);
+        }
         let coordinator_client = match service.session().attach() {
             Ok(client) => client,
             Err(error) => {
                 signal.stop_requested.store(true, Ordering::Release);
                 consumer.request_close();
                 service.request_stop();
+                #[cfg(feature = "capture")]
+                {
+                    handoff_detach(&capture_handoff);
+                    if let Some(capture) = capture_pipeline.as_ref() {
+                        capture.request_stop();
+                        capture.coordinator_port().close_transfer_fence();
+                    }
+                }
                 set_failure(&status, "coordinator_attach_failed", error.to_string());
-                return Ok(Self::failed(service, signal, status, Some(cpu)));
+                return Ok(Self::failed(
+                    service,
+                    signal,
+                    status,
+                    Some(cpu),
+                    #[cfg(feature = "capture")]
+                    capture_pipeline,
+                    #[cfg(feature = "capture")]
+                    None,
+                ));
             }
         };
 
@@ -545,25 +902,44 @@ impl NativeProjectHost {
         let coordinator_signal = Arc::clone(&signal);
         let coordinator_status = Arc::clone(&status);
         let coordinator_cpu = cpu.client();
+        #[cfg(feature = "capture")]
+        let capture_coordinator = capture_pipeline
+            .as_ref()
+            .map(CapturePipelineOwner::coordinator_port);
+        #[cfg(feature = "capture")]
+        let capture_coordinator_cleanup = capture_coordinator.clone();
         let coordinator_spawn = thread::Builder::new()
             .name("daedalus-native-project-host".to_owned())
             .spawn(move || {
-                run_coordinator(
-                    coordinator_service,
+                run_coordinator(CoordinatorThreadInputs {
+                    service: coordinator_service,
                     consumer,
-                    coordinator_client,
-                    coordinator_cpu,
+                    client: coordinator_client,
+                    cpu: coordinator_cpu,
                     #[cfg(feature = "window")]
-                    command_rx,
-                    coordinator_signal,
-                    coordinator_status,
-                )
+                    commands: command_rx,
+                    #[cfg(feature = "capture")]
+                    capture_handoff,
+                    #[cfg(feature = "capture")]
+                    capture_coordinator,
+                    signal: coordinator_signal,
+                    status: coordinator_status,
+                })
             });
         let coordinator = match coordinator_spawn {
             Ok(join) => Some(join),
             Err(error) => {
                 signal.stop_requested.store(true, Ordering::Release);
                 service.request_stop();
+                #[cfg(feature = "capture")]
+                {
+                    if let Some(capture) = capture_pipeline.as_ref() {
+                        capture.request_stop();
+                    }
+                    if let Some(capture) = capture_coordinator_cleanup.as_ref() {
+                        capture.close_transfer_fence();
+                    }
+                }
                 set_failure(&status, "coordinator_start_failed", error.to_string());
                 None
             }
@@ -583,6 +959,10 @@ impl NativeProjectHost {
             unpublished_gpu_owner: None,
             pending_shutdown_failure: None,
             pending_shutdown_lifecycle: None,
+            #[cfg(feature = "capture")]
+            capture_pipeline,
+            #[cfg(feature = "capture")]
+            capture_window,
         })
     }
 
@@ -591,8 +971,19 @@ impl NativeProjectHost {
         signal: Arc<HostLifecycleSignal>,
         status: Arc<Mutex<NativeProjectHostStatus>>,
         cpu: Option<CpuWorker>,
+        #[cfg(feature = "capture")] capture_pipeline: Option<CapturePipelineOwner>,
+        #[cfg(feature = "capture")] capture_window: Option<(
+            ManagedPacketWindowClient,
+            ManagedPacketWindowServer,
+        )>,
     ) -> Self {
         signal.stop_requested.store(true, Ordering::Release);
+        #[cfg(feature = "capture")]
+        signal.capture_stopping.store(true, Ordering::Release);
+        #[cfg(feature = "capture")]
+        if let Some(capture) = capture_pipeline.as_ref() {
+            capture.request_stop();
+        }
         Self {
             service,
             signal,
@@ -607,6 +998,10 @@ impl NativeProjectHost {
             unpublished_gpu_owner: None,
             pending_shutdown_failure: None,
             pending_shutdown_lifecycle: None,
+            #[cfg(feature = "capture")]
+            capture_pipeline,
+            #[cfg(feature = "capture")]
+            capture_window,
         }
     }
 
@@ -624,6 +1019,11 @@ impl NativeProjectHost {
             status: Arc::clone(&self.status),
             #[cfg(feature = "window")]
             window: self.window_control_arc(),
+            #[cfg(feature = "capture")]
+            capture_control: self
+                .capture_pipeline
+                .as_ref()
+                .map(CapturePipelineOwner::control_port),
         }
     }
 
@@ -646,6 +1046,13 @@ impl NativeProjectHost {
     /// Requests whole-host shutdown without joining unfinished workers.
     pub fn request_stop(&self) {
         self.signal.stop_requested.store(true, Ordering::Release);
+        #[cfg(feature = "capture")]
+        {
+            self.signal.capture_stopping.store(true, Ordering::Release);
+            if let Some(capture) = self.capture_pipeline.as_ref() {
+                capture.request_stop();
+            }
+        }
         self.service.request_stop();
         #[cfg(feature = "window")]
         if let Ok(window) = self.window_control_arc().try_lock()
@@ -698,6 +1105,16 @@ impl NativeProjectHost {
             });
         }
 
+        #[cfg(feature = "capture")]
+        let (client, server) = if self.capture_pipeline.is_some() {
+            self.capture_window.take().ok_or_else(|| NativeViewError {
+                code: "capture_window_unavailable".to_owned(),
+                message: "the capture-enabled managed window endpoints are unavailable".to_owned(),
+            })?
+        } else {
+            managed_packet_window_channel()
+        };
+        #[cfg(not(feature = "capture"))]
         let (client, server) = managed_packet_window_channel();
         let control = client.control();
         if let Ok(mut shared) = self.window_control_arc().try_lock() {
@@ -874,6 +1291,33 @@ impl NativeProjectHost {
                     "cpu_owner_panicked",
                     "native host CPU owner worker panicked",
                 );
+            }
+        }
+
+        #[cfg(feature = "capture")]
+        if !self.signal.capture_cpu_started.load(Ordering::Acquire)
+            && let Some(capture) = self.capture_pipeline.as_mut()
+        {
+            match capture.try_finish_unclaimed() {
+                CaptureEncoderShutdown::Stopping => {
+                    self.queue_shutdown_lifecycle(NativeProjectHostLifecycle::Stopping);
+                    self.flush_shutdown_metadata();
+                    return Ok(NativeProjectHostShutdown::Stopping);
+                }
+                CaptureEncoderShutdown::Stopped | CaptureEncoderShutdown::Failed(_) => {
+                    let drained = capture.control_port().try_status().is_ok_and(|status| {
+                        status.worker_exited()
+                            && status.pending_jobs() == 0
+                            && status.cleanup_pending() == 0
+                            && status.retained_png_bytes() == 0
+                    });
+                    if !drained {
+                        self.queue_shutdown_lifecycle(NativeProjectHostLifecycle::Stopping);
+                        self.flush_shutdown_metadata();
+                        return Ok(NativeProjectHostShutdown::Stopping);
+                    }
+                    self.signal.capture_drained.store(true, Ordering::Release);
+                }
             }
         }
 
@@ -1073,6 +1517,20 @@ struct AcknowledgedPublication {
     present_sequence: u64,
 }
 
+#[cfg(feature = "capture")]
+struct PendingCapture {
+    request: Option<Box<CaptureRequest>>,
+    stage_key: Option<ManagedStageKey>,
+    completion: Option<CaptureCompletion>,
+}
+
+#[cfg(all(test, feature = "capture"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureCoordinatorPanicPoint {
+    AfterTake,
+    AfterTransfer,
+}
+
 struct CoordinatorState {
     bindings: Option<Arc<BTreeMap<StableId, EntityHandle>>>,
     pending_prepare: Option<PrepareRequest>,
@@ -1118,6 +1576,14 @@ struct CoordinatorState {
     view_override: Option<RenderView>,
     #[cfg(feature = "window")]
     closing_view: bool,
+    #[cfg(feature = "capture")]
+    capture_handoff: Option<CaptureHandoffPort>,
+    #[cfg(feature = "capture")]
+    capture_coordinator: Option<CaptureCoordinatorPort>,
+    #[cfg(feature = "capture")]
+    pending_capture: Option<PendingCapture>,
+    #[cfg(all(test, feature = "capture"))]
+    capture_test_panic: Option<CaptureCoordinatorPanicPoint>,
     worker_failed: bool,
 }
 
@@ -1168,6 +1634,14 @@ impl CoordinatorState {
             view_override: None,
             #[cfg(feature = "window")]
             closing_view: false,
+            #[cfg(feature = "capture")]
+            capture_handoff: None,
+            #[cfg(feature = "capture")]
+            capture_coordinator: None,
+            #[cfg(feature = "capture")]
+            pending_capture: None,
+            #[cfg(all(test, feature = "capture"))]
+            capture_test_panic: None,
             worker_failed: false,
         }
     }
@@ -1205,22 +1679,50 @@ impl CoordinatorState {
     }
 }
 
-fn run_coordinator(
+struct CoordinatorThreadInputs {
     service: Arc<NativeProjectActivationService>,
     consumer: ProjectGenerationConsumerPort,
     client: SessionControlClient,
     cpu: CpuWorkerClient,
-    #[cfg(feature = "window")] commands: Receiver<CoordinatorCommand>,
+    #[cfg(feature = "window")]
+    commands: Receiver<CoordinatorCommand>,
+    #[cfg(feature = "capture")]
+    capture_handoff: Option<CaptureHandoffPort>,
+    #[cfg(feature = "capture")]
+    capture_coordinator: Option<CaptureCoordinatorPort>,
     signal: Arc<HostLifecycleSignal>,
     status: Arc<Mutex<NativeProjectHostStatus>>,
-) {
+}
+
+fn run_coordinator(inputs: CoordinatorThreadInputs) {
+    let CoordinatorThreadInputs {
+        service,
+        consumer,
+        client,
+        cpu,
+        #[cfg(feature = "window")]
+        commands,
+        #[cfg(feature = "capture")]
+        capture_handoff,
+        #[cfg(feature = "capture")]
+        capture_coordinator,
+        signal,
+        status,
+    } = inputs;
     let session = status
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .session;
     let mut state = CoordinatorState::new();
+    #[cfg(feature = "capture")]
+    {
+        state.capture_handoff = capture_handoff;
+        state.capture_coordinator = capture_coordinator;
+    }
     let mut fatal = false;
     loop {
+        #[cfg(feature = "capture")]
+        take_capture_request(&mut state, &signal, &status);
         let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             coordinator_step(
                 &mut state,
@@ -1246,6 +1748,8 @@ fn run_coordinator(
         }
 
         if signal.stop_requested.load(Ordering::Acquire) || fatal {
+            #[cfg(feature = "capture")]
+            signal.capture_stopping.store(true, Ordering::Release);
             service.request_stop();
             consumer.request_close();
             if let Some((_, cancelled)) = state.preparing.as_ref() {
@@ -1262,6 +1766,19 @@ fn run_coordinator(
             #[cfg(feature = "window")]
             if let Some(control) = state.window_control.as_ref() {
                 control.request_host_stop();
+            }
+            #[cfg(feature = "capture")]
+            {
+                if let Some(handoff) = state.capture_handoff.as_ref() {
+                    handoff.request_detach();
+                }
+                reject_pending_capture(&mut state);
+                advance_pending_capture(&mut state, None, true);
+                if state.pending_capture.is_none()
+                    && let Some(capture) = state.capture_coordinator.as_ref()
+                {
+                    capture.close_transfer_fence();
+                }
             }
             // A move-only lease that has not yet entered the worker must be handed to its
             // owner thread before the coordinator exits. The CPU stop path drains it there.
@@ -1284,8 +1801,16 @@ fn run_coordinator(
                     set_failure(&status, failure.code, failure.message);
                 }
             }
+            #[cfg(feature = "capture")]
+            let capture_drained = state
+                .capture_coordinator
+                .as_ref()
+                .is_none_or(CaptureCoordinatorPort::is_drained);
+            #[cfg(not(feature = "capture"))]
+            let capture_drained = true;
             if state.pending_prepare.is_none()
                 && !signal.prepare_handoff_pending.load(Ordering::Acquire)
+                && capture_drained
             {
                 break;
             }
@@ -1352,6 +1877,11 @@ fn coordinator_step(
             None
         }
     };
+    #[cfg(feature = "capture")]
+    {
+        update_capture_readiness(state, signal, status);
+        advance_pending_capture(state, runtime_status.as_ref(), false);
+    }
     if let Some(runtime_status) = runtime_status.as_ref()
         && let Some((identity, cancelled)) = state.preparing.as_ref()
         && !is_identity_current(runtime_status, identity)
@@ -1461,6 +1991,299 @@ fn coordinator_step(
         }
     }
     let _ = service;
+}
+
+#[cfg(feature = "capture")]
+fn take_capture_request(
+    state: &mut CoordinatorState,
+    signal: &HostLifecycleSignal,
+    status: &Mutex<NativeProjectHostStatus>,
+) {
+    // `None` means the coordinator completed the nonblocking move into the capacity-one ingress.
+    // If an unwind landed between that move and clearing the local marker, reconcile the marker
+    // before polling the actor again; the request itself remains in ingress.
+    if state
+        .pending_capture
+        .as_ref()
+        .is_some_and(|pending| pending.request.is_none())
+    {
+        state.pending_capture = None;
+    }
+    if state.pending_capture.is_some() {
+        return;
+    }
+    let Some(handoff) = state.capture_handoff.as_ref() else {
+        return;
+    };
+    match handoff.try_take_request() {
+        Ok(Some(request)) => {
+            state.pending_capture = Some(PendingCapture {
+                request: Some(Box::new(request)),
+                stage_key: None,
+                completion: None,
+            });
+            #[cfg(test)]
+            panic_if_capture_test_requested(
+                &mut state.capture_test_panic,
+                CaptureCoordinatorPanicPoint::AfterTake,
+            );
+        }
+        Ok(None) | Err(CaptureHandoffError::Busy | CaptureHandoffError::RequestOccupied) => {}
+        Err(CaptureHandoffError::Detached | CaptureHandoffError::AlreadyResolved) => {}
+        Err(error) => {
+            set_failure(status, "capture_handoff_failed", error.to_string());
+            signal.stop_requested.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(feature = "capture")]
+fn update_capture_readiness(
+    state: &CoordinatorState,
+    signal: &HostLifecycleSignal,
+    host_status: &Mutex<NativeProjectHostStatus>,
+) {
+    let Some(handoff) = state.capture_handoff.as_ref() else {
+        return;
+    };
+    if signal.capture_stopping.load(Ordering::Acquire)
+        || signal.stop_requested.load(Ordering::Acquire)
+    {
+        handoff.request_detach();
+        return;
+    }
+    let Some(coordinator) = state.capture_coordinator.as_ref() else {
+        return;
+    };
+    let pipeline = match coordinator.try_status() {
+        Ok(status) => status,
+        Err(CaptureStatusReadError::Busy) => return,
+        Err(CaptureStatusReadError::Poisoned) => {
+            set_failure(
+                host_status,
+                "capture_status_poisoned",
+                "capture pipeline status could not be read",
+            );
+            handoff.request_detach();
+            signal.stop_requested.store(true, Ordering::Release);
+            return;
+        }
+    };
+    if pipeline.session() != handoff.session() {
+        set_failure(
+            host_status,
+            "capture_session_mismatch",
+            "capture pipeline belongs to a different session",
+        );
+        handoff.request_detach();
+        signal.stop_requested.store(true, Ordering::Release);
+        return;
+    }
+    let encoder_state = pipeline.encoder();
+    match encoder_state {
+        CaptureEncoderState::Failed(_) | CaptureEncoderState::Stopped => {
+            handoff.request_detach();
+            return;
+        }
+        CaptureEncoderState::Starting
+        | CaptureEncoderState::Stopping
+        | CaptureEncoderState::Ready => {}
+    }
+    match pipeline.renderer_state() {
+        CaptureHandoffState::Starting => {}
+        CaptureHandoffState::Ready(info) if encoder_state == CaptureEncoderState::Ready => {
+            match handoff.try_status() {
+                CaptureHandoffState::Ready(_) => {
+                    signal.capture_runtime_ready.store(true, Ordering::Release);
+                }
+                CaptureHandoffState::Starting => match handoff.try_set_ready(info) {
+                    Ok(()) => signal.capture_runtime_ready.store(true, Ordering::Release),
+                    Err(CaptureHandoffError::Busy) => {}
+                    Err(CaptureHandoffError::AlreadyResolved) => {
+                        if matches!(handoff.try_status(), CaptureHandoffState::Ready(_)) {
+                            signal.capture_runtime_ready.store(true, Ordering::Release);
+                        }
+                    }
+                    Err(error) => {
+                        set_failure(host_status, "capture_ready_failed", error.to_string());
+                        handoff.request_detach();
+                        signal.stop_requested.store(true, Ordering::Release);
+                    }
+                },
+                CaptureHandoffState::Unsupported(_) | CaptureHandoffState::Detached => {}
+            }
+        }
+        CaptureHandoffState::Ready(_) => {}
+        CaptureHandoffState::Unsupported(reason) => match handoff.try_status() {
+            CaptureHandoffState::Starting => match handoff.try_set_unsupported(reason) {
+                Ok(()) | Err(CaptureHandoffError::AlreadyResolved) => {}
+                Err(CaptureHandoffError::Busy) => {}
+                Err(error) => {
+                    set_failure(host_status, "capture_unsupported_failed", error.to_string());
+                    handoff.request_detach();
+                }
+            },
+            CaptureHandoffState::Ready(_) => {
+                set_failure(
+                    host_status,
+                    "capture_readiness_changed",
+                    "capture renderer became unsupported after readiness",
+                );
+                handoff.request_detach();
+                signal.stop_requested.store(true, Ordering::Release);
+            }
+            CaptureHandoffState::Unsupported(_) | CaptureHandoffState::Detached => {}
+        },
+        CaptureHandoffState::Detached => handoff.request_detach(),
+    }
+}
+
+#[cfg(feature = "capture")]
+fn reject_pending_capture(state: &mut CoordinatorState) {
+    if state
+        .pending_capture
+        .as_ref()
+        .is_some_and(|pending| pending.request.is_none())
+    {
+        // The empty request slot proves that the ingress transfer already succeeded. The
+        // destination retains the request while stop drains it; the coordinator must not turn
+        // that accepted route back into a local terminal completion.
+        state.pending_capture = None;
+        return;
+    }
+    let Some(pending) = state.pending_capture.as_mut() else {
+        return;
+    };
+    pending.stage_key = None;
+    pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::Detached));
+}
+
+#[cfg(feature = "capture")]
+fn advance_pending_capture(
+    state: &mut CoordinatorState,
+    runtime_status: Option<&ProjectGenerationConsumerStatus>,
+    stopping: bool,
+) {
+    let Some(pending) = state.pending_capture.as_mut() else {
+        return;
+    };
+    // This is the durable post-transfer marker. `try_send_pending` clears the request slot only
+    // after ingress has accepted the same Box; leave the marker for `take_capture_request` to
+    // reconcile if an unwind occurs before this function returns.
+    let Some(request) = pending.request.as_ref() else {
+        return;
+    };
+    if pending.completion.is_none() {
+        let source = request.source();
+        if stopping
+            || runtime_status.is_some_and(|snapshot| snapshot.is_closed() || snapshot.is_stopped())
+        {
+            pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::Detached));
+        } else if request.is_cancelled() {
+            pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::Cancelled));
+        } else if Instant::now() >= request.deadline() {
+            pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::TimedOut));
+        } else if source.session() != request.id().session() {
+            pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::StaleIdentity));
+        } else if let Some(record) = state.generations.iter().find(|record| {
+            record.identity.session() == source.session()
+                && record.identity.generation() == source.project_generation()
+                && record.identity.source_digest() == source.source_digest()
+        }) {
+            pending.stage_key = Some(record.key);
+        } else if runtime_status.is_some_and(|snapshot| {
+            capture_source_is_stale(
+                snapshot,
+                source.session(),
+                source.project_generation(),
+                source.source_digest(),
+            )
+        }) {
+            pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::StaleGeneration));
+        }
+    }
+
+    if let Some(completion) = pending.completion.as_ref() {
+        let result = pending
+            .request
+            .as_mut()
+            .map(|request| request.responder_mut().try_complete(completion));
+        match result {
+            Some(Ok(()))
+            | Some(Err(CaptureResponderError::AlreadyCompleted | CaptureResponderError::Stopped)) =>
+            {
+                state.pending_capture = None;
+            }
+            Some(Err(CaptureResponderError::Busy)) => {}
+            None => state.pending_capture = None,
+        }
+        return;
+    }
+
+    if let Some(stage_key) = pending.stage_key {
+        let Some(coordinator) = state.capture_coordinator.as_ref() else {
+            pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::Detached));
+            return;
+        };
+        match coordinator.try_send_pending(&mut pending.request, stage_key) {
+            Ok(()) => {
+                // Keep the empty slot until the next coordinator boundary. If anything unwinds
+                // between ingress acceptance and that boundary, the request is still owned by
+                // ingress and `take_capture_request` can safely clear this marker.
+                #[cfg(test)]
+                panic_if_capture_test_requested(
+                    &mut state.capture_test_panic,
+                    CaptureCoordinatorPanicPoint::AfterTransfer,
+                );
+            }
+            Err(crate::capture::CaptureIngressError::Busy) => {}
+            Err(
+                crate::capture::CaptureIngressError::Closed
+                | crate::capture::CaptureIngressError::Poisoned,
+            ) => {
+                pending.completion = Some(CaptureCompletion::Failed(CaptureFailure::Detached));
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "capture"))]
+fn panic_if_capture_test_requested(
+    requested: &mut Option<CaptureCoordinatorPanicPoint>,
+    point: CaptureCoordinatorPanicPoint,
+) {
+    if *requested == Some(point) {
+        *requested = None;
+        panic!("injected capture coordinator panic at {point:?}");
+    }
+}
+
+#[cfg(feature = "capture")]
+fn capture_source_is_stale(
+    status: &ProjectGenerationConsumerStatus,
+    session: SessionId,
+    generation: u64,
+    digest: &str,
+) -> bool {
+    if session != status.session() || status.active_generation() > generation {
+        return true;
+    }
+    if status.active_generation() == generation && status.active_source_digest() != digest {
+        return true;
+    }
+    status.stage().is_some_and(|stage| {
+        let identity = stage.identity();
+        identity.session() == session
+            && identity.generation() == generation
+            && identity.source_digest() == digest
+            && matches!(
+                stage.progress(),
+                ProjectConsumerStageProgress::FailedApplied
+                    | ProjectConsumerStageProgress::Cancelled
+                    | ProjectConsumerStageProgress::Superseded
+                    | ProjectConsumerStageProgress::Closed
+            )
+    })
 }
 
 fn queue_prepare(
@@ -2077,6 +2900,28 @@ fn flush_pending_frame(state: &mut CoordinatorState, status: &Mutex<NativeProjec
         return;
     }
     let frame = Arc::clone(&pending.frame);
+    #[cfg(feature = "capture")]
+    if let Some(capture) = state.capture_coordinator.as_ref() {
+        match capture.try_register_publication(pending.publication.clone(), pending.key, &frame) {
+            Ok(()) => {}
+            Err(
+                crate::capture::CaptureRegistryError::Busy
+                | crate::capture::CaptureRegistryError::Full,
+            ) => {
+                state.pending_frame = Some(pending);
+                return;
+            }
+            Err(error) => {
+                set_failure(
+                    status,
+                    "capture_frame_registration_failed",
+                    error.to_string(),
+                );
+                state.pending_frame = Some(pending);
+                return;
+            }
+        }
+    }
     match client.try_send(ManagedPacketWindowInput::Frame {
         key: pending.key,
         frame,
@@ -2746,6 +3591,96 @@ fn bounded(mut value: String, maximum: usize) -> String {
     value
 }
 
+#[cfg(feature = "capture")]
+fn map_capture_status_error(error: CaptureStatusReadError) -> NativeCaptureStatusError {
+    match error {
+        CaptureStatusReadError::Busy => NativeCaptureStatusError::Busy,
+        CaptureStatusReadError::Poisoned => NativeCaptureStatusError::Poisoned,
+    }
+}
+
+#[cfg(feature = "capture")]
+fn handoff_detach(handoff: &Option<CaptureHandoffPort>) {
+    if let Some(handoff) = handoff {
+        handoff.request_detach();
+    }
+}
+
+#[cfg(feature = "capture")]
+fn capture_fail(status: &Mutex<NativeProjectHostStatus>, code: &str, message: String) {
+    set_failure(status, code, message);
+}
+
+#[cfg(feature = "capture")]
+fn project_capture_status(
+    status: &CapturePipelineStatus,
+    stopping_requested: bool,
+    runtime_ready: bool,
+    capture_drained: bool,
+) -> NativeProjectCaptureStatus {
+    let encoder_state = match status.encoder() {
+        CaptureEncoderState::Starting => NativeCaptureEncoderState::Starting,
+        CaptureEncoderState::Ready => NativeCaptureEncoderState::Ready,
+        CaptureEncoderState::Stopping => NativeCaptureEncoderState::Stopping,
+        CaptureEncoderState::Stopped => NativeCaptureEncoderState::Stopped,
+        CaptureEncoderState::Failed(failure) => {
+            NativeCaptureEncoderState::Failed(capture_failure(failure))
+        }
+    };
+    let failure = match status.encoder() {
+        CaptureEncoderState::Failed(failure) => Some(capture_failure(failure)),
+        _ => None,
+    };
+    let lifecycle = if let Some(failure) = failure.as_ref() {
+        NativeProjectCaptureLifecycle::Failed(failure.clone())
+    } else if stopping_requested {
+        if capture_drained {
+            NativeProjectCaptureLifecycle::Stopped
+        } else {
+            NativeProjectCaptureLifecycle::Stopping
+        }
+    } else {
+        match status.renderer_state() {
+            CaptureHandoffState::Starting => NativeProjectCaptureLifecycle::Starting,
+            CaptureHandoffState::Ready(info)
+                if runtime_ready && matches!(status.encoder(), CaptureEncoderState::Ready) =>
+            {
+                NativeProjectCaptureLifecycle::Ready(info)
+            }
+            CaptureHandoffState::Ready(_) => NativeProjectCaptureLifecycle::Starting,
+            CaptureHandoffState::Unsupported(reason) => {
+                NativeProjectCaptureLifecycle::Unsupported(reason)
+            }
+            CaptureHandoffState::Detached => NativeProjectCaptureLifecycle::Detached,
+        }
+    };
+    NativeProjectCaptureStatus {
+        session: status.session(),
+        lifecycle,
+        encoder_state,
+        pending_jobs: status.pending_jobs(),
+        retained_png_bytes: status.retained_png_bytes(),
+        cleanup_pending: status.cleanup_pending() != 0,
+        failure,
+    }
+}
+
+#[cfg(feature = "capture")]
+fn capture_failure(failure: CapturePipelineFailure) -> NativeCaptureFailure {
+    match failure {
+        CapturePipelineFailure::SpoolUnavailable => NativeCaptureFailure::new(
+            "spool_unavailable",
+            "the private capture spool could not be initialized",
+        ),
+        CapturePipelineFailure::EncoderPanicked => {
+            NativeCaptureFailure::new("encoder_panicked", "the capture encoder worker panicked")
+        }
+        CapturePipelineFailure::CleanupFailed => {
+            NativeCaptureFailure::new("cleanup_failed", "capture artifact cleanup failed")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2754,6 +3689,236 @@ mod tests {
     use daedalus_renderer::PacketCpuLimits;
 
     static NEXT_PROJECT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    #[cfg(feature = "capture")]
+    fn live_capture_is_opt_in_in_host_options() {
+        let defaults = NativeProjectHostOptions::for_project("unused-test-path");
+        assert!(!defaults.live_capture);
+        assert!(defaults.with_live_capture().live_capture);
+    }
+
+    #[test]
+    #[cfg(feature = "capture")]
+    fn coordinator_panics_preserve_capture_before_and_after_transfer() {
+        let project = TempProject::new();
+        let (service, consumer, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(project.path()),
+                SessionControlConfig::default(),
+            )
+            .expect("capture test starts one real actor");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(
+                    daedalus_runtime::CaptureSurfaceFormat::Rgba8UnormSrgb,
+                    8,
+                    8,
+                    64,
+                )
+                .expect("small capture bounds are valid"),
+            )
+            .expect("test publishes one actual readiness state");
+        let client = service
+            .session()
+            .attach()
+            .expect("test attaches to the capture actor");
+
+        let mut before_transfer_ticket = submit_capture_ticket(&client);
+        let session = before_transfer_ticket.id().session();
+        let mut pipeline = crate::capture::start_capture_pipeline(session, 1)
+            .expect("test starts one bounded encoder pipeline");
+        let capture_coordinator = pipeline.coordinator_port();
+        let mut cpu_capture = pipeline
+            .take_cpu_worker_port()
+            .expect("one CPU capture owner is installed");
+        let mut state = CoordinatorState::new();
+        state.capture_handoff = Some(handoff);
+        state.capture_coordinator = Some(capture_coordinator.clone());
+        let signal = HostLifecycleSignal::new();
+        let status = Mutex::new(NativeProjectHostStatus {
+            lifecycle: NativeProjectHostLifecycle::Initializing,
+            session,
+            active_generation: 1,
+            active_source_digest: String::new(),
+            cpu: PacketCpuStatus::default(),
+            view_started: false,
+            view_closed: false,
+            last_queued_publication: None,
+            last_presented: None,
+            failure: None,
+        });
+
+        state.capture_test_panic = Some(CaptureCoordinatorPanicPoint::AfterTake);
+        let before_transfer_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_durable_capture_take(&mut state, &signal, &status);
+        }));
+        assert!(before_transfer_panic.is_err());
+        let before_transfer_id = state
+            .pending_capture
+            .as_ref()
+            .and_then(|pending| pending.request.as_ref())
+            .expect("accepted request remains in coordinator state after unwind")
+            .id();
+        let before_transfer_deadline = Instant::now() + CONTROL_REQUEST_TIMEOUT;
+        while state.pending_capture.is_some() {
+            advance_pending_capture(&mut state, None, true);
+            if state.pending_capture.is_some() {
+                assert!(
+                    Instant::now() < before_transfer_deadline,
+                    "pre-transfer capture completion stayed busy"
+                );
+                thread::sleep(COORDINATOR_POLL);
+            }
+        }
+        assert!(state.pending_capture.is_none());
+        assert_capture_ticket_failed(&mut before_transfer_ticket, CaptureFailure::Detached);
+
+        let mut after_transfer_ticket = submit_capture_ticket(&client);
+        wait_for_durable_capture_take(&mut state, &signal, &status);
+        let after_transfer_id = state
+            .pending_capture
+            .as_ref()
+            .and_then(|pending| pending.request.as_ref())
+            .expect("second actor request is durably retained")
+            .id();
+        state
+            .pending_capture
+            .as_mut()
+            .expect("pending request remains installed")
+            .stage_key = Some(ManagedStageKey::INITIAL);
+        state.capture_test_panic = Some(CaptureCoordinatorPanicPoint::AfterTransfer);
+        let after_transfer_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            advance_pending_capture(&mut state, None, false);
+        }));
+        assert!(after_transfer_panic.is_err());
+        assert!(
+            state
+                .pending_capture
+                .as_ref()
+                .is_some_and(|pending| pending.request.is_none())
+        );
+        reject_pending_capture(&mut state);
+        let mut routed = cpu_capture
+            .try_take_request()
+            .expect("CPU ingress remains readable")
+            .expect("transferred request remains in the ingress slot");
+        assert_eq!(routed.stage_key, ManagedStageKey::INITIAL);
+        assert_eq!(routed.request.id(), after_transfer_id);
+        assert_ne!(after_transfer_id, before_transfer_id);
+        complete_capture_responder(
+            routed.request.responder_mut(),
+            &CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        drop(routed);
+        assert_capture_ticket_failed(&mut after_transfer_ticket, CaptureFailure::Cancelled);
+
+        capture_coordinator.close_transfer_fence();
+        assert!(capture_coordinator.is_drained());
+        pipeline.request_stop();
+        let deadline = Instant::now() + CONTROL_REQUEST_TIMEOUT;
+        loop {
+            match cpu_capture.try_finish_encoder() {
+                CaptureEncoderShutdown::Stopped | CaptureEncoderShutdown::Failed(_) => break,
+                CaptureEncoderShutdown::Stopping => {
+                    assert!(Instant::now() < deadline, "test encoder did not finish");
+                    thread::sleep(COORDINATOR_POLL);
+                }
+            }
+        }
+        drop(cpu_capture);
+        drop(state);
+        drop(client);
+        consumer.request_close();
+        drop(consumer);
+        service.request_stop();
+        stop_activation_service(service);
+    }
+
+    #[test]
+    #[cfg(feature = "capture")]
+    fn default_host_keeps_capture_admission_unavailable() {
+        let project = TempProject::new();
+        let mut host =
+            NativeProjectHost::start(NativeProjectHostOptions::for_project(project.path()))
+                .expect("default host starts without an encoder pipeline");
+        let client = host
+            .attach_control()
+            .expect("host attaches its actor client");
+
+        assert_eq!(
+            submit_capture_until_pre_ticket_error(&client),
+            SessionSubmitError::CaptureUnavailable
+        );
+        assert_eq!(
+            capture_status_until_readable(&host.control()).unwrap_err(),
+            NativeCaptureStatusError::Unavailable
+        );
+
+        drop(client);
+        host.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match host
+                .try_shutdown()
+                .expect("default host shuts down cleanly")
+            {
+                NativeProjectHostShutdown::Stopped => break,
+                NativeProjectHostShutdown::Stopping => {
+                    assert!(Instant::now() < deadline, "default host did not stop");
+                    thread::sleep(COORDINATOR_POLL);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "capture")]
+    fn capture_enabled_host_without_a_view_stops_without_claiming_readiness() {
+        let project = TempProject::new();
+        let mut host = NativeProjectHost::start(
+            NativeProjectHostOptions::for_project(project.path()).with_live_capture(),
+        )
+        .expect("capture-enabled host starts its encoder without a device");
+        let client = host
+            .attach_control()
+            .expect("host attaches its actor client");
+
+        assert_eq!(
+            submit_capture_until_pre_ticket_error(&client),
+            SessionSubmitError::CaptureStarting
+        );
+        assert!(matches!(
+            capture_status_until_readable(&host.control()).expect("capture status is readable"),
+            NativeProjectCaptureStatus {
+                lifecycle: NativeProjectCaptureLifecycle::Starting,
+                ..
+            }
+        ));
+
+        drop(client);
+        host.request_stop();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match host
+                .try_shutdown()
+                .expect("capture host shuts down cleanly")
+            {
+                NativeProjectHostShutdown::Stopped => break,
+                NativeProjectHostShutdown::Stopping => {
+                    assert!(Instant::now() < deadline, "capture host did not stop");
+                    thread::sleep(COORDINATOR_POLL);
+                }
+            }
+        }
+        let capture = capture_status_until_readable(&host.control())
+            .expect("capture status survives host shutdown");
+        assert_eq!(capture.lifecycle(), &NativeProjectCaptureLifecycle::Stopped);
+        assert_eq!(capture.pending_jobs(), 0);
+        assert_eq!(capture.retained_png_bytes(), 0);
+        assert!(!capture.cleanup_pending());
+        assert_eq!(capture.encoder_state(), &NativeCaptureEncoderState::Stopped);
+    }
 
     struct TempProject(PathBuf);
 
@@ -2841,6 +4006,117 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "capture")]
+    fn submit_capture_ticket(client: &SessionControlClient) -> daedalus_runtime::RequestTicket {
+        let deadline = Instant::now() + CONTROL_REQUEST_TIMEOUT;
+        loop {
+            match client.try_submit(SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(CONTROL_REQUEST_TIMEOUT),
+            }) {
+                Ok(ticket) => return ticket,
+                Err(SessionSubmitError::Busy | SessionSubmitError::QueueFull)
+                    if Instant::now() < deadline =>
+                {
+                    thread::sleep(COORDINATOR_POLL);
+                }
+                Err(error) => panic!("capture request admission failed: {error}"),
+            }
+        }
+    }
+
+    #[cfg(feature = "capture")]
+    fn submit_capture_until_pre_ticket_error(client: &SessionControlClient) -> SessionSubmitError {
+        let deadline = Instant::now() + CONTROL_REQUEST_TIMEOUT;
+        loop {
+            match client.try_submit(SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: None,
+            }) {
+                Ok(_) => panic!("capture request was unexpectedly admitted"),
+                Err(SessionSubmitError::Busy | SessionSubmitError::QueueFull)
+                    if Instant::now() < deadline =>
+                {
+                    thread::sleep(COORDINATOR_POLL);
+                }
+                Err(error) => return error,
+            }
+        }
+    }
+
+    #[cfg(feature = "capture")]
+    fn capture_status_until_readable(
+        control: &NativeProjectHostControl,
+    ) -> Result<NativeProjectCaptureStatus, NativeCaptureStatusError> {
+        let deadline = Instant::now() + CONTROL_REQUEST_TIMEOUT;
+        loop {
+            match control.try_capture_status() {
+                Err(NativeCaptureStatusError::Busy) if Instant::now() < deadline => {
+                    thread::sleep(COORDINATOR_POLL);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    #[cfg(feature = "capture")]
+    fn complete_capture_responder(
+        responder: &mut daedalus_runtime::CaptureResponder,
+        completion: &CaptureCompletion,
+    ) {
+        let deadline = Instant::now() + CONTROL_REQUEST_TIMEOUT;
+        loop {
+            match responder.try_complete(completion) {
+                Ok(()) => return,
+                Err(CaptureResponderError::Busy) if Instant::now() < deadline => {
+                    thread::sleep(COORDINATOR_POLL);
+                }
+                Err(error) => panic!("capture responder completion failed: {error}"),
+            }
+        }
+    }
+
+    #[cfg(feature = "capture")]
+    fn wait_for_durable_capture_take(
+        state: &mut CoordinatorState,
+        signal: &HostLifecycleSignal,
+        status: &Mutex<NativeProjectHostStatus>,
+    ) {
+        let deadline = Instant::now() + CONTROL_REQUEST_TIMEOUT;
+        loop {
+            take_capture_request(state, signal, status);
+            if state.pending_capture.is_some() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "actor capture request was not handed off"
+            );
+            thread::sleep(COORDINATOR_POLL);
+        }
+    }
+
+    #[cfg(feature = "capture")]
+    fn assert_capture_ticket_failed(
+        ticket: &mut daedalus_runtime::RequestTicket,
+        expected: CaptureFailure,
+    ) {
+        let progress = ticket
+            .wait_for(
+                daedalus_runtime::WaitStage::Terminal,
+                CONTROL_REQUEST_TIMEOUT,
+            )
+            .expect("capture ticket reaches a terminal result");
+        assert_eq!(progress.phase(), RequestPhase::Terminal);
+        assert!(matches!(
+            progress.terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(failure))) if *failure == expected
+        ));
+        ticket
+            .acknowledge()
+            .expect("capture terminal result is acknowledged");
+    }
+
     #[test]
     #[cfg(feature = "window")]
     fn out_of_band_window_controls_signal_even_if_forwarding_lock_is_busy() {
@@ -2862,6 +4138,8 @@ mod tests {
             signal: Arc::clone(&signal),
             status,
             window: Arc::clone(&window),
+            #[cfg(feature = "capture")]
+            capture_control: None,
         };
         let held = window.lock().expect("test owns forwarding mutex");
 

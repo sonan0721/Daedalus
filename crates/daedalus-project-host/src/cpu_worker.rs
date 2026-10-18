@@ -31,6 +31,16 @@ use daedalus_runtime::{
 
 use crate::host::HostLifecycleSignal;
 
+#[cfg(feature = "capture")]
+mod capture_progress;
+
+#[cfg(feature = "capture")]
+pub(super) struct CpuCapturePorts {
+    pub pipeline: crate::capture::CaptureCpuWorkerPort,
+    pub renderer_client: daedalus_renderer::ManagedCaptureClient,
+    pub renderer_worker: daedalus_renderer::ManagedCaptureWorker,
+}
+
 const REQUEST_CAPACITY: usize = 1;
 const OWNER_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
@@ -392,6 +402,7 @@ pub(super) fn spawn(
     owner: PacketCpuOwner,
     client: SessionControlClient,
     signal: Arc<HostLifecycleSignal>,
+    #[cfg(feature = "capture")] capture: Option<CpuCapturePorts>,
 ) -> std::io::Result<CpuWorker> {
     let (prepare_tx, prepare_rx) = mpsc::sync_channel(REQUEST_CAPACITY);
     #[cfg(feature = "window")]
@@ -444,6 +455,8 @@ pub(super) fn spawn(
                     status,
                     #[cfg(feature = "window")]
                     gpu_owner_return,
+                    #[cfg(feature = "capture")]
+                    capture,
                     signal,
                 );
             }
@@ -482,11 +495,14 @@ fn run_owner(
     failures: ResultMailbox<CpuFailure>,
     statuses: StatusMailbox,
     #[cfg(feature = "window")] gpu_owner_return: GpuOwnerReturnSlot,
+    #[cfg(feature = "capture")] capture: Option<CpuCapturePorts>,
     signal: Arc<HostLifecycleSignal>,
 ) {
     let mut generations = Vec::<Generation>::with_capacity(2);
     #[cfg(feature = "window")]
     let mut gpu_owner: Option<WindowGpuOwner> = None;
+    #[cfg(feature = "capture")]
+    let mut capture = capture.map(capture_progress::CaptureWorkerState::new);
     let mut pending_prepare: Option<PendingPrepare> = None;
     #[cfg(feature = "window")]
     let mut pending_stage: Option<StageInputRequest> = None;
@@ -656,6 +672,13 @@ fn run_owner(
                 publish_pending(&failures, &mut pending_failure);
             }
 
+            #[cfg(feature = "capture")]
+            if let Some(capture) = capture.as_mut() {
+                capture.progress(stop_started, &mut pending_failure);
+                // Capture can publish a failure or a terminal response in this same iteration.
+                publish_pending(&failures, &mut pending_failure);
+            }
+
             let status = owner.status();
             if status != last_status {
                 statuses.publish_latest(status);
@@ -668,11 +691,26 @@ fn run_owner(
             worker_panicked = true;
             stop_started = true;
             signal.stop_requested.store(true, Ordering::Release);
+            #[cfg(feature = "capture")]
+            if let Some(capture) = capture.as_mut() {
+                capture.iteration_panicked();
+            }
             let _ = failures.try_publish(CpuFailure {
                 code: "cpu_owner_panicked",
                 message: "CPU owner job panicked; cleanup remains on its owner thread".to_owned(),
             });
         }
+
+        #[cfg(feature = "capture")]
+        let capture_drained = if let Some(capture) = capture.as_ref() {
+            let drained = capture.drained();
+            if drained {
+                signal.capture_drained.store(true, Ordering::Release);
+            }
+            drained
+        } else {
+            true
+        };
 
         let status = owner.status();
         statuses.publish_latest(status);
@@ -687,6 +725,16 @@ fn run_owner(
         if stop_started
             && !owner_waiting
             && !signal.prepare_handoff_pending.load(Ordering::Acquire)
+            && {
+                #[cfg(feature = "capture")]
+                {
+                    capture_drained
+                }
+                #[cfg(not(feature = "capture"))]
+                {
+                    true
+                }
+            }
             && device_drained
             && status.generation_slots_used == 0
             && status.frame_slots_used == 0
@@ -1416,6 +1464,114 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "capture")]
+    fn capture_cpu_owner_drains_an_unopened_view_before_reporting_capture_stopped() {
+        let project = TempProject::new();
+        let (service, consumer) = NativeProjectActivationService::start_with_render_consumer(
+            NativeProjectPreparationOptions::new(project.path()),
+            SessionControlConfig::default(),
+        )
+        .expect("fixture starts the real runtime project and actor");
+        let client = service
+            .session()
+            .attach()
+            .expect("CPU owner attaches to the real runtime actor");
+        let probe_a = service
+            .session()
+            .attach()
+            .expect("first independent runtime client attaches");
+        let probe_b = service
+            .session()
+            .attach()
+            .expect("second independent runtime client attaches");
+        let submit_status = |client: &SessionControlClient| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match client.try_submit(SessionOperation::Status) {
+                    Ok(ticket) => break ticket,
+                    Err(
+                        daedalus_runtime::SessionSubmitError::Busy
+                        | daedalus_runtime::SessionSubmitError::QueueFull,
+                    ) => {
+                        assert!(Instant::now() < deadline, "status ticket stayed busy");
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("status ticket was rejected: {error}"),
+                }
+            }
+        };
+        let ticket_a = submit_status(&probe_a);
+        let ticket_b = submit_status(&probe_b);
+        let session = ticket_a.id().session();
+        assert_eq!(ticket_a.id().sequence(), 1);
+        assert_eq!(ticket_b.id().sequence(), 1);
+        assert_ne!(ticket_a.id().client(), ticket_b.id().client());
+        let mut key_sequence = 1;
+        let key_a = capture_progress::allocate_key(&mut key_sequence).expect("first renderer key");
+        let key_b = capture_progress::allocate_key(&mut key_sequence).expect("second renderer key");
+        assert_eq!((key_a.get(), key_b.get()), (1, 2));
+        drop((ticket_a, ticket_b, probe_a, probe_b));
+
+        let mut pipeline = crate::capture::start_capture_pipeline(session, 3)
+            .expect("capture encoder owner starts without caller-side file I/O");
+        let (window_client, renderer_client, server) =
+            daedalus_renderer::managed_packet_window_capture_channel();
+        let renderer_worker = renderer_client
+            .register_worker()
+            .expect("capture worker is registered before any window starts");
+        let pipeline_port = pipeline
+            .take_cpu_worker_port()
+            .expect("CPU owner receives the sole encoder join handle");
+        let cpu_owner = PacketCpuOwner::new(
+            PacketCpuLimits::default(),
+            PacketRendererLimits::default(),
+            PacketAssetLimits::default(),
+        )
+        .expect("default CPU limits are valid");
+        let signal = Arc::new(HostLifecycleSignal::new());
+        let cpu = spawn(
+            cpu_owner,
+            client,
+            Arc::clone(&signal),
+            Some(CpuCapturePorts {
+                pipeline: pipeline_port,
+                renderer_client,
+                renderer_worker,
+            }),
+        )
+        .expect("existing CPU owner thread starts with capture ports");
+
+        // No run_view/channel presentation occurs. The normal close and capture-transfer fence
+        // still let the one CPU owner detach the renderer endpoint and join the encoder.
+        drop(window_client);
+        drop(server);
+        consumer.request_close();
+        pipeline.coordinator_port().close_transfer_fence();
+        signal.stop_requested.store(true, Ordering::Release);
+        service.request_stop();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !cpu.join.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "capture CPU owner did not finish unopened-view cleanup"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            signal.capture_drained.load(Ordering::Acquire),
+            "capture drained is published only after the no-view owner cleanup completes"
+        );
+        let CpuWorker { join, .. } = cpu;
+        join.join().expect("CPU owner exits without panic");
+
+        drop(consumer);
+        drop(pipeline);
+        stop_activation_service(service);
+        drop(project);
+    }
+
+    #[test]
     #[cfg(feature = "window")]
     fn real_worker_drains_returned_owner_without_waiting_for_result_ack() {
         let project = TempProject::new();
@@ -1445,7 +1601,12 @@ mod tests {
             PacketAssetLimits::default(),
         )
         .expect("default CPU owner limits are valid");
-        let worker = spawn(owner, client, Arc::clone(&signal)).expect("CPU owner thread starts");
+        #[cfg(feature = "capture")]
+        let worker = spawn(owner, client, Arc::clone(&signal), None)
+            .expect("CPU owner thread starts without capture mode");
+        #[cfg(not(feature = "capture"))]
+        let worker = spawn(owner, client, Arc::clone(&signal))
+            .expect("CPU owner thread starts without capture mode");
 
         worker
             .prepare

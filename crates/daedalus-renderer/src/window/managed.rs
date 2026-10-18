@@ -15,6 +15,7 @@ use crate::{
     RenderView, WindowGpuOwner, WindowGpuOwnerPhase,
 };
 
+use super::capture::ManagedCaptureShared;
 use super::{WindowExitReason, WindowReport};
 
 const MANAGED_INPUT_CAPACITY: usize = 1;
@@ -659,6 +660,7 @@ impl ManagedPacketWindowControl {
 pub struct ManagedPacketWindowServer {
     pub(super) receiver: Receiver<ManagedPacketWindowInput>,
     pub(super) shared: Arc<ManagedWindowShared>,
+    pub(super) capture: Option<Arc<ManagedCaptureShared>>,
 }
 
 /// Creates the fixed-capacity payload channel plus independent finite metadata/control slots.
@@ -670,7 +672,11 @@ pub fn managed_packet_window_channel() -> (ManagedPacketWindowClient, ManagedPac
             sender,
             shared: Arc::clone(&shared),
         },
-        ManagedPacketWindowServer { receiver, shared },
+        ManagedPacketWindowServer {
+            receiver,
+            shared,
+            capture: None,
+        },
     )
 }
 

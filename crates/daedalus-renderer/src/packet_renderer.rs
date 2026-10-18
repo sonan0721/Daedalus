@@ -12,6 +12,8 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec3};
 use wgpu::util::DeviceExt;
 
+#[cfg(feature = "window")]
+use crate::window::ManagedCaptureCell;
 use crate::{
     Camera, CaptureArtifact, CaptureOptions, CpuFrameHandle, Material, MeshHandle,
     PacketAssetLimits, PacketRenderError, PacketRendererLimits, PacketStageInput, RenderInstance,
@@ -248,6 +250,8 @@ pub struct PacketRenderer {
     staging_bookkeeping_bytes: usize,
     touch_serial: u64,
     stage_state: staging::StageState,
+    #[cfg(feature = "window")]
+    managed_capture_cell: Option<Arc<ManagedCaptureCell>>,
 }
 
 /// The packet and exact camera/projection used for one successful submission.
@@ -588,11 +592,23 @@ impl PacketRendererInitOwner {
             staging_bookkeeping_bytes: 0,
             touch_serial: 0,
             stage_state: plan.stage_state,
+            #[cfg(feature = "window")]
+            managed_capture_cell: None,
         }
     }
 }
 
 impl PacketRenderer {
+    #[cfg(feature = "window")]
+    pub(crate) fn attach_managed_capture_cell(&mut self, cell: Arc<ManagedCaptureCell>) {
+        self.managed_capture_cell = Some(cell);
+    }
+
+    #[cfg(feature = "window")]
+    pub(crate) fn poll_managed_capture(&mut self) -> Result<(), PacketRenderError> {
+        self.poll_retirement()
+    }
+
     pub(crate) fn new(
         renderer: Renderer,
         limits: PacketRendererLimits,

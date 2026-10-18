@@ -1,10 +1,10 @@
 # P02.3a.2: actual surface capture renderer 작업 기록
 
-상태: source 구현 착수, 실제 GPU 검증 전 · 2026-10-18
+상태: renderer CPU·첫 실제 Metal surface/close checkpoint 통과, a.2 인수는 열림 · 2026-10-18
 
 ## 만든 이유
 
-[runtime a.1 기록](2026-10-18-live-capture-foundation.md)의 CPU metadata fixture와 실제 surface 픽셀 복사를 구분한다. `f3880d7`은 요청·credit·수명 기반만 인수했으며 main의 기존 CLI는 여전히 `live_capture=false`다. 이번 기록은 [renderer 반환 계약](../03-architecture/live-capture-renderer-return.md)의 source·실패·CPU 검사·실제 native proof를 별도로 추적하기 위한 것이다. 첫 renderer CPU checkpoint는 통과했지만 실제 GPU는 미실행이며 publication/frame pin 보완은 재검증 전이다.
+[runtime a.1 기록](2026-10-18-live-capture-foundation.md)의 CPU metadata fixture와 실제 surface 픽셀 복사를 구분한다. `f3880d7`은 요청·credit·수명 기반만 인수했으며 main의 기존 CLI는 여전히 `live_capture=false`다. 이번 기록은 [renderer 반환 계약](../03-architecture/live-capture-renderer-return.md)의 source·실패·CPU 검사·실제 native proof를 별도로 추적하기 위한 것이다. publication/frame pin을 보완한 renderer CPU103건과 no-default58건은 통과했다. 검증용 example의 strict/build와 실제 Metal 세 scenario가 통과했다. resize/old-ready/실제 GPU failure 경로와 host/CLI 연결은 후속이다.
 
 ## Source 소유권과 순서
 
@@ -27,10 +27,10 @@ source가 커지는 단계에서 별도 Luna A가 새 `window/capture/ownership_
 
 | Gate | 상태 |
 | --- | --- |
-| CPU lane/소유권/거부/limit/alignment·map/fence/cancel/panic | 첫98 CPU 통과, 아래 frame pin·byte/layout·unwind 보완과 재검증 전 |
-| 실제 surface capability·같은 acquired frame의 pixels/metadata | native harness 전 |
-| known color·RGBA/BGRA·manual-sRGB·overlay·resize·old-ready view | 실제 GPU 검증 전 |
-| close/worker drop·mapped view/queue fence·owner drain/final buffer drop | 구현·실제 검증 전 |
+| CPU lane/소유권/거부/limit/alignment·map/fence/cancel/panic | frame pin·byte/layout·metadata unwind 포함103 CPU 통과; 실제 GPU unwind 미검증 |
+| 실제 surface capability·같은 acquired frame의 pixels/metadata | M3 Pro/Metal BGRA8 sRGB 640×480 실제 반복 capture 통과 |
+| known color·RGBA/BGRA·manual-sRGB·overlay·resize·old-ready view | 실제 BGRA8 sRGB/overlay 통과; 나머지 실제 GPU format·resize·old-ready 후속 |
+| close/worker drop·mapped view/queue fence·owner drain/final buffer drop | held readback/worker detach 실제 Pending→Drained 통과; 실제 GPU failure 주입 후속 |
 | host artifact·PNG/file/reader·CLI protocol capture | 후속 a.3/a.4, 미구현 |
 
 실제 실행 raw·source/binary hash·실패·장치 범위는 실행 뒤에만 추가한다. 별도 offscreen PNG를 이 gate의 증거로 쓰지 않는다. a.2·상위 P02.3a·D1/D2/D3는 미통과다.
@@ -82,3 +82,50 @@ actual copy/present·반환 owner 연결 뒤 세 번째 lib-only check는 exit10
 이 snapshot은 actual window/pixels·harness·workspace/package 인수가 아니다. 후속 host source 감사에서 present ACK metadata가 async capture 완료 전에 제거될 수 있음을 확인했다. [명세 보완](../03-architecture/live-capture-host-artifacts.md#실제-publication의-상관관계와-수명)은 actual selected frame을 renderer cell이 strong pin하고 readback은 Weak만 반환해 host가 실제 opaque publication을 read/cleanup 전에 고정하도록 한다. UI/handle Drop이 큰 frame backing을 해제하지 않으며 worker release만 Buffer와 pin을 함께 마감한다. D가 해당 source와 byte/layout·post-submit unwind CPU 회귀를 추가하며, 새 focused Cargo lease도 D만 보유한다. 이 변경은 위98건의 snapshot 뒤이므로 재검증 전이다.
 
 harness의 실패 정책도 source 리뷰했다. report 전송 직후 thread 종료를 단 한 번 검사하면 scheduler 경합으로 실패할 수 있어 bounded 종료 확인 뒤 join하도록 했다. returned owner 전달 실패·GPU poll/drain deadline을 실제 정리로 바꿔서는 안 된다. 이 예제의 회복 불가능한 경우는 `cleanup_complete:false`·`unresolved_gpu_owner_retained:true`인 실패로 표시하고 process 수명까지 owner를 보존한다. UI에서 Drop하거나 Pending을 Drained로 바꾸지 않는다. 정상 인수는 actual Drained 뒤 worker final Drop만 허용하며, 이 fatal 예제 정책을 production host의 graceful cleanup 구현으로 계산하지 않는다.
+
+
+## Frame pin 보완 뒤 CPU 검증과 example compile
+
+production `try_take_return`에서 test build에만 frame 부재를 허용하던 분기는 제거했다. CPU test도 실제 content validation/CPU owner가 만든 frame을 cell에 설치한다. readback은 해당 frame의 Weak만 노출하고 buffer와 strong pin은 worker read/cleanup/fallback이 차례로 해제한다. 네 surface format의 padded-row RGBA/BGRA 변환·gamma 재적용 방지, 크기/정렬/device-buffer limit, 짧은 mapped range를 CPU bytes로 대조했다. unwind fixture의 map/fence 상태는 test가 설정한 metadata이며 실제 GPU panic의 증거가 아니다.
+
+attempt11은 이미 필요한 lib check에 `--timings`만 더해 통과했다. raw `p02-capture-renderer-luna-attempt11.log` SHA-256 `2f4f6cf49e859034a53e82c7f9a35f7723dfd0950be422bce4c1e7be2a6776e9`, runner elapsed8.346초다. timestamped HTML `target/cargo-timings/cargo-timing-20261018T025659.424079Z.html` SHA-256 `abde26a2fb61deada3d8d3d72747316469be70c7094c88689c8685e3ae4d3608`은 전체8.2초·fresh dependency155/dirty renderer1·renderer check7.77초를 기록했다. warm dependency cache의 변경된 lib check 한 번이며 executable link·cold build·가속 개선율 측정은 아니다.
+
+attempt12는 새 byte fixture의 height 타입 불일치 한 건으로 compile 실패했고, 수정 뒤 attempt13은103passed/0failed/29hardware ignored였다. attempt14 all-target strict는 example의 unused import·non-Clone client 사용·도달 불가능 event arm 세 건으로 실패했다. 해당 파일 소유자에게 수정한 뒤 attempt16/21은 남은 example Clippy 네 건(map identity·동일 if 분기·불필요 borrow·중첩 if)을 검출했다. attempt19 no-default strict는 feature-gated import 한 건을 검출해 cfg 경계를 수정했다. 모든 실패 원본은 다음 새 attempt와 별도로 보존한다.
+
+| 최종 CPU 범위(실제 native 실행 전) | raw (`dist/project-evidence/`) | SHA-256 | 결과 |
+| --- | --- | --- | --- |
+| all-features lib test | `p02-capture-renderer-luna-attempt22.log` | `e90aeac1eaf2934fce437757b3b676432eb4b8857cedd42bbfdbe687839b8ffc` | 103통과/0failed/29hardware ignored |
+| no-default lib test | `p02-capture-renderer-luna-attempt18.log` | `29b58447b142743ecb52e991c108558e173fd7f0cf4c1ccf15c6fabf6e4b148a` | 58통과/0failed/28hardware ignored |
+| no-default all-target strict Clippy | `p02-capture-renderer-luna-attempt20.log` | `bd2c6d1f0c2f65157bc47e6694836f5388b49799783ef9a4e1ea74b7bb08c1e7` | 통과 |
+
+두 lib 구성의 test는 겹치는 case를 포함하므로161개의 고유 시험으로 합산하지 않는다. C는 example strict 수정 뒤 SHA-256 `47212c90f93e8094e5c9f18a86cce9f80ae58a2d598561b229c190fedc80dc7b`로 다시 동결했다. 이 시점은 all-target strict/example build 재검사 대기이며 native/GPU 실행 전이다. 앞선 example hash를 다시 검사해 같은 지적을 반복한 왕복이 있어, 완료된 담당자를 명시적으로 재시작하고 **새 hash의 동결 통보 뒤** Cargo 소유자가 후속 검사를 실행하도록 조정했다. 시간 절감 수치는 측정하지 않았다.
+
+
+새 example freeze 뒤 attempt23 all-target/all-features strict Clippy는 통과했다(raw SHA-256 `29bc13e1336484516b9ca97b15237a1242271acf6cc07e35eb8bd2b29c3d031b`). attempt24 explicit example check도 통과했다(`53d9436b56b0b24466797e8159e9b6cd751f032e1e3787524da1a93d9f7e565c`). raw 이름은 각각 `p02-capture-renderer-luna-attempt23.log`·`...attempt24.log`이며 scoped formatting/whitespace 검사를 마치고 Cargo lease를 root에게 반환했다. `cargo check`는 실행 파일 링크를 대신하지 않으므로 root는 별도 필요한 example build에 timings를 붙여 실행한다. 실제 native capture는 그 executable 빌드·source 리뷰 뒤에만 진행한다.
+
+
+## 첫 실제 Metal surface checkpoint
+
+root의 첫 executable build는6.081초에 통과했다. `--timings` HTML `target/cargo-timings/cargo-timing-20261018T030343.412062Z.html`(SHA-256 `d1c157fe5c0508f3fd96e48a2acf08923bb87f288f1e285a894d8958d2df5c2a`)은 renderer lib3.89초·example1.74초를 기록했다. library check와 다른 작업 범위이므로 앞선8.2초보다 컴파일이 개선됐다는 비교는 하지 않는다.
+
+첫 native attempt는 창 생성 전에 fixture scene의 잘못된 `presentation` field를 거부했다. 이 설정은 `ProjectManifest` 소속이다. root schema 리뷰에서도 배치 오류를 놓쳤고, C가 manifest로 옮기고 나머지 field를 실제 schema와 대조했다. 실패 raw `p02-capture-renderer-native-capture-01.log` SHA-256은 `40adb3a041a5189c7e25dd095a44e05487f9ff1912e768eaa05b72b2649b09f7`이다. 첫 실패를 GPU 결과나 성공으로 바꾸지 않는다.
+
+수정 example SHA-256은 `15ebd3c1585caeede90b40f169a05b23d78203a6ab502fb62b9fc463fda02a87`이다. 재빌드 `p02-capture-renderer-root-example-build-02.log`는3.271초/exit0·SHA-256 `7e9b0bf4d642af05b99cbcd9df94e8d558fffae3edf8e7b51dd0dcac6cfcff66`이며, 실제 세 scenario에 쓴 executable `target/debug/examples/managed_live_capture` SHA-256은 **`07a56e937e16b531b9dd34cfd3d9f6349f4f7bb8ab62b0c821dda422b48bd59b`**다. 마지막 example strict와 전체 fmt도 통과했다. raw는 각각 `p02-capture-renderer-root-example-strict-01.log`(`d49416dd2eb6a7f432e294ea8e93cbd90ef387f499ca397f087f26c7c7ded7d4`)·`p02-capture-renderer-root-fmt-01.log`(`797ce29e0dc3520b6d917de4e054f83cababad2b1248c7ee674212688e67ad90`)다.
+
+같은 executable을 Mac main-thread native 창에서 순서대로 실행했다. 실제 adapter Apple M3 Pro·Metal·IntegratedGpu, negotiated surface `bgra8_unorm_srgb`, physical640×480이었다. OS 창을 외부 자동화로 읽거나 조작한 증거는 아니다. fixture의 authority는 `synthetic_snapshot_fixture`이며 actual runtime SessionControl/CLI capture와 구분한다.
+
+| Scenario | raw (`dist/project-evidence/`) | raw SHA-256 | 관측 |
+| --- | --- | --- | --- |
+| capture | `p02-capture-renderer-native-capture-02.log` | `3f2cf08c8998e22fae744838f63220db52330b88df0f42b12a0a9171e8809b44` | 같은 source/tick/publication의 actual present1/21에서 overlay 포함/제거 PNG2개, known clear·mesh·decode 일치, 최종 Drained |
+| close-held | `p02-capture-renderer-native-close-held-01.log` | `42213288fa07b0105794992ec71d9daad487298c7f5fc5b7dc3006b920f42664` | held readback 동안 drain Pending, 창 종료 후 pixels/PNG 완료, release 뒤 Drained |
+| worker-drop | `p02-capture-renderer-native-worker-drop-01.log` | `4e9c773e57f125b588aed7021413d749ecb1c3aef4d20a1adf4ad13dda844f9a` | held handle 동안 Pending, 실제 worker endpoint→readback Drop 뒤 fallback Drained |
+
+세 report 모두 success/cleanup_complete=true·unresolved_gpu_owner_retained=false였다. 각 raw와 같은 stem의 별도 directory에 `report.json`·PNG가 있다. root는 저장된 PNG를 Pillow로 다시 읽고 RGBA/PNG SHA-256·크기·세 sample을 report와 독립 대조했다. 이 대조의 최초 stdout은 tool 응답으로 관찰했으며 별도 raw 파일은 남기지 않았다. 실제 두 capture 파일도 `view_image`로 열어 빨간 triangle·첫 loading bar·두 번째 bar 부재를 확인했다.
+
+| 저장 PNG | 파일 bytes | PNG SHA-256 |
+| --- | --- | --- |
+| `p02-capture-renderer-native-capture-02/capture-1.png` | 10,330 | `ce13f3d30f597ab981a67d1a18924d09f6867d750070f763f6a89ab118c38bf3` |
+| `p02-capture-renderer-native-capture-02/capture-2.png` | 10,588 | `970b7946336d64186181f8ea6400e5489e2aea6d138a67e1844852a03ae24b61` |
+| `p02-capture-renderer-native-close-held-01/capture-1.png` | 10,329 | `711e5779cffb26a54c17f478c081077e33ba6e9ce8ae81c7326e807a98be3ee8` |
+
+두 capture의 RGBA SHA-256은 각각 `50c5c5836f91b55931821ad14ed8fc91252fa0357fee09326ac125b9080bbb6e`·`6c730e97c625fb6b9196065636581be1c7af09377182b2655695f6213fc8d91c`다. 두 번째 clear sample은48/56/69/255, 첫 overlay probe는109/207/244/255이며 두 번째 같은 위치는48/56/69/255였다. 같은 actual frame을 copy하고 BGRA를 RGBA로 바꾸되 gamma를 다시 적용하지 않는 이 장치의 경로를 확인했다. 다른 surface format·resize·forced old-ready·실제 GPU failure/panic은 이번 세 scenario에서 미실행이다. a.2 전체, host a.3/CLI a.4, P02와 D1/D2/D3는 계속 열려 있다.

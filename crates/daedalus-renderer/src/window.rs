@@ -57,7 +57,13 @@ impl WindowInputPolicy {
     }
 }
 
+mod capture;
 mod managed;
+pub use capture::*;
+pub(crate) use capture::{
+    CellLockError as ManagedCaptureCellLockError, ManagedCaptureCell, ManagedCaptureCellGuard,
+    checked_capture_buffer_layout,
+};
 use managed::ManagedPresentedReservationError;
 pub use managed::*;
 
@@ -72,6 +78,7 @@ pub const MAX_WINDOW_SCENE_GEOMETRY_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum number of recent CPU frame intervals retained in a window report.
 pub const FRAME_INTERVAL_SAMPLE_CAPACITY: usize = 512;
 const MAX_MESSAGES_PER_EVENT: usize = 64;
+const MANAGED_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Messages from runtime/presentation producers to the window-owned renderer.
 /// The receiver is drained with `try_recv`; a delayed simulation or producer
@@ -615,6 +622,9 @@ pub fn run_packet_windowed_managed_with_input_policy(
     options: ManagedPacketWindowOptions,
     input_policy: WindowInputPolicy,
 ) -> ManagedWindowRun {
+    if let Some(capture) = server.capture.as_ref() {
+        capture.mark_window_started();
+    }
     let mut app = WindowApp::new_managed(initial, server, options, input_policy);
     let run_result = catch_unwind(AssertUnwindSafe(|| {
         app.validate_managed_start()?;
@@ -668,6 +678,21 @@ fn validate_options(options: &WindowOptions) -> Result<(), RendererError> {
 
 fn max_run_time_reached(started_at: Instant, now: Instant, limit: Option<Duration>) -> bool {
     limit.is_some_and(|limit| now.saturating_duration_since(started_at) >= limit)
+}
+
+fn managed_capture_wait_until(
+    now: Instant,
+    scheduled: Instant,
+    request_deadline: Option<Instant>,
+) -> Instant {
+    let retry = now
+        .checked_add(MANAGED_CAPTURE_POLL_INTERVAL)
+        .unwrap_or(scheduled);
+    let mut wake = scheduled.min(retry);
+    if let Some(deadline) = request_deadline.filter(|deadline| *deadline > now) {
+        wake = wake.min(deadline);
+    }
+    wake
 }
 
 fn max_frames_reached(rendered_frames: u64, limit: Option<u64>) -> bool {
@@ -889,6 +914,7 @@ struct WindowApp {
     packet_renderer: Option<PacketRenderer>,
     gpu_owner: Option<WindowGpuOwner>,
     managed: Option<ManagedWindowState>,
+    capture_request: Option<Box<ManagedCaptureRequest>>,
     managed_failure: Option<ManagedWindowError>,
     managed_reason: Option<ManagedWindowExitReason>,
     packet_limits: PacketRendererLimits,
@@ -1191,6 +1217,7 @@ impl WindowApp {
             packet_renderer: None,
             gpu_owner: None,
             managed: None,
+            capture_request: None,
             managed_failure: None,
             managed_reason: None,
             packet_limits,
@@ -1321,6 +1348,14 @@ impl WindowApp {
             .managed
             .as_ref()
             .map(|state| Arc::clone(&state.server.shared));
+        if let Some(capture) = self
+            .managed
+            .as_ref()
+            .and_then(|state| state.server.capture.as_ref())
+        {
+            capture.close_window();
+        }
+        self.capture_request = None;
         if let Some(shared) = &shared {
             shared.mark_closed();
             let _ = shared.try_publish_status(status.clone());
@@ -1629,6 +1664,31 @@ impl WindowApp {
                     "surface exposes no color format",
                 )
             })?;
+        let capture_shared = self
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.server.capture.as_ref())
+            .cloned();
+        let capture_format = capture::capture_format_for_wgpu(format);
+        let capture_can_copy = capture_shared
+            .as_ref()
+            .is_some_and(|shared| matches!(shared.state(), ManagedCaptureState::Starting))
+            && capabilities.usages.contains(wgpu::TextureUsages::COPY_SRC)
+            && capture_format.is_some();
+        if let Some(shared) = &capture_shared
+            && matches!(shared.state(), ManagedCaptureState::Starting)
+        {
+            let unsupported = if !capabilities.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+                Some(ManagedCaptureUnsupportedReason::SurfaceCopyUnavailable)
+            } else if capture_format.is_none() {
+                Some(ManagedCaptureUnsupportedReason::UnsupportedSurfaceFormat)
+            } else {
+                None
+            };
+            if let Some(reason) = unsupported {
+                let _ = shared.try_set_unsupported(reason);
+            }
+        }
         let present_mode = if capabilities
             .present_modes
             .contains(&wgpu::PresentMode::AutoVsync)
@@ -1648,7 +1708,12 @@ impl WindowApp {
             })?
         };
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | if capture_can_copy {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -1684,6 +1749,32 @@ impl WindowApp {
             .map_err(|error| {
                 ManagedWindowError::new(ManagedWindowErrorCode::Packet, error.to_string())
             })?;
+        if capture_can_copy
+            && let (Some(shared), Some(surface_format)) = (capture_shared.as_ref(), capture_format)
+            && let Some(packet_renderer) = owner.packet_renderer_mut()
+        {
+            packet_renderer.attach_managed_capture_cell(shared.cell());
+            let max_dimension = packet_renderer
+                .device()
+                .limits()
+                .max_texture_dimension_2d
+                .min(MANAGED_CAPTURE_MAX_WIDTH)
+                .min(MANAGED_CAPTURE_MAX_HEIGHT);
+            let max_pixels = u64::from(max_dimension)
+                .saturating_mul(u64::from(max_dimension))
+                .min(MANAGED_CAPTURE_MAX_PIXELS);
+            if let Ok(ready) = ManagedCaptureReadyInfo::new(
+                surface_format,
+                max_dimension,
+                max_dimension,
+                max_pixels,
+            ) {
+                let _ = shared.try_set_ready(ready);
+            } else {
+                let _ =
+                    shared.try_set_unsupported(ManagedCaptureUnsupportedReason::CaptureDisabled);
+            }
+        }
         self.window = Some(window);
         self.surface = Some(SurfaceState { surface, config });
         self.update_window_title();
@@ -1955,6 +2046,7 @@ impl WindowApp {
         if self.mode != WindowMode::Managed {
             return;
         }
+        self.poll_managed_capture_request();
         self.poll_managed_signals(event_loop);
         if self.managed_failure.is_some() || self.exit_reason.is_some() {
             return;
@@ -1987,6 +2079,58 @@ impl WindowApp {
             if self.managed_failure.is_some() || self.exit_reason.is_some() {
                 return;
             }
+        }
+    }
+
+    fn poll_managed_capture_request(&mut self) {
+        let Some(shared) = self
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.server.capture.as_ref())
+            .cloned()
+        else {
+            self.capture_request = None;
+            return;
+        };
+
+        if let Some(request) = self.capture_request.as_ref() {
+            let key = request.key();
+            let cell = shared.cell();
+            if cell.current_key() != Some(key) || cell.is_released() {
+                // The worker may have consumed a terminal result and reused the
+                // single cell before this window receives another eligible draw.
+                self.capture_request = None;
+            } else {
+                let terminal_failure = if cell.is_cancelled(key) {
+                    Some(ManagedCaptureFailure::Cancelled)
+                } else if Instant::now() >= request.deadline() {
+                    Some(ManagedCaptureFailure::DeadlineElapsed)
+                } else {
+                    None
+                };
+                if let Some(failure) = terminal_failure {
+                    match cell.mark_failed(key, failure) {
+                        Ok(()) | Err(ManagedCaptureCellLockError::WrongKey) => {
+                            self.capture_request = None;
+                        }
+                        Err(ManagedCaptureCellLockError::Busy) => return,
+                        Err(ManagedCaptureCellLockError::InvalidState) => {
+                            self.capture_request = None;
+                        }
+                    }
+                }
+            }
+        }
+        if self.capture_request.is_some() {
+            return;
+        }
+        match shared.try_take_request() {
+            Ok(Some(request)) => self.capture_request = Some(request),
+            Ok(None)
+            | Err(ManagedCaptureEndpointError::Busy)
+            | Err(ManagedCaptureEndpointError::Detached)
+            | Err(ManagedCaptureEndpointError::Poisoned)
+            | Err(ManagedCaptureEndpointError::AlreadyRegistered) => {}
         }
     }
 
@@ -2513,9 +2657,116 @@ impl WindowApp {
                 return;
             }
         }
+        let selected_frame = chosen_frame.as_ref().filter(|frame| {
+            presented_submission
+                .is_some_and(|submitted| std::ptr::eq(frame.packet(), submitted.packet().as_ref()))
+        });
+
+        let capture_shared = self
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.server.capture.as_ref())
+            .cloned();
+        let capture_cell = capture_shared.as_ref().map(|shared| shared.cell());
+        let mut capture_guard = None;
+        let mut capture_request_consumed = false;
+        if let (Some(request), Some(presented)) =
+            (self.capture_request.as_ref(), intended_present.as_ref())
+            && let (Some(capture_shared), Some(cell)) =
+                (capture_shared.as_ref(), capture_cell.as_ref())
+        {
+            let failure = if now >= request.deadline() {
+                Some(ManagedCaptureFailure::DeadlineElapsed)
+            } else if cell.is_cancelled(request.key()) {
+                Some(ManagedCaptureFailure::Cancelled)
+            } else if request.source().session() != presented.session() {
+                Some(ManagedCaptureFailure::StaleSource)
+            } else if request.source().project_generation() > presented.project_generation() {
+                None
+            } else if request.source().project_generation() < presented.project_generation()
+                || !request.source().matches_view(presented)
+            {
+                Some(ManagedCaptureFailure::StaleSource)
+            } else if presented.tick() < request.at_least_tick() {
+                None
+            } else if selected_frame.is_none() {
+                Some(ManagedCaptureFailure::StaleSource)
+            } else {
+                match capture_shared.state() {
+                    ManagedCaptureState::Ready(info) => {
+                        match cell.try_lock_for_ui(request.key()) {
+                            Ok(mut guard) => {
+                                let result = self
+                                    .gpu_owner
+                                    .as_mut()
+                                    .and_then(WindowGpuOwner::packet_renderer_mut)
+                                    .ok_or(ManagedCaptureFailure::CopyFailed)
+                                    .and_then(|renderer| {
+                                        renderer.try_submit_managed_capture_copy(
+                                            &surface_frame.texture,
+                                            width,
+                                            height,
+                                            info,
+                                            info.surface_format(),
+                                            selected_frame.expect("eligible selected frame"),
+                                            cell,
+                                            &mut guard,
+                                        )
+                                    });
+                                match result {
+                                    Ok(true) => capture_guard = Some(guard),
+                                    Ok(false) => guard.disarm_cleanup_on_drop(),
+                                    Err(failure) if guard.copy_possible() => {
+                                        let _ = failure;
+                                        capture_request_consumed = true;
+                                    }
+                                    Err(failure) => {
+                                        guard.mark_failed(failure);
+                                        guard.disarm_cleanup_on_drop();
+                                        capture_request_consumed = true;
+                                    }
+                                }
+                            }
+                            Err(ManagedCaptureCellLockError::Busy) => {}
+                            Err(ManagedCaptureCellLockError::WrongKey)
+                            | Err(ManagedCaptureCellLockError::InvalidState) => {
+                                capture_request_consumed = true;
+                            }
+                        }
+                        None
+                    }
+                    ManagedCaptureState::Unsupported(_) => Some(ManagedCaptureFailure::Unsupported),
+                    ManagedCaptureState::Starting | ManagedCaptureState::Detached => None,
+                }
+            };
+            if let Some(failure) = failure
+                && cell.mark_failed(request.key(), failure).is_ok()
+            {
+                capture_request_consumed = true;
+            }
+        }
 
         window.pre_present_notify();
         surface_frame.present();
+        if let Some(mut guard) = capture_guard {
+            if let Some(presented) = intended_present.as_ref() {
+                if guard.mark_submitted(guard.key(), presented.clone()).is_ok() {
+                    guard.disarm_cleanup_on_drop();
+                } else {
+                    guard.mark_cleanup(Some(ManagedCaptureFailure::CopyFailed));
+                    capture_request_consumed = true;
+                }
+            } else {
+                guard.mark_cleanup(Some(ManagedCaptureFailure::CopyFailed));
+                capture_request_consumed = true;
+            }
+            if !capture_request_consumed {
+                capture_request_consumed = true;
+            }
+        }
+        if capture_request_consumed {
+            self.capture_request = None;
+        }
         if let Some(presented) = intended_present {
             if let Some(guard) = &mut present_guard {
                 guard.publish(presented.clone());
@@ -3341,6 +3592,23 @@ impl ApplicationHandler for WindowApp {
             if self.managed_failure.is_some() || self.exit_reason.is_some() {
                 return;
             }
+            let capture_enabled = self
+                .managed
+                .as_ref()
+                .is_some_and(|managed| managed.server.capture.is_some());
+            if capture_enabled
+                && let Some(renderer) = self
+                    .gpu_owner
+                    .as_mut()
+                    .and_then(WindowGpuOwner::packet_renderer_mut)
+                && let Err(error) = renderer.poll_managed_capture()
+            {
+                self.fail_managed(
+                    event_loop,
+                    ManagedWindowError::new(ManagedWindowErrorCode::Renderer, error.to_string()),
+                );
+                return;
+            }
             let now = Instant::now();
             if max_run_time_reached(self.started_at, now, self.options.max_run_time) {
                 self.exit_managed(event_loop, ManagedWindowExitReason::TimeLimit);
@@ -3352,11 +3620,20 @@ impl ApplicationHandler for WindowApp {
                 }
                 self.next_redraw = now + self.options.frame_interval;
             }
-            let wait_until = self
+            let mut wait_until = self
                 .options
                 .max_run_time
                 .map(|limit| self.started_at + limit)
                 .map_or(self.next_redraw, |deadline| self.next_redraw.min(deadline));
+            if capture_enabled {
+                wait_until = managed_capture_wait_until(
+                    now,
+                    wait_until,
+                    self.capture_request
+                        .as_ref()
+                        .map(|request| request.deadline()),
+                );
+            }
             event_loop.set_control_flow(ControlFlow::WaitUntil(wait_until));
             return;
         }
@@ -3450,13 +3727,13 @@ mod tests {
     };
 
     use super::{
-        FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, ManagedFrame, ManagedWindowState,
-        PacketTransition, PresentationMetadata, WindowApp, WindowInput, WindowInputPolicy,
-        WindowMode, WindowOptions, apply_presentation, managed_frame_is_cancelled,
-        managed_view_input_enabled, max_frames_reached, max_run_time_reached,
-        preferred_surface_alpha_mode, presentation_disconnect_error, validate_options,
-        validate_packet_transition, validate_window_scene, window_controls_hint,
-        window_input_channel,
+        FRAME_INTERVAL_SAMPLE_CAPACITY, FrameIntervals, MANAGED_CAPTURE_POLL_INTERVAL,
+        ManagedFrame, ManagedWindowState, PacketTransition, PresentationMetadata, WindowApp,
+        WindowInput, WindowInputPolicy, WindowMode, WindowOptions, apply_presentation,
+        managed_capture_wait_until, managed_frame_is_cancelled, managed_view_input_enabled,
+        max_frames_reached, max_run_time_reached, preferred_surface_alpha_mode,
+        presentation_disconnect_error, validate_options, validate_packet_transition,
+        validate_window_scene, window_controls_hint, window_input_channel,
     };
 
     #[test]
@@ -3955,6 +4232,120 @@ mod tests {
         ));
         assert!(!max_frames_reached(2, Some(3)));
         assert!(max_frames_reached(3, Some(3)));
+    }
+
+    #[test]
+    fn managed_capture_poll_wake_is_bounded_and_never_spins_on_expired_deadline() {
+        let now = std::time::Instant::now();
+        let scheduled = now + std::time::Duration::from_secs(60);
+        assert_eq!(
+            managed_capture_wait_until(now, scheduled, None),
+            now + MANAGED_CAPTURE_POLL_INTERVAL
+        );
+        assert_eq!(
+            managed_capture_wait_until(
+                now,
+                scheduled,
+                Some(now + std::time::Duration::from_millis(3)),
+            ),
+            now + std::time::Duration::from_millis(3)
+        );
+        assert_eq!(
+            managed_capture_wait_until(
+                now,
+                scheduled,
+                Some(now - std::time::Duration::from_millis(1)),
+            ),
+            now + MANAGED_CAPTURE_POLL_INTERVAL
+        );
+    }
+
+    #[test]
+    fn managed_capture_pump_retires_reused_local_key_and_takes_next_request() {
+        let (_window_client, capture_client, server) =
+            super::managed_packet_window_capture_channel();
+        let worker = capture_client
+            .register_worker()
+            .expect("durable capture worker registers before window start");
+        let shared = server
+            .capture
+            .as_ref()
+            .expect("capture server lane is installed")
+            .clone();
+        shared
+            .try_set_ready(
+                super::ManagedCaptureReadyInfo::new(
+                    super::ManagedCaptureSurfaceFormat::Rgba8Unorm,
+                    8,
+                    8,
+                    64,
+                )
+                .expect("small capture readiness limits are valid"),
+            )
+            .expect("capture endpoint becomes ready once");
+
+        let (_cpu_owner, _generation, input, _first, _second) = managed_cpu_frames();
+        let source = super::ManagedCaptureSource::new(
+            super::ManagedStageKey::INITIAL,
+            input.session(),
+            input.project_generation(),
+            input.source_digest(),
+        )
+        .expect("source uses the actual prepared generation identity");
+        let mut app = WindowApp::new_managed(
+            input,
+            server,
+            super::ManagedPacketWindowOptions::default(),
+            WindowInputPolicy::Native,
+        );
+
+        let key1 = super::ManagedCaptureKey::new(1).expect("nonzero capture key");
+        capture_client
+            .try_submit(
+                super::ManagedCaptureRequest::new(
+                    key1,
+                    source.clone(),
+                    Tick(0),
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .expect("first request deadline is in the future"),
+            )
+            .expect("first request enters the capture slot");
+        app.poll_managed_capture_request();
+        assert_eq!(
+            app.capture_request.as_ref().map(|request| request.key()),
+            Some(key1)
+        );
+
+        capture_client
+            .request_cancel(key1)
+            .expect("cancel marks the first request");
+        let Some(super::ManagedCaptureReturn::Failed { mut cleanup, .. }) = worker
+            .try_take_return()
+            .expect("cancelled request returns its no-copy cleanup")
+        else {
+            panic!("cancelled no-copy request must return Failed cleanup");
+        };
+        assert!(cleanup.try_finish().expect("no-copy cleanup releases cell"));
+
+        let key2 = super::ManagedCaptureKey::new(2).expect("second nonzero capture key");
+        capture_client
+            .try_submit(
+                super::ManagedCaptureRequest::new(
+                    key2,
+                    source,
+                    Tick(0),
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .expect("second request deadline is in the future"),
+            )
+            .expect("released cell accepts the next request");
+        app.poll_managed_capture_request();
+        assert_eq!(
+            app.capture_request.as_ref().map(|request| request.key()),
+            Some(key2)
+        );
+        assert_eq!(shared.cell().current_key(), Some(key2));
     }
 
     #[test]

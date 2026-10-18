@@ -10,6 +10,12 @@ use std::{
 
 use thiserror::Error;
 
+#[cfg(feature = "window")]
+use crate::window::{
+    ManagedCaptureCell, ManagedCaptureCellGuard, ManagedCaptureCellLockError,
+    ManagedCaptureFailure, ManagedCaptureReadyInfo, ManagedCaptureSurfaceFormat,
+    checked_capture_buffer_layout,
+};
 use crate::{
     CpuFrameHandle, PacketRenderError, PacketStageInput, RenderPacket, RenderView, RendererError,
     SourcePin,
@@ -18,6 +24,8 @@ use crate::{
     renderer::{GpuModelVertex, GpuVertex},
 };
 
+#[cfg(feature = "window")]
+use super::StagingSubmission;
 use super::{
     GeometryKey, GeometryResource, ModelTextureUpload, PacketRenderer, PacketViewSubmission,
     ResourceAdmissionPlan, SamplerKey, SamplerResource, TextureBindGroupResource, TextureKey,
@@ -28,7 +36,6 @@ const DEFAULT_STAGE_UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_STAGE_CREATE_CALLS: usize = 8;
 const MAX_STAGE_DIAGNOSTIC_CODE_BYTES: usize = 64;
 const MAX_STAGE_DIAGNOSTIC_MESSAGE_BYTES: usize = 2048;
-
 static NEXT_RENDERER_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
 /// Per-combined-submit work limits for a GPU resource stage.
@@ -270,6 +277,8 @@ pub enum PacketRendererDrainError {
     Poll(#[from] RendererError),
     #[error("renderer staging operation failed: {0}")]
     Stage(#[from] PacketStageError),
+    #[error("managed capture cell state is invalid")]
+    CaptureCellInvalid,
 }
 
 pub(super) struct StageState {
@@ -1196,6 +1205,126 @@ fn stage_plan_fits_estimate(input: &PacketStageInput, plan: &ResourceAdmissionPl
 }
 
 impl PacketRenderer {
+    /// Queues one readback copy from the same acquired surface image that was just drawn.
+    /// `Ok(false)` is bounded backpressure and leaves the capture cell untouched.
+    #[cfg(feature = "window")]
+    #[allow(clippy::too_many_arguments)] // The source texture, negotiated limits, and durable cell guard are independent inputs.
+    pub(crate) fn try_submit_managed_capture_copy(
+        &mut self,
+        source: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        ready: ManagedCaptureReadyInfo,
+        format: ManagedCaptureSurfaceFormat,
+        selected_frame: &Arc<CpuFrameHandle>,
+        cell: &Arc<ManagedCaptureCell>,
+        guard: &mut ManagedCaptureCellGuard<'_>,
+    ) -> Result<bool, ManagedCaptureFailure> {
+        let key = guard.key();
+        let layout = checked_capture_buffer_layout(
+            width,
+            height,
+            ready,
+            format,
+            self.renderer.maximum_buffer_size,
+        )?;
+        let bytes_per_row = layout.bytes_per_row;
+        let total_bytes = layout.total_bytes;
+        if self.staging_submissions.len() >= self.asset_limits.max_in_flight_submissions {
+            self.asset_stats.busy_count = self.asset_stats.busy_count.saturating_add(1);
+            return Ok(false);
+        }
+        let serial = self
+            .submission_serial
+            .checked_add(1)
+            .ok_or(ManagedCaptureFailure::CounterExhausted)?;
+        self.staging_submissions
+            .try_reserve(1)
+            .map_err(|_| ManagedCaptureFailure::AllocationFailed)?;
+
+        let descriptor = wgpu::BufferDescriptor {
+            label: Some("Daedalus managed capture readback"),
+            size: total_bytes as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        };
+        guard.arm_cleanup_on_drop();
+        guard
+            .install_selected_frame(Arc::clone(selected_frame))
+            .map_err(|_| ManagedCaptureFailure::CopyFailed)?;
+        guard
+            .create_and_install_buffer(&self.renderer.device, &descriptor)
+            .map_err(|_| ManagedCaptureFailure::CopyFailed)?;
+        guard.set_dimensions(width, height, bytes_per_row, total_bytes, format);
+
+        let mut encoder =
+            self.renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Daedalus managed capture copy"),
+                });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: source,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: guard
+                    .buffer()
+                    .map_err(|_| ManagedCaptureFailure::CopyFailed)?,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(layout.bytes_per_row_u32),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Reserve a distinct serial before the uncertain copy submit. If unwind occurs
+        // between this point and callback registration, the returned owner installs a
+        // later queue-tail fence against the same serial before releasing the cell.
+        self.submission_serial = serial;
+        guard
+            .set_queue_serial(serial)
+            .map_err(|_| ManagedCaptureFailure::CopyFailed)?;
+        guard
+            .mark_copy_may_be_submitted()
+            .map_err(|_| ManagedCaptureFailure::CopyFailed)?;
+        let _submission = self.renderer.queue.submit([encoder.finish()]);
+        self.staging_submissions.push_back(StagingSubmission {
+            serial,
+            bytes: 0,
+            _cpu_frame: None,
+        });
+        let watermark = Arc::clone(&self.completion_watermark);
+        let callback_cell = Arc::clone(cell);
+        self.renderer.queue.on_submitted_work_done(move || {
+            watermark.fetch_max(serial, Ordering::AcqRel);
+            callback_cell.mark_queue_complete(key);
+        });
+        cell.register_queue_fence(key);
+
+        cell.set_map_pending(key);
+        guard.mark_map_pending(key);
+        guard
+            .buffer()
+            .map_err(|_| ManagedCaptureFailure::CopyFailed)?
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, {
+                let callback_cell = Arc::clone(cell);
+                move |result| callback_cell.set_map_result(key, result.is_ok())
+            });
+        cell.set_map_registered(key);
+        Ok(true)
+    }
+
     /// Admits one resource-only CPU generation without creating GPU objects or
     /// enqueueing writes. The existing ready generation and the candidate are
     /// protected together by the cache planner.
@@ -3322,10 +3451,46 @@ impl PacketRenderer {
             self.try_cancel_stage(id)
                 .map_err(PacketRendererDrainError::Stage)?;
         }
+        #[cfg(feature = "window")]
+        if let Some(cell) = self.managed_capture_cell.as_ref().cloned() {
+            match cell.fallback_fence_info() {
+                Ok(Some((key, serial))) => {
+                    let watermark = Arc::clone(&self.completion_watermark);
+                    let callback_cell = Arc::clone(&cell);
+                    self.renderer.queue.on_submitted_work_done(move || {
+                        watermark.fetch_max(serial, Ordering::AcqRel);
+                        callback_cell.mark_queue_complete(key);
+                    });
+                    cell.register_queue_fence(key);
+                }
+                Ok(None) | Err(ManagedCaptureCellLockError::Busy) => {}
+                Err(ManagedCaptureCellLockError::WrongKey)
+                | Err(ManagedCaptureCellLockError::InvalidState) => {
+                    return Err(PacketRendererDrainError::CaptureCellInvalid);
+                }
+            }
+        }
         self.poll_retirement()
             .map_err(|error| PacketRendererDrainError::Stage(PacketStageError::Render(error)))?;
         self.refresh_stage_state();
-        if self.stage_state.active.is_none() && self.staging_submissions.is_empty() {
+        #[cfg(feature = "window")]
+        let capture_drained = if let Some(cell) = &self.managed_capture_cell {
+            match cell.try_abandoned_cleanup() {
+                Ok(_) | Err(ManagedCaptureCellLockError::Busy) => cell.is_released(),
+                Err(ManagedCaptureCellLockError::WrongKey)
+                | Err(ManagedCaptureCellLockError::InvalidState) => {
+                    return Err(PacketRendererDrainError::CaptureCellInvalid);
+                }
+            }
+        } else {
+            true
+        };
+        #[cfg(not(feature = "window"))]
+        let capture_drained = true;
+        if self.stage_state.active.is_none()
+            && self.staging_submissions.is_empty()
+            && capture_drained
+        {
             Ok(PacketRendererDrainStatus::Drained)
         } else {
             Ok(PacketRendererDrainStatus::Pending)

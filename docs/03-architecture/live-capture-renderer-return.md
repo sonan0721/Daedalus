@@ -33,7 +33,7 @@ Ready는 실제 surface의 COPY_SRC와 허용 format 확인 뒤 한 번만 게�
 
 cell은 한 key, 고정 상태/metadata, map·queue 완료 atomic flag, poison-recoverable `Mutex<Option<Buffer>>`를 갖는다. Buffer는 cell 안에 두고 CPU owner만 take/drop한다. UI의 handle·PacketRenderer drain pin은 작은 cell/state 참조만 보유한다. private cleanup 경로는 UI에서 최종 buffer 해제나 파일 정리를 하지 않는다. 공개 endpoint를 쓰는 consumer도 이 durable owner·반환 owner 수명 계약을 따라야 하며 임의 스레드의 handle Drop을 cleanup 완료로 간주하지 않는다.
 
-UI는 buffer 생성 **전에** cell을 Installing으로 전환한다. `create_buffer`가 반환하면 다른 fallible 작업 없이 예약한 cell에 즉시 설치한다. copy 인코딩은 cell의 buffer를 빌리며 두 번째 buffer clone을 UI-local owner로 남기지 않는다. 모든 UI cell 접근은 try-lock/원래 request 보존/cleanup 신호 경로를 쓰고 blocking mutex 대기나 GPU Wait를 넣지 않는다.
+UI는 buffer 생성 **전에** poison-recoverable guard를 try-lock으로 얻고, 그 guard를 유지한 채 cell을 Installing으로 전환한다. 같은 guard 안에서 `create_buffer`를 호출하고 반환값을 다른 fallible 작업 없이 예약한 cell에 즉시 설치한 뒤 guard를 놓는다. 생성 후 lock을 다시 얻는 형태는 WouldBlock 때 local Buffer가 UI에서 해제되므로 금지한다. worker는 이 짧은 create/install 구간 동안 Busy를 관측한다. copy 인코딩은 cell의 buffer를 빌리며 두 번째 buffer clone을 UI-local owner로 남기지 않는다. 모든 UI cell 접근은 try-lock/원래 request 보존/cleanup 신호 경로를 쓰고 blocking mutex 대기나 GPU Wait를 넣지 않는다.
 
 UI의 작은 unwind guard는 정상 commit 전 Drop에서 CleanupRequired만 표시한다. 버퍼 이동·unmap·마지막 해제를 수행하지 않는다. guard 뒤 cell은 실패에도 worker가 접근할 수 있다. poisoning은 worker가 복구해 실제 정리를 계속한다. 일반 job/coordinator panic은 이 계약으로 회수하며 process abort·전체 owner thread의 회복 불가능한 중단까지 보장하지 않는다.
 

@@ -61,3 +61,14 @@ runtime all-feature `--lib` 첫 실행은116통과·0 ignored, raw `p02-capture-
 runtime all-target/all-feature Clippy01은exit101이었다. Captured metadata가264bytes인 enum,144bytes인 dispatch error, actor argument8개, 중첩 if와 같은 Cancelled 분기를 검출했다. raw SHA-256은 `6f1bc50a310db8fde1ab348761bf933c98f6aa93a6a00315a8e9fbff946afb0c`다.
 
 root는 새 public Captured payload를 `Box<CaptureFrameMetadata>`로 변경하고 private dispatch는 최초 생성한 같은 `Box<CaptureRequest>`를 Busy/Detached에도 돌려주는 수정 방향을 승인했다. Busy error 때마다 새 Box를 만들지 않는다. actor의 consumer port는 private 묶음으로 전달하며 나머지 조건은 간소화한다. 공개 SDK test 담당도 새 Captured constructor만 맞춰 freeze한다. 경고 억제로 통과시키지 않고 수정 후 strict를 다시 실행한다.
+
+boxed Captured constructor에 맞춘 공개 test의 최종 source hash는 `07dd8885b791a939477cb5291cc12bd1e5782867d13205528e60f8424c65c510`다. 이후 추가한 기본 timeout fixture의 source review에서도 첫 completed request가 아직 image slot을 보유한 점과, admission 내부 시계보다 이른 값을 deadline 상한으로 쓴 점을 실행 전에 찾았다. first request를 명시 해제하고 성공 admission의 before/after 시계로 default5초를 검사하도록 수정한다. 이는 아직 실행된 test 실패로 기록하지 않는다.
+
+## 병렬 전체 실행에서 찾은 취소 공개 순서
+
+추가 회귀 뒤 lifecycle04는14통과·114 filtered였고 SHA-256은 `1362ddbdd6f91f3881b5fc2373822795dfba40e5cf89b61da623c3fdbf1216c1`이다. strict Clippy02도 통과했다(`e9fb3eace4dbb85cbf2c759b36b089890f98665f9d6420b98dc7a93c638bc586`). 기본 feature 전체 실행01도 통과했다(`fac38556811275ec8a1bfc030d23d9a3c1e3c34177c540ba605db8d7a8ec9190`). 하지만 all-feature 전체02는126통과·2실패였다. SHA-256 `64a635ce2bc2b562370fc3fb9fd40f17acbf6af4c7125eed21424fdfe16801e4`의 raw를 root가 직접 대조했다.
+
+- full-ticket/Step fixture의 completion `unwrap`은 허용된 nonwaiting Busy 응답에 실패했다. 같은 payload/responder를 유지하는 bounded retry로 fixture를 수정한다.
+- abandon fixture는 consumer가 `is_cancelled=true`를 본 뒤에도 responder가 `Ok(())`를 반환했다. failure 경로가 cancel flag와 terminal을 공개한 뒤 pending receiver Drop으로 채널을 닫아 짧은 순서 구멍이 있었다. 이는 assertion을 완화할 문제가 아니다. pending receiver를 먼저 닫고 cancellation/terminal을 공개하도록 failure·shutdown·Drop guard를 수정한다. 이미 완료한 responder의 AlreadyCompleted 의미는 보존한다.
+
+집중/기본/strict 성공이 이 실제 병렬 실패를 면제하지 않는다. source 수정 뒤 집중 회귀와 최종 전체 검사를 다시 실행하며 a.1 인수는 아직 보류다.

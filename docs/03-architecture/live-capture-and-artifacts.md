@@ -1,8 +1,8 @@
 # 같은 실행 세션의 비동기 frame capture
 
-상태: P02.3a 구현 전 계약·runtime/renderer 독립 bridge 감사 반영 · 2026-10-18 · DEV04/DEV06
+상태: P02.3a.1 runtime 로컬 통합 인수, 실제 renderer/host/backend 전 · 2026-10-18 · DEV04/DEV06
 
-후속 [요청·이미지·artifact 소유권 계약](live-capture-ownership.md)은 ACK/reader·timeout·GPU map·worker/file 수명의 독립성, concrete capability와 weak interest, coordinator unwind 밖의 backstop을 고정한다. public signature를 source와 대조한 뒤 runtime foundation부터 구현하며 아직 live_capture capability를 켜지 않는다.
+후속 [요청·이미지·artifact 소유권 계약](live-capture-ownership.md)은 ACK/reader·timeout·GPU map·worker/file 수명의 독립성, concrete capability와 weak interest, coordinator unwind 밖의 backstop을 고정한다. runtime foundation은 [source/CPU 통합 인수](../06-worklog/2026-10-18-live-capture-foundation.md)를 마쳤으며, 실제 [renderer 반환](live-capture-renderer-return.md)·host·artifact 연결 전까지 live_capture capability를 켜지 않는다.
 
 ## 목적과 현재 차이
 
@@ -72,13 +72,13 @@ close/device/map/encoder/파일 오류는 명시 terminal failure이며 PNG 성�
 3. 같은 실제 Mac project window에서 protocol 2 mutation→Step→capture ticket→poll→PNG decode/state/identity 대조→ACK→다음 capture를 실행한다. stale/too-large·close 중 capture·막힌 stdout·deadline과 resource 회복도 검사한다.
 4. 기존 `smoke_project.py --view` process/project/JSONL/report helper를 확장한다. 이미 빌드한 binary를 받고 자동 재빌드하지 않으며 CPU18/default package 의미는 유지한다. physical OS 입력과 source asset 품질 시험은 별도다.
 
-공개 API와 파일 소유권을 먼저 공유한 뒤 Luna xhigh가 runtime→renderer→CLI 연결을 구현한다. Cargo.lock/공유 target은 한 명씩 소유한다. root는 설계·리뷰·실제 Mac 검증을 맡는다. 아직 코드 착수/검증 전이며 이 문서로 live_capture capability나 P02/D1을 통과 처리하지 않는다.
+공개 API와 파일 소유권을 먼저 공유한 뒤 Luna xhigh가 runtime→renderer→CLI 연결을 구현한다. Cargo.lock/공유 target은 한 명씩 소유한다. root는 설계·리뷰·실제 Mac 검증을 맡는다. runtime a.1만 로컬 검증됐으며 이 문서로 실제 live_capture capability나 P02/D1을 통과 처리하지 않는다.
 
 ## 2026-10-17 managed window source 감사
 
 Luna의 read-only 감사와 root의 기존 owner/표시 계약 리뷰를 반영했다. managed window는 실제 acquired SurfaceTexture에 draw하고 PacketFrameSubmission의 identity/view를 확인한 뒤 present()를 호출한다. ManagedPresentedView에는 실제 session/tick·두 sequence·generation/digest·present sequence·physical 크기·view/행렬이 이미 있지만 surface format이나 pixels는 없다. 현재 surface usage는 RENDER_ATTACHMENT뿐이며 Frame/BeginStage capacity1 lane에 capture를 섞지 않는다. capability를 확인한 별도 readback handoff가 필요하다.
 
-현재 `render_packet_png`는 별도 offscreen texture를 만들고 `capture_texture_png`는 Wait·전체 RGBA Vec·파일 쓰기를 동기로 수행한다. 이 경로를 실제 창 capture라고 재명명하지 않는다. alignment/format/PNG 검증 helper만 분리 재사용하고 UI callback에는 blocking wait·큰 copy/encode·I/O를 가져오지 않는다. runtime에는 아직 Capture operation/result·handoff·image credit·artifact lease가 없다. 새 host/CLI의 view_status도 metadata만 제공하므로 live_capture=false를 유지한다.
+이 감사 당시 `render_packet_png`는 별도 offscreen texture를 만들고 `capture_texture_png`는 Wait·전체 RGBA Vec·파일 쓰기를 동기로 수행했다. 이 경로를 실제 창 capture라고 재명명하지 않는다. alignment/format/PNG 검증 helper만 분리 재사용하고 UI callback에는 blocking wait·큰 copy/encode·I/O를 가져오지 않는다. 2026-10-18 후속 a.1에서 runtime Capture operation/result·handoff·image credit·capability/work lease를 구현했지만 실제 host/CLI의 view_status는 여전히 metadata만 제공하므로 live_capture=false를 유지한다.
 
 창 종료 후 mapped buffer/encoder job이 남을 때의 GPU owner·callback·worker·artifact 회수 순서는 새 [owner 계약](native-renderer-owner-lifecycle.md)과 함께 동결해야 한다. source/frame pin과 image credit을 같은 예산으로 취급하거나 callback이 끝나기 전에 장치 종료 완료를 보고하지 않는다. 이 감사는 실제 capture 실행이나 OS 화면 픽셀 검증이 아니며 구현 착수/통과 근거로 세지 않는다.
 
@@ -106,4 +106,4 @@ artifact는 host 소유 bounded registry와 worker가 관리한다. runtime 결�
 
 runtime `ProjectPresentedFrame`/view ACK DTO는 identity·physical 크기·view-projection을 제공하지만 camera pose와 tagged projection 전체는 없다. capture의 정확한 pose·perspective/orthographic 파라미터·surface format/encoding은 그 frame의 renderer `ManagedPresentedView`/SurfaceConfiguration에서 복사한다. 나중 host.last_presented를 읽어 pixels와 맞추지 않는다. ResidencyBusy 자체로 새 frame을 선택하지 않으며, 기존 경로가 실제 old-ready frame을 그린 경우에는 그 실제 identity가 요청 generation/tick 조건을 만족하는지 검사한다.
 
-현재 혼합 pipeline bootstrap 결함의 실제 통합 인수 전에 capture 코드를 같은 변경으로 섞지 않는다. 이 절은 source 감사·적용 방향이며 API 구현·live_capture capability·실제 PNG 검증 통과가 아니다.
+혼합 pipeline bootstrap 결함은 PR20에서 별도로 인수한 뒤 다음 capture branch를 시작했다. 이 절의 후속 runtime a.1 구현은 작업 기록과 구분하며, renderer/host 적용 방향을 실제 live_capture capability·PNG 검증 통과로 계산하지 않는다.

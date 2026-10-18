@@ -50,6 +50,17 @@ The accepted PR19 all-feature CI checkpoint passes 359 CPU tests with 22 hardwar
 
 The additive `NativeProjectActivationService::start_with_render_consumer` factory registers one runtime-neutral source consumer before startup. Its tests use the actual preparation worker and authority to check take-once source leases, bounded Ready/Failed reports, publication-token presentation ACKs, two generation commits with preserved live state, source-pin retention, cancellation, supersession, stop, panic cleanup, and progress with held ordinary result credits. These cases are included in the runtime commands above. Their Ready/presentation reports are trusted test inputs; they do not prove GPU upload or actual window presentation. The renderer, reusable native host, and CLI view activation connection remain under implementation; see the [consumer contract](docs/03-architecture/project-generation-consumer.md) and [current evidence](docs/06-worklog/2026-10-17-render-generation.md).
 
+## Runtime capture foundation
+
+The opt-in runtime capture foundation can be checked without a GPU or output device:
+
+```sh
+cargo test -p daedalus-runtime --all-features --locked capture_
+cargo test -p daedalus-runtime --all-features --locked --test capture_public_api
+```
+
+`start_with_render_consumer_and_capture` adds a renderer-neutral handoff to the same actor and preparation service. Fourteen focused tests cover admission rollback, full ticket identity, source binding, independent Step capacity, timeout/abandonment, responder closure and injected actor failure. Two external public-API tests cover opt-in behavior and independent retained progress/capability/work ownership. Their consumer supplies trusted CPU metadata; they do not produce a PNG or perform readback. The final local workspace passed 414 cases with 34 hardware cases ignored, plus check, formatting, strict Clippy and Python72. Renderer/host/artifact/CLI capture integration remains open and `live_capture` stays false. See the [capture record](docs/06-worklog/2026-10-18-live-capture-foundation.md).
+
 ## Current CLI smoke
 
 ```sh

@@ -96,6 +96,8 @@ Use protocol 2 preparation, Stage, and Commit operations; `view_status` reports 
 
 This path currently rejects attached audio. Automatic file watching, general scene reload, and live-window image capture remain unfinished; initial CPU loading still happens before the window opens. `view_status` provides metadata, and `live_capture` remains false. The new host/CLI product gate and full D1 engine acceptance remain open.
 
+The [capture runtime foundation](docs/06-worklog/2026-10-18-live-capture-foundation.md) adds an opt-in typed handoff, one image reservation, cancellation and retained artifact/work capabilities to the same authority. CPU tests verify this ownership contract; the actual surface readback, artifact store and CLI capture operation are the next integration steps.
+
 ## Build a local CLI package
 
 With the pinned Rust toolchain and Python 3.11 or newer, run:

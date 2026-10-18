@@ -8,6 +8,7 @@ mod project_activation;
 mod project_audio;
 mod project_generation_consumer;
 mod project_preparation;
+mod session_capture;
 mod session_control;
 mod session_primitives;
 
@@ -80,6 +81,16 @@ pub use project_preparation::{
     PreparationCandidateSummary, PreparationFailure, PreparationId, PreparationState,
     PreparationWorkerShutdown, PreparationWorkerShutdownError, ProjectPreparationPort,
     ProjectPreparationPortError,
+};
+pub use session_capture::{
+    CaptureArtifactCapability, CaptureArtifactId, CaptureCompletion, CaptureFailure,
+    CaptureFrameMetadata, CaptureFrameResult, CaptureHandoffError, CaptureHandoffPort,
+    CaptureHandoffState, CaptureImageLease, CaptureInterestWeak, CaptureMetadataError,
+    CapturePixelEncoding, CapturePngFormat, CapturePngMetadata, CaptureProjection,
+    CaptureReadyInfo, CaptureRequest, CaptureResponder, CaptureResponderError,
+    CaptureSourceIdentity, CaptureSurfaceFormat, CaptureUnsupportedReason, CaptureView,
+    CaptureWorkLease, DEFAULT_CAPTURE_TIMEOUT, MAX_CAPTURE_DIMENSION, MAX_CAPTURE_PIXELS,
+    MAX_CAPTURE_PNG_BYTES, MAX_CAPTURE_RAW_BYTES, MAX_CAPTURE_TIMEOUT,
 };
 pub use session_control::{
     AuthorityAdmission, CommandTerminalResult, FrameReadError, ProjectEntityBinding,

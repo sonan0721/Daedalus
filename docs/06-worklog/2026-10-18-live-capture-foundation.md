@@ -1,6 +1,6 @@
 # P02.3a.1: live capture runtime foundation 작업 기록
 
-상태: runtime 구현·집중 CPU 검증 중, 실제 backend/PNG 전 · 2026-10-18
+상태: P02.3a.1 로컬 통합 인수, 실제 backend/PNG 전 · 2026-10-18
 
 ## 만든 이유와 출발점
 
@@ -39,14 +39,14 @@ runtime all-feature `--lib` 첫 실행은116통과·0 ignored, raw `p02-capture-
 
 | a.1의 나머지 acceptance | 현재 근거/상태 |
 | --- | --- |
-| legacy/no sink·Starting/Ready/Unsupported/Detached·one-shot binding | public fixture 작성/리뷰 중, 전체 상태 검증 대기 |
-| timeout/default/inspect·normal/image/queue 거부 rollback·두 client의 전체 ID·counter 고갈 | 집중 회귀 대기 |
-| Manual Step reserve·handoff Busy deferral 중 원래 request 보존 | 집중 회귀 대기 |
-| ACK 뒤 progress 단독·capability 단독·work lease 단독의 포화/회복 | public SDK fixture 수정 중 |
-| take 전/후 timeout/abandon·responder loss/duplicate/receiver close·stop/panic | 집중 회귀 대기 |
-| 실제 commit 전후 actor source binding·old-frame/current-generation 불일치 거부 | 집중 회귀 대기 |
+| legacy/no sink·Starting/Ready/Unsupported/Detached·one-shot binding | `capture_is_opt_in_and_starts_unresolved` 및 `capture_readiness_is_one_shot_and_unsupported_or_detached_states_are_typed` 통과 |
+| timeout/default/inspect·normal/image/queue 거부 rollback·두 client의 전체 ID·counter 고갈 | `invalid_capture_timeouts...`, `capture_queue_full...`, `capture_ticket_and_enqueue_sequence_exhaustion...`, `capture_result_credit_refusal...`, `capture_uses_full_ticket_identity...` 통과 |
+| Manual Step reserve·handoff Busy deferral 중 원래 request 보존 | `capture_handoff_busy_keeps_the_request_owned_while_manual_step_progresses` 및 full-ticket case 통과 |
+| ACK 뒤 progress 단독·capability 단독·work lease 단독의 포화/회복 | public `captured_terminal_uses_real_publication_identity_and_retained_owners_hold_image_slot`의 별도 수명/성공 ID 검사 통과 |
+| take 전/후 timeout/abandon·responder loss/duplicate/receiver close·stop/panic | timeout·dropping-ticket·normal-stop·actor-panic 실제 actor case 통과, close-before-cancel 수정 뒤 workspace 회귀 통과 |
+| 실제 commit 전후 actor source binding·old-frame/current-generation 불일치 거부 | `capture_dispatch_binds_committed_source_even_while_an_old_frame_is_held`와 negotiated size/format·encoding case 통과 |
 
-두 source 담당의 최종 freeze와 이 행별 실제 결과 뒤에 a.1 인수를 판단한다. renderer/host/실제 PNG는 별도 a.2~a.4이며 전체 capture gate는 계속 미완료다.
+아래 최종 freeze와 행별 실제 결과로 a.1만 로컬 인수한다. renderer/host/실제 PNG는 별도 a.2~a.4이며 전체 capture gate는 계속 미완료다. 마지막 PR·두 package·실제 Mac capture 인수는 a.4에서 확인한다.
 
 ## Lifecycle 집중 검사와 공개 API 첫 실행
 
@@ -72,3 +72,37 @@ boxed Captured constructor에 맞춘 공개 test의 최종 source hash는 `07dd8
 - abandon fixture는 consumer가 `is_cancelled=true`를 본 뒤에도 responder가 `Ok(())`를 반환했다. failure 경로가 cancel flag와 terminal을 공개한 뒤 pending receiver Drop으로 채널을 닫아 짧은 순서 구멍이 있었다. 이는 assertion을 완화할 문제가 아니다. pending receiver를 먼저 닫고 cancellation/terminal을 공개하도록 failure·shutdown·Drop guard를 수정한다. 이미 완료한 responder의 AlreadyCompleted 의미는 보존한다.
 
 집중/기본/strict 성공이 이 실제 병렬 실패를 면제하지 않는다. source 수정 뒤 집중 회귀와 최종 전체 검사를 다시 실행하며 a.1 인수는 아직 보류다.
+
+## 수정 뒤 source freeze와 통합 검사
+
+receiver close를 먼저 수행하는 수정 뒤 focused06은14통과(`fe7e6c3ca0927116330348b90cd5e810da9aae66c3ee1ddfd346c9bfb078d3ac`)였다. 기본 전체02는 새 normal-stop fixture의 ACK가 정상 Busy를 반환해115통과·1실패했다(`f5969d346a1a34ee6462fee1408607c43bb8626a2fb26a4c3535b27d9b6eab93`). Busy만 제한 재시도하는 ACK helper로 고쳤다. 이 실패를 취소 순서 결함이나 장치 실패로 섞지 않는다.
+
+그 뒤 all-feature 전체03은128 unit·capture public integration2·기타 integration2를 통과했다(`94a5d5c58dc3feb7c4a9d4f372b7f1a78762f7f6638ecc49688e3f7b9264c4c5`). 기본 전체03은116 unit·capture public2·기타 integration2를 통과했다(`cfff361d36ba783f91970a8e983ff595511a861f680d03669497694a27728a55`). 둘 다0실패·0 ignored다. strict03도 통과했다(`4bdfe8a135ec0815cd003c2f0a53c772808fa5b7f80621cad7092a52189f1d79`).
+
+마지막 fixture 변경은 CaptureCapacity 거부를 받은 같은 client의 다음 성공 ID가1인지 직접 검사하고 Step은 별도 client로 옮긴 것이다. production 수정 없이 source를 freeze한 focused07은14통과·0실패(`3b47570d9265c8124c63d77757c20b67002ec1b0d03e1f95ec863e4fe10c16a8`), strict04도 통과했다(`e75e6450e187f1c9b5d92dc85fc25513f5142df590f4cb576219804a2572eb09`). 이전 전체03과 마지막 assertion-only snapshot을 구분한다. root가 같은 shared target의 Cargo lease를 인수하고 전체 workspace 검사로 마지막 snapshot을 검증한다.
+
+| Freeze source | SHA-256 |
+| --- | --- |
+| `runtime/src/session_capture.rs` | `479082e8520651418482910ec3bfe863283b8f2086df2fe7cd6cf7f7db0a611d` |
+| `runtime/src/session_control.rs` | `1bff84cb51ebf56920ea86062739e537a895bb97186735502a264eaa2fec7ac0` |
+| `runtime/src/project_preparation.rs` | `1d6edc4234967c74e49cdec1963db8db03cc4103004e159e880230dff3cf0472` |
+| `runtime/src/lib.rs` | `6b4ecf597434ff19daa34a5a944f3c71318607d075ec02438e2552abe9a9f286` |
+| `cli/src/project_view_control.rs` | `c023043d773fc432ab67d2f46dda0ca23bb4a9b5e84bd8ac5b57faa015065973` |
+| `runtime/tests/capture_public_api.rs` | `07dd8885b791a939477cb5291cc12bd1e5782867d13205528e60f8424c65c510` |
+
+Python discovery는72통과·0실패, raw `p02-capture-foundation-python-root-attempt01.log` SHA-256 `0351d79cccd2697e40027f565ae39da246b2e8f951d0480f556c8dcfe5b4ca33`이다. 독립적인 Python 검사와 Cargo compile/test를 병행했으며 compile/test lease는 한 owner가 순차 사용했다. read-only fmt는 동결 source만 확인했다. renderer/host source는 이 단계에서 수정하지 않았다.
+
+## Root의 최종 로컬 통합 인수
+
+위 source hash 그대로 root가 아래를 실행했다. 각 raw는 `dist/project-evidence/`에 있고 이전 실패를 보존한다.
+
+| 실제 검사 | 결과 | Raw SHA-256 |
+| --- | --- | --- |
+| `workspace-test-root-attempt01` | `cargo test --workspace --all-features --locked`:414통과·0실패·장치34 ignored,47.703초 | `0018deab1ccf4ecf0aeb132b1d2dc52bc18bccc44cc69fc802b470f733528a5a` |
+| `workspace-check-root-attempt01` | workspace/all-feature/all-target check 통과 | `9423b244b9006ad3021722b5bc8e5704ad052aa192033c63414b04d0c3c25d4a` |
+| `workspace-clippy-root-attempt01` | workspace/all-target/all-feature strict 통과 | `e934f2c388c9b9b43b5f644f0a4d6d98f131675185ff2127b24807baaa36a938` |
+| `workspace-fmt-root-attempt01` | `cargo fmt --all --check` 통과 | `3befcb2021e0952b71ee0152cd3b22a745b1a7d807bd1eb6def87fbd6e805668` |
+
+Raw 이름은 전부 `p02-capture-foundation-` prefix와 `.log` suffix를 가진다.414에는 집중14·공개 SDK2·기존 전체 검사가 이미 포함되며 합산해 더 큰 총수로 보고하지 않는다. Linux CI·package·managed·실제 새 GPU capture는 이 로컬 실행으로 검증하지 않았다.
+
+P02.3a.1의 runtime 기반만 인수한다. 기존 factory/default/public struct literal·원래 service/worker·Manual Step·normal ticket 수명을 유지하고 renderer/host dependency나 wire parser를 추가하지 않았다. backend Ready·PNG bytes/file/registry·live_capture=true는 없다. 다음은 [renderer 반환 계약](../03-architecture/live-capture-renderer-return.md)에 따른 a.2이며 상위 P02.3a·P03·D1/D2/D3는 열려 있다.

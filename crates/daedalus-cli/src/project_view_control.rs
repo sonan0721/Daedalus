@@ -23,11 +23,12 @@ use daedalus_runtime::{
     ActivationId, AssetActivationCommandOutcome, AssetActivationOperation,
     AssetActivationRequestResult, AssetActivationState, AssetActivationStatus,
     AssetPreparationCommandOutcome, AssetPreparationCommandResult, AssetPreparationOperation,
-    AssetPreparationResult, AssetPreparationStatus, AuthorityAdmission, FrameReadError,
-    PreparationCandidateSummary, PreparationFailure, PreparationId, PreparationState,
-    ProjectInfoPage, RequestAckError, RequestPhase, RequestProgress, RequestReadError,
-    RequestTicket, SessionClockMode, SessionControlClient, SessionControlLimits, SessionOperation,
-    SessionRequestError, SessionRequestResult, SessionStatus, SessionSubmitError,
+    AssetPreparationResult, AssetPreparationStatus, AuthorityAdmission, CaptureFailure,
+    CaptureFrameResult, CapturePixelEncoding, CaptureProjection, CaptureSurfaceFormat,
+    FrameReadError, PreparationCandidateSummary, PreparationFailure, PreparationId,
+    PreparationState, ProjectInfoPage, RequestAckError, RequestPhase, RequestProgress,
+    RequestReadError, RequestTicket, SessionClockMode, SessionControlClient, SessionControlLimits,
+    SessionOperation, SessionRequestError, SessionRequestResult, SessionStatus, SessionSubmitError,
 };
 #[cfg(feature = "audio")]
 use daedalus_runtime::{
@@ -886,8 +887,57 @@ enum OperationResult {
     Status(StatusOut),
     AssetPreparation(AssetPreparationOut),
     AssetActivation(AssetActivationOut),
+    CaptureFrame(CaptureFrameOut),
     #[cfg(feature = "audio")]
     Audio(AudioResultOut),
+}
+
+#[derive(Serialize)]
+struct CaptureArtifactOut {
+    session: DecimalU64,
+    client: DecimalU64,
+    sequence: DecimalU64,
+}
+
+#[derive(Serialize)]
+struct CaptureViewOut {
+    physical_width: u32,
+    physical_height: u32,
+    camera_position: [f32; 3],
+    camera_target: [f32; 3],
+    camera_up: [f32; 3],
+    vertical_fov_radians: f32,
+    near: f32,
+    far: f32,
+    projection: &'static str,
+    orthographic_vertical_size: Option<f32>,
+    view_projection: [f32; 16],
+}
+
+#[derive(Serialize)]
+struct CapturePngOut {
+    format: &'static str,
+    width: u32,
+    height: u32,
+    byte_length: DecimalU64,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+struct CaptureFrameOut {
+    artifact: CaptureArtifactOut,
+    session: DecimalU64,
+    tick: DecimalU64,
+    publication_sequence: DecimalU64,
+    authority_snapshot_sequence: DecimalU64,
+    project_generation: DecimalU64,
+    source_digest: String,
+    source_scene_revision: DecimalU64,
+    present_sequence: DecimalU64,
+    view: CaptureViewOut,
+    surface_format: &'static str,
+    surface_encoding: &'static str,
+    png: CapturePngOut,
 }
 
 #[derive(Serialize)]
@@ -1976,6 +2026,11 @@ fn submit_error(error: SessionSubmitError) -> ProtocolError {
         SessionSubmitError::InvalidRequest => "invalid_request",
         SessionSubmitError::AssetPreparationUnavailable => "asset_preparation_unavailable",
         SessionSubmitError::AssetActivationUnavailable => "asset_activation_unavailable",
+        SessionSubmitError::CaptureUnavailable => "capture_unavailable",
+        SessionSubmitError::CaptureStarting => "capture_starting",
+        SessionSubmitError::CaptureUnsupported => "capture_unsupported",
+        SessionSubmitError::CaptureDetached => "capture_detached",
+        SessionSubmitError::CaptureCapacity => "capture_capacity",
         #[cfg(feature = "audio")]
         SessionSubmitError::AudioUnavailable => "audio_unavailable",
         SessionSubmitError::ReservedCommandId => "reserved_command_id",
@@ -2089,9 +2144,98 @@ fn result_out(result: &SessionRequestResult) -> OperationResult {
         SessionRequestResult::AssetActivation(result) => {
             OperationResult::AssetActivation(asset_activation_result_out(result))
         }
+        SessionRequestResult::CaptureFrame(capture) => {
+            OperationResult::CaptureFrame(capture_frame_out(capture))
+        }
         #[cfg(feature = "audio")]
         SessionRequestResult::Audio(audio) => OperationResult::Audio(audio_result_out(audio)),
     }
+}
+
+fn capture_frame_out(result: &CaptureFrameResult) -> CaptureFrameOut {
+    let metadata = result.metadata();
+    let publication = metadata.publication();
+    let view = metadata.view();
+    let png = metadata.png();
+    let ticket = result.artifact().id().ticket();
+    let (projection, orthographic_vertical_size) = match view.projection() {
+        CaptureProjection::Perspective => ("perspective", None),
+        CaptureProjection::Orthographic { vertical_size } => ("orthographic", Some(vertical_size)),
+    };
+    CaptureFrameOut {
+        artifact: CaptureArtifactOut {
+            session: DecimalU64(ticket.session().get()),
+            client: DecimalU64(ticket.client().get()),
+            sequence: DecimalU64(ticket.sequence()),
+        },
+        session: DecimalU64(publication.session().get()),
+        tick: DecimalU64(publication.tick().get()),
+        publication_sequence: DecimalU64(publication.publication_sequence()),
+        authority_snapshot_sequence: DecimalU64(publication.authority_snapshot_sequence()),
+        project_generation: DecimalU64(publication.project_generation()),
+        source_digest: publication.source_digest().to_owned(),
+        source_scene_revision: DecimalU64(publication.scene_revision()),
+        present_sequence: DecimalU64(metadata.present_sequence()),
+        view: CaptureViewOut {
+            physical_width: view.physical_width(),
+            physical_height: view.physical_height(),
+            camera_position: *view.camera_position(),
+            camera_target: *view.camera_target(),
+            camera_up: *view.camera_up(),
+            vertical_fov_radians: view.vertical_fov_radians(),
+            near: view.near(),
+            far: view.far(),
+            projection,
+            orthographic_vertical_size,
+            view_projection: *view.view_projection(),
+        },
+        surface_format: capture_surface_format(metadata.surface_format()),
+        surface_encoding: match metadata.surface_encoding() {
+            CapturePixelEncoding::Linear => "linear",
+            CapturePixelEncoding::SrgbEncoded => "srgb_encoded",
+        },
+        png: CapturePngOut {
+            format: "rgba8_srgb",
+            width: png.width(),
+            height: png.height(),
+            byte_length: DecimalU64(png.byte_length()),
+            sha256: bytes_hex(png.sha256()),
+        },
+    }
+}
+
+fn capture_surface_format(format: CaptureSurfaceFormat) -> &'static str {
+    match format {
+        CaptureSurfaceFormat::Rgba8Unorm => "rgba8_unorm",
+        CaptureSurfaceFormat::Rgba8UnormSrgb => "rgba8_unorm_srgb",
+        CaptureSurfaceFormat::Bgra8Unorm => "bgra8_unorm",
+        CaptureSurfaceFormat::Bgra8UnormSrgb => "bgra8_unorm_srgb",
+    }
+}
+
+fn capture_failure_code(failure: CaptureFailure) -> &'static str {
+    match failure {
+        CaptureFailure::TimedOut => "capture_timed_out",
+        CaptureFailure::Detached => "capture_detached",
+        CaptureFailure::ResponderDropped => "capture_responder_dropped",
+        CaptureFailure::StaleGeneration => "capture_stale_generation",
+        CaptureFailure::StaleIdentity => "capture_stale_identity",
+        CaptureFailure::Unsupported => "capture_unsupported",
+        CaptureFailure::TooLarge => "capture_too_large",
+        CaptureFailure::ReadbackFailed => "capture_readback_failed",
+        CaptureFailure::ArtifactFailed => "capture_artifact_failed",
+        CaptureFailure::Cancelled => "capture_cancelled",
+    }
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 #[cfg(feature = "audio")]
@@ -2637,6 +2781,14 @@ fn request_error(error: &SessionRequestError) -> ProtocolError {
         }
         E::AssetActivationUnavailable => {
             ProtocolError::new("asset_activation_unavailable", error.to_string())
+        }
+        E::CaptureUnavailable => ProtocolError::new("capture_unavailable", error.to_string()),
+        E::CaptureStarting => ProtocolError::retryable("capture_starting", error.to_string()),
+        E::CaptureUnsupported => ProtocolError::new("capture_unsupported", error.to_string()),
+        E::CaptureDetached => ProtocolError::new("capture_detached", error.to_string()),
+        E::CaptureCapacity => ProtocolError::retryable("capture_capacity", error.to_string()),
+        E::CaptureFailed(failure) => {
+            ProtocolError::new(capture_failure_code(*failure), error.to_string())
         }
         E::ActivationBusy => ProtocolError::retryable("busy", error.to_string()),
         E::InvalidActivation => ProtocolError::new("invalid_activation", error.to_string()),

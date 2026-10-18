@@ -25,6 +25,7 @@ use crate::project_activation::{AssetActivationMemoryStatus, AssetActivationStat
 use crate::project_generation_consumer::{
     ProjectGenerationConsumerPort, ProjectGenerationConsumerShared,
 };
+use crate::session_capture::CaptureHandoffPort;
 use crate::session_control::{
     SessionControlConfig, SessionControlService, SessionControlStartError, SessionShutdownReport,
     SessionTermination,
@@ -304,7 +305,7 @@ impl NativeProjectActivationService {
         options: NativeProjectPreparationOptions,
         config: SessionControlConfig,
     ) -> Result<Self, NativeProjectActivationStartError> {
-        Self::start_mode(options, config, None).map(|(service, _)| service)
+        Self::start_mode(options, config, None, false).map(|(service, _, _)| service)
     }
 
     /// Starts the same project authority and preparation worker with one runtime-neutral source
@@ -314,10 +315,28 @@ impl NativeProjectActivationService {
         options: NativeProjectPreparationOptions,
         config: SessionControlConfig,
     ) -> Result<(Self, ProjectGenerationConsumerPort), NativeProjectActivationStartError> {
-        let (service, port) = Self::start_mode(options, config, Some(()))?;
+        let (service, port, _) = Self::start_mode(options, config, Some(()), false)?;
         Ok((
             service,
             port.expect("render-consumer mode returns its registered port"),
+        ))
+    }
+
+    /// Starts the same project authority and preparation worker with a renderer-neutral live
+    /// capture handoff. This is opt-in; the renderer must report its actual readiness separately.
+    pub fn start_with_render_consumer_and_capture(
+        options: NativeProjectPreparationOptions,
+        config: SessionControlConfig,
+    ) -> Result<
+        (Self, ProjectGenerationConsumerPort, CaptureHandoffPort),
+        NativeProjectActivationStartError,
+    > {
+        let (service, render_port, capture_port) =
+            Self::start_mode(options, config, Some(()), true)?;
+        Ok((
+            service,
+            render_port.expect("render-consumer mode returns its registered port"),
+            capture_port.expect("capture mode returns its registered port"),
         ))
     }
 
@@ -325,12 +344,19 @@ impl NativeProjectActivationService {
         options: NativeProjectPreparationOptions,
         config: SessionControlConfig,
         render_consumer: Option<()>,
-    ) -> Result<(Self, Option<ProjectGenerationConsumerPort>), NativeProjectActivationStartError>
-    {
+        capture_enabled: bool,
+    ) -> Result<
+        (
+            Self,
+            Option<ProjectGenerationConsumerPort>,
+            Option<CaptureHandoffPort>,
+        ),
+        NativeProjectActivationStartError,
+    > {
         options.validate()?;
         #[cfg(target_family = "wasm")]
         {
-            let _ = (options, config, render_consumer);
+            let _ = (options, config, render_consumer, capture_enabled);
             Err(NativeProjectPreparationStartError::NativeUnavailable.into())
         }
         #[cfg(not(target_family = "wasm"))]
@@ -343,6 +369,12 @@ impl NativeProjectActivationService {
             let consumer_port = generation_consumer
                 .as_ref()
                 .map(|shared| ProjectGenerationConsumerPort::new(Arc::clone(shared)));
+            let (capture_port, capture_shared) = if capture_enabled {
+                let (port, shared) = CaptureHandoffPort::new_pending(config.engine.session);
+                (Some(port), Some(shared))
+            } else {
+                (None, None)
+            };
             let parts = start_native_worker(options, true, generation_consumer.clone())?;
             let mut port_taken = false;
             let port = make_control_port(&parts.shared, &parts.initial_project, &mut port_taken);
@@ -358,7 +390,17 @@ impl NativeProjectActivationService {
                     return Err(NativeProjectPreparationStartError::Port(error).into());
                 }
             };
-            let actor_result = if let Some(consumer) = generation_consumer.as_ref() {
+            let actor_result = if let (Some(consumer), Some(capture)) =
+                (generation_consumer.as_ref(), capture_shared.as_ref())
+            {
+                SessionControlService::start_shared_with_render_consumer_and_capture(
+                    Arc::clone(&parts.initial_project),
+                    config,
+                    port,
+                    consumer.as_ref().clone(),
+                    Arc::clone(capture),
+                )
+            } else if let Some(consumer) = generation_consumer.as_ref() {
                 SessionControlService::start_shared_with_render_consumer(
                     Arc::clone(&parts.initial_project),
                     config,
@@ -379,6 +421,9 @@ impl NativeProjectActivationService {
                     if let Some(consumer) = generation_consumer.as_ref() {
                         consumer.request_stop();
                     }
+                    if let Some(capture) = capture_shared.as_ref() {
+                        capture.detach();
+                    }
                     drop(parts.initial_project);
                     let _ = parts.join.join();
                     return Err(error.into());
@@ -394,6 +439,7 @@ impl NativeProjectActivationService {
                     generation_consumer: generation_consumer.map(|shared| shared.as_ref().clone()),
                 },
                 consumer_port,
+                capture_port,
             ))
         }
     }

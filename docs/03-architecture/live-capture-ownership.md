@@ -1,6 +1,6 @@
 # Live capture의 요청·이미지·artifact 소유권
 
-상태: runtime source 구현·집중 CPU 검증 중, renderer/host backend 전 · 2026-10-18 · P02/P03/DEV06
+상태: runtime a.1 로컬 통합 인수, renderer/host backend 전 · 2026-10-18 · P02/P03/DEV06
 
 ## 이 문서를 만든 이유
 
@@ -16,7 +16,7 @@ source 감사는 현재 `RequestProgress`가 terminal result와 normal credit을
 
 **Queue admission과 capture dispatch의 bind 시점을 구분한다.** `try_submit`은 actor 밖에서 실행되며 현재 authoritative generation/digest를 일관되게 읽는 기존 경계가 없다. 따라서 queue admission은 ID·deadline·normal/image reserve와 readiness를 고정하고, actor가 요청을 handoff로 dispatch하는 한 turn에서 자신의 실제 active generation/digest를 bind한다. `at_least_tick=None`의 floor는 그 turn의 실제 authority tick이다. explicit floor는 해당 최소 tick을 기다리며 actor를 막거나 Manual Step을 자동 실행하지 않는다. renderer 선택과 actor completion에서 source/currentness를 다시 검사한다. 오래된 latest-frame/render mailbox나 초기 ProjectInfo에서 source를 추측하지 않는다. 이는 client enqueue 시 source를 bind하려던 앞선 제안을 source 감사 뒤 수정한 것이다.
 
-runtime 소유자의 API 제안을 root가 검토해 아래 경계와 factory/op/result로 구현 중이다. source review와 집중 CPU 검증 결과는 [runtime 작업 기록](../06-worklog/2026-10-18-live-capture-foundation.md)에 남긴다. 아직 최종 인수된 public API는 아니며, renderer/host backend의 dependent source 작성 전 검증된 type signature를 다시 공유한다.
+runtime은 아래 경계와 factory/op/result로 구현해 source review·집중/public SDK·전체 workspace 검사를 통과했다. 정확한 source hash와 실패·수정·인수 범위는 [runtime 작업 기록](../06-worklog/2026-10-18-live-capture-foundation.md)에 남긴다. 이 public API는 후속 renderer/host consumer의 기준이며 실제 backend Ready나 image artifact는 아직 없다.
 
 | Type | 소유권과 공개 범위 |
 | --- | --- |
@@ -33,6 +33,8 @@ runtime 소유자의 API 제안을 root가 검토해 아래 경계와 factory/op
 첫 `CaptureHandoffPort`는 `try_status`·`try_set_ready`·`try_set_unsupported`·`request_detach`·`try_take_request`의 nonwaiting 경계를 제공한다. Starting→Ready/Unsupported의 초기 보고는 한 번이며 Detached는 terminal이다. OOB request_detach는 idempotent 신호다. runtime native port는 신뢰 consumer 경계이며 CPU test의 Ready 보고를 실제 장치 capability로 보고하지 않는다. 실제 COPY_SRC/format 확인은 후속 renderer 소유다. responder loss는 private completion slot의 sender-interest 소멸로 actor가 감지해 typed terminal failure로 마감한다. UI callback에서 ticket cell mutex를 직접 호출하지 않는다.
 
 `CaptureResponder::try_complete(&mut self, &CaptureCompletion)`은 nonwaiting 완료 시도이며 Busy일 때 caller가 같은 완료 payload와 responder를 보유한다. 성공은 한 번이다. receiver close와 completion을 일관된 순서로 처리해 이미 사라진 actor endpoint의 orphan slot에 성공을 쓰지 않는다. actor→handoff dispatch의 Busy/Detached도 원래 owned request를 돌려줘 cancel/terminal 처리 전에 capability/work lease가 조기 소멸하지 않게 한다.
+
+failure·shutdown·Drop guard는 **receiver close→cancellation flag→terminal** 순서다. consumer가 cancellation을 관측한 뒤 열린 completion slot에 새 성공을 쓰는 구멍을 두지 않는다. 이미 선형화된 completion은 AlreadyCompleted 의미를 보존한다. 이 순서는 [실제 병렬 회귀](../06-worklog/2026-10-18-live-capture-foundation.md#병렬-전체-실행에서-찾은-취소-공개-순서)에서 발견한 결함의 수정 계약이다.
 
 순서는 capability/clock/limits→queue 여유→normal session/client reserve→image reserve→enqueue/ticket counter 고갈 확인→성공 enqueue다. 거부의 RAII rollback과 ID 비소비를 검증하며, full ID를 발급한 성공 admission 뒤에는 재사용하지 않는다. capture는 inspect 권한을 사용하며 기존 public `SessionCapabilities` 구조체/default를 바꾸지 않는다. 최소 CLI exhaustive-result arm은 컴파일/compact metadata만 연결하고 wire capture parser·artifact path·live_capture=true는 backend/실제 PNG 전까지 추가하지 않는다.
 

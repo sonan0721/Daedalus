@@ -34,6 +34,13 @@ use crate::project_preparation::{
     AssetPreparationResult, PreparationId, ProjectPreparationPort, ProjectPreparationPortError,
     StageResult,
 };
+use crate::session_capture::{
+    CaptureActorPending, CaptureArtifactCapability, CaptureArtifactId, CaptureCancellation,
+    CaptureCompletion, CaptureFailure, CaptureFrameMetadata, CaptureFrameResult,
+    CaptureHandoffError, CaptureHandoffShared, CaptureHandoffState, CaptureImageLease,
+    CaptureReadyInfo, CaptureResponderError, CaptureSourceIdentity, CaptureWorkLease,
+    cancel_capture, capture_cancellation, capture_deadline,
+};
 use crate::session_primitives::{
     CreditError, CreditLease, CreditLimits, CreditPool, LatestValueMailbox, MailboxError,
     StopSignal,
@@ -282,6 +289,10 @@ pub enum SessionOperation {
         count: u32,
     },
     Status,
+    CaptureFrame {
+        at_least_tick: Option<Tick>,
+        timeout: Option<Duration>,
+    },
     AssetPreparation(AssetPreparationOperation),
     AssetActivation(AssetActivationOperation),
     #[cfg(feature = "audio")]
@@ -296,6 +307,7 @@ impl SessionOperation {
                 | Self::GetTransform { .. }
                 | Self::ListTransforms { .. }
                 | Self::Status
+                | Self::CaptureFrame { .. }
         );
         let preparation = matches!(
             self,
@@ -492,6 +504,7 @@ pub enum SessionRequestResult {
     Status(SessionStatus),
     AssetPreparation(AssetPreparationResult),
     AssetActivation(AssetActivationRequestResult),
+    CaptureFrame(CaptureFrameResult),
     #[cfg(feature = "audio")]
     Audio(SessionAudioResult),
 }
@@ -540,6 +553,18 @@ pub enum SessionRequestError {
     AssetPreparationUnavailable,
     #[error("asset activation operations require the native headless activation service")]
     AssetActivationUnavailable,
+    #[error("live capture is unavailable for this session")]
+    CaptureUnavailable,
+    #[error("live capture consumer is still starting")]
+    CaptureStarting,
+    #[error("live capture is unsupported by the attached consumer")]
+    CaptureUnsupported,
+    #[error("live capture consumer is detached")]
+    CaptureDetached,
+    #[error("the session's single image slot is still retained")]
+    CaptureCapacity,
+    #[error("live frame capture failed: {0}")]
+    CaptureFailed(CaptureFailure),
     #[error("asset preparation state is busy")]
     PreparationBusy,
     #[error("asset preparation capacity is exhausted")]
@@ -606,6 +631,16 @@ pub enum SessionSubmitError {
     AssetPreparationUnavailable,
     #[error("this session was started without native asset activation enabled")]
     AssetActivationUnavailable,
+    #[error("this session has no live capture handoff")]
+    CaptureUnavailable,
+    #[error("live capture consumer is still starting")]
+    CaptureStarting,
+    #[error("live capture is unsupported by the attached consumer")]
+    CaptureUnsupported,
+    #[error("live capture consumer is detached")]
+    CaptureDetached,
+    #[error("the session's single image slot is still retained")]
+    CaptureCapacity,
 }
 
 #[derive(Debug, Error)]
@@ -770,6 +805,7 @@ struct ControlCounters {
 struct ActiveRequest {
     cell: Arc<RequestCell>,
     possible_command_id: Option<CommandId>,
+    capture_pending: bool,
 }
 
 struct RequestCell {
@@ -1046,6 +1082,12 @@ struct QueuedRequest {
     operation: SessionOperation,
     cell: Arc<RequestCell>,
     credit: Arc<CreditBundle>,
+    capture: Option<CaptureAdmission>,
+}
+
+struct CaptureAdmission {
+    image: CaptureImageLease,
+    deadline: Instant,
 }
 
 struct QueueState {
@@ -1118,6 +1160,7 @@ struct ControlShared {
     audio_enabled: bool,
     asset_preparation_enabled: bool,
     asset_activation_enabled: bool,
+    capture_handoff: Option<Arc<CaptureHandoffShared>>,
     stop: StopSignal,
     queue: RequestQueue,
     frames: Arc<LatestValueMailbox<SessionFrame>>,
@@ -1166,6 +1209,9 @@ impl ControlShared {
     fn request_stop(&self) {
         self.accepting.store(false, Ordering::Release);
         self.stop.request();
+        if let Some(capture) = self.capture_handoff.as_ref() {
+            capture.detach();
+        }
         self.queue.wake();
     }
 
@@ -1239,7 +1285,7 @@ impl SessionControlService {
         let audio_options = None;
         #[cfg(not(feature = "audio"))]
         let audio_options = ();
-        Self::start_shared_inner(prepared, config, audio_options, None, false, None)
+        Self::start_shared_inner(prepared, config, audio_options, None, false, None, None)
     }
 
     /// Starts the existing project actor with an optional native preparation control capability.
@@ -1262,6 +1308,7 @@ impl SessionControlService {
             Some(preparation_port),
             false,
             None,
+            None,
         )
     }
 
@@ -1283,6 +1330,7 @@ impl SessionControlService {
             audio_options,
             Some(preparation_port),
             true,
+            None,
             None,
         )
     }
@@ -1313,6 +1361,36 @@ impl SessionControlService {
             Some(preparation_port),
             true,
             Some(generation_consumer),
+            None,
+        )
+    }
+
+    pub(crate) fn start_shared_with_render_consumer_and_capture(
+        prepared: Arc<PreparedProject>,
+        config: SessionControlConfig,
+        preparation_port: ProjectPreparationPort,
+        generation_consumer: ProjectGenerationConsumerShared,
+        capture_handoff: Arc<CaptureHandoffShared>,
+    ) -> Result<Self, SessionControlStartError> {
+        if !preparation_port.matches_initial_project(&prepared)
+            || generation_consumer.session().ok() != Some(config.engine.session)
+            || !generation_consumer.matches_initial_project(&prepared)
+            || capture_handoff.session() != config.engine.session
+        {
+            return Err(SessionControlStartError::PreparationProjectMismatch);
+        }
+        #[cfg(feature = "audio")]
+        let audio_options = None;
+        #[cfg(not(feature = "audio"))]
+        let audio_options = ();
+        Self::start_shared_inner(
+            prepared,
+            config,
+            audio_options,
+            Some(preparation_port),
+            true,
+            Some(generation_consumer),
+            Some(capture_handoff),
         )
     }
 
@@ -1334,6 +1412,7 @@ impl SessionControlService {
             Some(preparation_port),
             false,
             None,
+            None,
         )
     }
 
@@ -1343,7 +1422,15 @@ impl SessionControlService {
         config: SessionControlConfig,
         audio_options: SessionAudioOptions,
     ) -> Result<Self, SessionControlStartError> {
-        Self::start_shared_inner(prepared, config, Some(audio_options), None, false, None)
+        Self::start_shared_inner(
+            prepared,
+            config,
+            Some(audio_options),
+            None,
+            false,
+            None,
+            None,
+        )
     }
 
     fn start_shared_inner(
@@ -1353,6 +1440,7 @@ impl SessionControlService {
         preparation_port: Option<ProjectPreparationPort>,
         asset_activation_enabled: bool,
         generation_consumer: Option<ProjectGenerationConsumerShared>,
+        capture_handoff: Option<Arc<CaptureHandoffShared>>,
     ) -> Result<Self, SessionControlStartError> {
         config.limits.validate(&config.engine)?;
         if prepared.entities().len() > MAX_PROJECT_SESSION_ENTITIES {
@@ -1383,6 +1471,7 @@ impl SessionControlService {
             audio_enabled: audio_options.is_some(),
             asset_preparation_enabled: preparation_port.is_some(),
             asset_activation_enabled,
+            capture_handoff: capture_handoff.clone(),
             stop: StopSignal::default(),
             queue: RequestQueue::new(config.limits.command_capacity),
             frames: Arc::new(LatestValueMailbox::new(config.limits.max_retained_frames)),
@@ -1447,7 +1536,10 @@ impl SessionControlService {
                     config,
                     audio_options,
                     preparation_port,
-                    generation_consumer,
+                    ActorRendererPorts {
+                        generation_consumer,
+                        capture_handoff,
+                    },
                     actor_shared,
                     startup_sender,
                 )
@@ -1656,6 +1748,32 @@ impl SessionControlClient {
             return Err(SessionSubmitError::CapabilityDenied);
         }
         validate_operation(&operation, self.shared.clock_mode, self.shared.limits)?;
+        let capture_deadline_at_admission = if let SessionOperation::CaptureFrame {
+            timeout, ..
+        } = &operation
+        {
+            let handoff = self
+                .shared
+                .capture_handoff
+                .as_ref()
+                .ok_or(SessionSubmitError::CaptureUnavailable)?;
+            match handoff.state() {
+                CaptureHandoffState::Starting => return Err(SessionSubmitError::CaptureStarting),
+                CaptureHandoffState::Unsupported(_) => {
+                    return Err(SessionSubmitError::CaptureUnsupported);
+                }
+                CaptureHandoffState::Detached => {
+                    return Err(SessionSubmitError::CaptureDetached);
+                }
+                CaptureHandoffState::Ready(_) => {}
+            }
+            Some(
+                capture_deadline(*timeout, Instant::now())
+                    .ok_or(SessionSubmitError::InvalidRequest)?,
+            )
+        } else {
+            None
+        };
         let caller_command_id = match &operation {
             SessionOperation::SetTransform {
                 command_id: Some(id),
@@ -1732,14 +1850,33 @@ impl SessionControlClient {
                 .try_reserve(MAX_RESULT_BYTES_PER_TICKET)
         }
         .map_err(map_credit_error)?;
+        let Some(next_enqueue_sequence) = queue.next_enqueue_sequence.checked_add(1) else {
+            return Err(SessionSubmitError::QueueSequenceExhausted);
+        };
+        let capture = match capture_deadline_at_admission {
+            Some(deadline) => {
+                let handoff = self
+                    .shared
+                    .capture_handoff
+                    .as_ref()
+                    .ok_or(SessionSubmitError::CaptureUnavailable)?;
+                let image = handoff.reserve_image().map_err(|error| match error {
+                    CaptureHandoffError::RequestOccupied | CaptureHandoffError::Busy => {
+                        SessionSubmitError::CaptureCapacity
+                    }
+                    CaptureHandoffError::Detached => SessionSubmitError::CaptureDetached,
+                    CaptureHandoffError::Poisoned => SessionSubmitError::Stopped,
+                    _ => SessionSubmitError::CaptureCapacity,
+                })?;
+                Some(CaptureAdmission { image, deadline })
+            }
+            None => None,
+        };
         let sequence = self
             .attachment
             .next_ticket
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| SessionSubmitError::TicketIdExhausted)?;
-        let Some(next_enqueue_sequence) = queue.next_enqueue_sequence.checked_add(1) else {
-            return Err(SessionSubmitError::Busy);
-        };
         let id = RequestTicketId {
             session: self.shared.session,
             client: self.attachment.id,
@@ -1761,6 +1898,7 @@ impl SessionControlClient {
             operation,
             cell: Arc::clone(&cell),
             credit,
+            capture,
         };
         if is_step {
             queue.manual_step = Some(request);
@@ -1891,6 +2029,11 @@ fn validate_operation(
         | SessionOperation::AssetPreparation(AssetPreparationOperation::Prepare { .. })
         | SessionOperation::AssetPreparation(AssetPreparationOperation::Cancel { .. })
         | SessionOperation::AssetActivation(_) => {}
+        SessionOperation::CaptureFrame { timeout, .. } => {
+            if capture_deadline(*timeout, Instant::now()).is_none() {
+                return Err(SessionSubmitError::InvalidRequest);
+            }
+        }
         #[cfg(feature = "audio")]
         SessionOperation::Audio(operation) => match operation {
             SessionAudioOperation::Status | SessionAudioOperation::Voice { .. } => {}
@@ -1985,9 +2128,50 @@ struct ControlActor {
     consumer_stage_currentness: Option<Arc<std::sync::atomic::AtomicBool>>,
     consumer_stage_cleanup_pending: Option<ProjectConsumerStageProgress>,
     consumer_close_cancelled: bool,
+    capture_handoff: Option<Arc<CaptureHandoffShared>>,
+    pending_capture: Option<ActorCapture>,
+    capture_cleanup_pending: bool,
     #[cfg(feature = "audio")]
     audio: Option<ProjectAudioRuntime>,
     active_request: Option<ActiveRequest>,
+}
+
+struct ActorCapture {
+    cell: Arc<RequestCell>,
+    credit: Arc<CreditBundle>,
+    source: CaptureSourceIdentity,
+    ready_info: CaptureReadyInfo,
+    at_least_tick: Tick,
+    deadline: Instant,
+    cancellation: CaptureCancellation,
+    artifact: CaptureArtifactCapability,
+    pending: CaptureActorPending,
+    request: Option<Box<crate::CaptureRequest>>,
+    dispatched: bool,
+    completed: bool,
+}
+
+fn validate_capture_ready(
+    metadata: &CaptureFrameMetadata,
+    ready: CaptureReadyInfo,
+) -> Option<CaptureFailure> {
+    if metadata.surface_format() != ready.surface_format() {
+        return Some(CaptureFailure::Unsupported);
+    }
+    let width = metadata.view().physical_width();
+    let height = metadata.view().physical_height();
+    let pixels = u64::from(width) * u64::from(height);
+    (width > ready.max_width() || height > ready.max_height() || pixels > ready.max_pixels())
+        .then_some(CaptureFailure::TooLarge)
+}
+
+impl Drop for ActorCapture {
+    fn drop(&mut self) {
+        self.pending.close_receiver();
+        if !self.completed {
+            cancel_capture(&self.cancellation);
+        }
+    }
 }
 
 struct StagedProjectCandidate {
@@ -1997,16 +2181,25 @@ struct StagedProjectCandidate {
     project: Arc<PreparedProject>,
 }
 
+struct ActorRendererPorts {
+    generation_consumer: Option<ProjectGenerationConsumerShared>,
+    capture_handoff: Option<Arc<CaptureHandoffShared>>,
+}
+
 fn run_control_actor(
     prepared: Arc<PreparedProject>,
     config: SessionControlConfig,
     #[cfg(feature = "audio")] audio_options: ActorAudioOptions,
     #[cfg(not(feature = "audio"))] _audio_options: ActorAudioOptions,
     mut preparation_port: Option<ProjectPreparationPort>,
-    generation_consumer: Option<ProjectGenerationConsumerShared>,
+    renderer_ports: ActorRendererPorts,
     shared: Arc<ControlShared>,
     startup_sender: std::sync::mpsc::SyncSender<Result<(), SessionControlStartError>>,
 ) -> SessionShutdownReport {
+    let ActorRendererPorts {
+        generation_consumer,
+        capture_handoff,
+    } = renderer_ports;
     let mut session = match ProjectSession::new_shared(prepared, config.engine.clone()) {
         Ok(session) => session,
         Err(error) => {
@@ -2140,6 +2333,9 @@ fn run_control_actor(
         consumer_stage_currentness: None,
         consumer_stage_cleanup_pending: None,
         consumer_close_cancelled: false,
+        capture_handoff,
+        pending_capture: None,
+        capture_cleanup_pending: false,
         #[cfg(feature = "audio")]
         audio,
         active_request: None,
@@ -2170,6 +2366,7 @@ fn run_control_actor(
         Err(payload) => SessionTermination::Panicked(panic_message(payload)),
     };
     shared.request_stop();
+    actor.finish_capture_on_shutdown();
     if let Some(consumer) = actor.generation_consumer.as_ref() {
         consumer.actor_stopped();
         if let Some(port) = actor.preparation_port.as_ref() {
@@ -2238,6 +2435,228 @@ fn run_control_actor(
 }
 
 impl ControlActor {
+    fn capture_operation(
+        &mut self,
+        cell: Arc<RequestCell>,
+        credit: Arc<CreditBundle>,
+        admission: Option<CaptureAdmission>,
+        at_least_tick: Option<Tick>,
+    ) {
+        let Some(admission) = admission else {
+            self.finish_cell(
+                cell,
+                credit,
+                Err(SessionRequestError::CaptureFailed(
+                    CaptureFailure::Unsupported,
+                )),
+            );
+            return;
+        };
+        let Some(handoff) = self.capture_handoff.as_ref() else {
+            self.finish_cell(cell, credit, Err(SessionRequestError::CaptureUnavailable));
+            return;
+        };
+        let ready_info = match handoff.state() {
+            CaptureHandoffState::Ready(info) => info,
+            CaptureHandoffState::Detached => {
+                self.finish_cell(
+                    cell,
+                    credit,
+                    Err(SessionRequestError::CaptureFailed(CaptureFailure::Detached)),
+                );
+                return;
+            }
+            CaptureHandoffState::Starting | CaptureHandoffState::Unsupported(_) => {
+                self.finish_cell(
+                    cell,
+                    credit,
+                    Err(SessionRequestError::CaptureFailed(
+                        CaptureFailure::Unsupported,
+                    )),
+                );
+                return;
+            }
+        };
+        if cell.abandon_requested.load(Ordering::Acquire) {
+            self.finish_cell(
+                cell,
+                credit,
+                Err(SessionRequestError::CaptureFailed(
+                    CaptureFailure::Cancelled,
+                )),
+            );
+            return;
+        }
+        let source = CaptureSourceIdentity::new(
+            self.session.engine().world().session(),
+            self.active_project_generation,
+            &self.active_project_digest,
+        );
+        let id = CaptureArtifactId::new(cell.id);
+        let artifact = CaptureArtifactCapability::new(id, &admission.image);
+        let cancellation = capture_cancellation();
+        let (request, pending) = crate::session_capture::CaptureRequest::new(
+            id,
+            source.clone(),
+            at_least_tick.unwrap_or_else(|| self.session.engine().clock().current_tick()),
+            admission.deadline,
+            cancellation.clone(),
+            artifact.clone(),
+            CaptureWorkLease::from_image(&admission.image),
+        );
+        let at_least_tick =
+            at_least_tick.unwrap_or_else(|| self.session.engine().clock().current_tick());
+        self.pending_capture = Some(ActorCapture {
+            cell,
+            credit,
+            source,
+            ready_info,
+            at_least_tick,
+            deadline: admission.deadline,
+            cancellation,
+            artifact,
+            pending,
+            request: Some(Box::new(request)),
+            dispatched: false,
+            completed: false,
+        });
+        if let Some(active) = self.active_request.as_mut() {
+            active.capture_pending = true;
+        }
+    }
+
+    fn poll_capture(&mut self) {
+        if self.capture_cleanup_pending
+            && let Some(handoff) = self.capture_handoff.as_ref()
+            && handoff.drain_unclaimed().is_ok()
+        {
+            self.capture_cleanup_pending = false;
+        }
+        let Some(mut capture) = self.pending_capture.take() else {
+            return;
+        };
+        let failure = if self.shared.stop.is_requested()
+            || capture.cell.abandon_requested.load(Ordering::Acquire)
+        {
+            Some(CaptureFailure::Cancelled)
+        } else if Instant::now() >= capture.deadline {
+            Some(CaptureFailure::TimedOut)
+        } else if self.active_project_generation != capture.source.project_generation()
+            || self.active_project_digest != capture.source.source_digest()
+        {
+            Some(CaptureFailure::StaleGeneration)
+        } else {
+            match self.capture_handoff.as_ref().map(|handoff| handoff.state()) {
+                Some(CaptureHandoffState::Detached) | None => Some(CaptureFailure::Detached),
+                Some(CaptureHandoffState::Unsupported(_)) => Some(CaptureFailure::Unsupported),
+                _ => None,
+            }
+        };
+        if let Some(failure) = failure {
+            self.finish_capture_failure(capture, failure);
+            return;
+        }
+
+        if let Some(request) = capture.request.take() {
+            let Some(handoff) = self.capture_handoff.as_ref() else {
+                self.finish_capture_failure(capture, CaptureFailure::Detached);
+                return;
+            };
+            match handoff.dispatch(request) {
+                Ok(()) => capture.dispatched = true,
+                Err((request, CaptureHandoffError::Busy)) => {
+                    capture.request = Some(request);
+                    self.pending_capture = Some(capture);
+                    return;
+                }
+                Err((request, error)) => {
+                    drop(request);
+                    let failure = match error {
+                        CaptureHandoffError::Detached => CaptureFailure::Detached,
+                        _ => CaptureFailure::Unsupported,
+                    };
+                    self.finish_capture_failure(capture, failure);
+                    return;
+                }
+            }
+        }
+
+        match capture.pending.take_completion() {
+            Ok(Some(CaptureCompletion::Failed(failure))) => {
+                self.finish_capture_failure(capture, failure);
+            }
+            Ok(Some(CaptureCompletion::Captured(metadata))) => {
+                let publication = metadata.publication();
+                let current = self.active_project_generation == capture.source.project_generation()
+                    && self.active_project_digest == capture.source.source_digest();
+                if !current {
+                    self.finish_capture_failure(capture, CaptureFailure::StaleGeneration);
+                } else if !capture.source.matches_publication(publication)
+                    || publication.tick().get() < capture.at_least_tick.get()
+                {
+                    self.finish_capture_failure(capture, CaptureFailure::StaleIdentity);
+                } else if let Some(failure) = validate_capture_ready(&metadata, capture.ready_info)
+                {
+                    self.finish_capture_failure(capture, failure);
+                } else {
+                    let result = CaptureFrameResult::new(capture.artifact.clone(), *metadata);
+                    capture.completed = true;
+                    self.finish_cell(
+                        Arc::clone(&capture.cell),
+                        Arc::clone(&capture.credit),
+                        Ok(SessionRequestResult::CaptureFrame(result)),
+                    );
+                }
+            }
+            Ok(None) if !capture.pending.responder_alive() => {
+                self.finish_capture_failure(capture, CaptureFailure::ResponderDropped);
+            }
+            Ok(None) | Err(CaptureResponderError::Busy) => {
+                self.pending_capture = Some(capture);
+            }
+            Err(CaptureResponderError::Stopped | CaptureResponderError::AlreadyCompleted) => {
+                self.finish_capture_failure(capture, CaptureFailure::ResponderDropped);
+            }
+        }
+    }
+
+    fn finish_capture_failure(&mut self, mut capture: ActorCapture, failure: CaptureFailure) {
+        capture.pending.close_receiver();
+        cancel_capture(&capture.cancellation);
+        capture.request.take();
+        if capture.dispatched
+            && let Some(handoff) = self.capture_handoff.as_ref()
+            && matches!(handoff.drain_unclaimed(), Err(CaptureHandoffError::Busy))
+        {
+            self.capture_cleanup_pending = true;
+        }
+        capture.completed = true;
+        self.finish_cell(
+            Arc::clone(&capture.cell),
+            Arc::clone(&capture.credit),
+            Err(SessionRequestError::CaptureFailed(failure)),
+        );
+    }
+
+    fn finish_capture_on_shutdown(&mut self) {
+        if let Some(mut capture) = self.pending_capture.take() {
+            capture.pending.close_receiver();
+            cancel_capture(&capture.cancellation);
+            capture.request.take();
+            capture.completed = true;
+            self.finish_cell(
+                Arc::clone(&capture.cell),
+                Arc::clone(&capture.credit),
+                Err(SessionRequestError::CaptureFailed(
+                    CaptureFailure::Cancelled,
+                )),
+            );
+        }
+        if let Some(handoff) = self.capture_handoff.as_ref() {
+            handoff.drain_unclaimed_after_stop();
+        }
+    }
+
     fn run_loop(&mut self) -> Result<(), String> {
         loop {
             if self.shared.stop.is_requested() {
@@ -2252,6 +2671,15 @@ impl ControlActor {
             }
             self.poll_activation_stage_results()?;
             self.poll_generation_consumer()?;
+            self.poll_capture();
+            if self.pending_capture.is_none()
+                && self
+                    .active_request
+                    .as_ref()
+                    .is_some_and(|active| active.capture_pending)
+            {
+                self.active_request = None;
+            }
             #[cfg(feature = "audio")]
             if let Some(audio) = self.audio.as_mut() {
                 audio
@@ -2262,6 +2690,7 @@ impl ControlActor {
                 self.active_request = Some(ActiveRequest {
                     cell: Arc::clone(&request.cell),
                     possible_command_id: None,
+                    capture_pending: false,
                 });
                 #[cfg(test)]
                 if self
@@ -2274,7 +2703,13 @@ impl ControlActor {
                 self.process_request(request);
                 #[cfg(test)]
                 self.pause_after_request_before_cleanup_for_test();
-                self.active_request = None;
+                if self
+                    .active_request
+                    .as_ref()
+                    .is_none_or(|active| !active.capture_pending)
+                {
+                    self.active_request = None;
+                }
             }
             if self.shared.stop.is_requested() {
                 return Ok(());
@@ -2324,6 +2759,7 @@ impl ControlActor {
             operation,
             cell,
             credit,
+            capture,
             ..
         } = request;
         match operation {
@@ -2387,6 +2823,9 @@ impl ControlActor {
                     stopping: self.shared.stop.is_requested(),
                 };
                 self.finish_cell(cell, credit, Ok(SessionRequestResult::Status(status)));
+            }
+            SessionOperation::CaptureFrame { at_least_tick, .. } => {
+                self.capture_operation(cell, credit, capture, at_least_tick)
             }
             SessionOperation::AssetPreparation(operation) => {
                 self.preparation_operation(cell, credit, operation);
@@ -4327,6 +4766,8 @@ fn estimate_result_bytes(result: &SessionRequestResult) -> usize {
                 })
         }
         SessionRequestResult::Status(_) => std::mem::size_of::<SessionStatus>(),
+        SessionRequestResult::CaptureFrame(capture) => std::mem::size_of_val(capture)
+            .saturating_add(capture.metadata().publication().source_digest().len()),
         SessionRequestResult::AssetPreparation(AssetPreparationResult::Status(_)) => {
             MAX_PREPARATION_STATUS_RESULT_BYTES
         }
@@ -4456,11 +4897,13 @@ mod tests {
     use crate::{
         ActivationId, AssetActivationCommandOutcome, AssetActivationOperation,
         AssetActivationRequestResult, AssetActivationState, AssetPreparationCommandOutcome,
-        AssetPreparationOperation, AssetPreparationResult, NativeProjectActivationService,
-        NativeProjectActivationShutdown, NativeProjectPreparationOptions,
-        NativeProjectPreparationService, PreparationId, PreparationState,
-        PreparationWorkerShutdown, ProjectConsumerReportProgress, ProjectConsumerStageFailure,
-        ProjectConsumerStageFailurePhase, ProjectConsumerStageOutcome,
+        AssetPreparationOperation, AssetPreparationResult, CaptureCompletion, CaptureFailure,
+        CaptureFrameMetadata, CaptureHandoffPort, CaptureMetadataError, CapturePixelEncoding,
+        CapturePngMetadata, CaptureProjection, CaptureReadyInfo, CaptureSurfaceFormat, CaptureView,
+        NativeProjectActivationService, NativeProjectActivationShutdown,
+        NativeProjectPreparationOptions, NativeProjectPreparationService, PreparationId,
+        PreparationState, PreparationWorkerShutdown, ProjectConsumerReportProgress,
+        ProjectConsumerStageFailure, ProjectConsumerStageFailurePhase, ProjectConsumerStageOutcome,
         ProjectConsumerStageProgress, ProjectPresentedFrame, ProjectPresentedView,
         ProjectPublicationIdentity, ProjectSourceLease,
     };
@@ -4699,6 +5142,75 @@ mod tests {
                     thread::yield_now();
                 }
                 Err(error) => panic!("request admission failed: {error:?}"),
+            }
+        }
+    }
+
+    fn assert_submit_error_after_busy(
+        client: &super::SessionControlClient,
+        operation: SessionOperation,
+        expected: SessionSubmitError,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match client.try_submit(operation.clone()) {
+                Err(SessionSubmitError::Busy) => {
+                    assert!(Instant::now() < deadline, "submission stayed busy");
+                    thread::yield_now();
+                }
+                Err(error) => {
+                    assert_eq!(error, expected);
+                    return;
+                }
+                Ok(ticket) => {
+                    drop(ticket);
+                    panic!("submission unexpectedly succeeded instead of {expected:?}");
+                }
+            }
+        }
+    }
+
+    fn acknowledge_after_busy(ticket: &mut super::RequestTicket) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match ticket.acknowledge() {
+                Ok(()) => return,
+                Err(super::RequestAckError::Busy) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "ticket acknowledgement stayed busy"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("ticket acknowledgement failed: {error}"),
+            }
+        }
+    }
+
+    fn submit_capture_until_image_available(
+        client: &super::SessionControlClient,
+        timeout: Duration,
+    ) -> super::RequestTicket {
+        let operation = SessionOperation::CaptureFrame {
+            at_least_tick: None,
+            timeout: Some(timeout),
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match client.try_submit(operation.clone()) {
+                Ok(ticket) => return ticket,
+                Err(
+                    SessionSubmitError::Busy
+                    | SessionSubmitError::QueueFull
+                    | SessionSubmitError::CaptureCapacity,
+                ) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "capture image capacity was not released before deadline"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("capture admission failed: {error:?}"),
             }
         }
     }
@@ -6467,6 +6979,1283 @@ mod tests {
             Err(SessionSubmitError::AssetActivationUnavailable)
         ));
         let _ = service.shutdown();
+    }
+
+    #[test]
+    fn capture_completion_must_match_negotiated_ready_bounds_and_surface_format() {
+        assert_capture_completion_rejected(
+            CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 8, 16, 128)
+                .expect("valid small ready ceiling"),
+            16,
+            16,
+            CaptureSurfaceFormat::Rgba8UnormSrgb,
+            CaptureFailure::TooLarge,
+        );
+        assert_capture_completion_rejected(
+            CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                .expect("valid ready ceiling"),
+            16,
+            16,
+            CaptureSurfaceFormat::Bgra8UnormSrgb,
+            CaptureFailure::Unsupported,
+        );
+    }
+
+    #[test]
+    fn capture_readiness_is_one_shot_and_unsupported_or_detached_states_are_typed() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with pending capture readiness");
+        assert_eq!(handoff.try_status(), crate::CaptureHandoffState::Starting);
+
+        let denied = service
+            .session()
+            .attach_with_capabilities(SessionCapabilities {
+                inspect: false,
+                mutate: true,
+                manual_step: true,
+            })
+            .unwrap();
+        assert_eq!(
+            denied
+                .try_submit(SessionOperation::CaptureFrame {
+                    at_least_tick: None,
+                    timeout: Some(Duration::from_secs(1)),
+                })
+                .err()
+                .unwrap(),
+            SessionSubmitError::CapabilityDenied
+        );
+
+        let client = service.session().attach().unwrap();
+        assert_eq!(
+            client
+                .try_submit(SessionOperation::CaptureFrame {
+                    at_least_tick: None,
+                    timeout: Some(Duration::from_secs(1)),
+                })
+                .err()
+                .unwrap(),
+            SessionSubmitError::CaptureStarting
+        );
+        handoff
+            .try_set_unsupported(crate::CaptureUnsupportedReason::SurfaceCopyUnavailable)
+            .unwrap();
+        assert_eq!(
+            handoff.try_status(),
+            crate::CaptureHandoffState::Unsupported(
+                crate::CaptureUnsupportedReason::SurfaceCopyUnavailable
+            )
+        );
+        assert_eq!(
+            handoff.try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256).unwrap()
+            ),
+            Err(crate::CaptureHandoffError::AlreadyResolved)
+        );
+        assert_eq!(
+            client
+                .try_submit(SessionOperation::CaptureFrame {
+                    at_least_tick: None,
+                    timeout: Some(Duration::from_secs(1)),
+                })
+                .err()
+                .unwrap(),
+            SessionSubmitError::CaptureUnsupported
+        );
+
+        handoff.request_detach();
+        assert_eq!(handoff.try_status(), crate::CaptureHandoffState::Detached);
+        assert_eq!(
+            client
+                .try_submit(SessionOperation::CaptureFrame {
+                    at_least_tick: None,
+                    timeout: Some(Duration::from_secs(1)),
+                })
+                .err()
+                .unwrap(),
+            SessionSubmitError::CaptureDetached
+        );
+        assert_eq!(
+            handoff.try_set_unsupported(crate::CaptureUnsupportedReason::CaptureDisabled),
+            Err(crate::CaptureHandoffError::Detached)
+        );
+
+        drop(client);
+        drop(denied);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn capture_queue_full_does_not_consume_ticket_or_image_capacity() {
+        let fixture = PreparationTestProject::with_audio();
+        let mut config = default_config();
+        config.limits.command_capacity = 2;
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                config,
+            )
+            .expect("start capture service with the minimum normal queue");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+        let cleanup_release = ActorCleanupPauseRelease(Arc::clone(&service.session().shared));
+        service
+            .session()
+            .shared
+            .pause_after_next_request_before_cleanup
+            .store(true, Ordering::Release);
+
+        let mut first = submit_after_busy(&client, SessionOperation::Status);
+        let first_progress = wait_terminal(&first);
+        let pause_deadline = Instant::now() + Duration::from_secs(2);
+        while !service
+            .session()
+            .shared
+            .request_cleanup_paused
+            .load(Ordering::Acquire)
+        {
+            assert!(
+                Instant::now() < pause_deadline,
+                "actor did not pause after the first Status"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(first.id().sequence(), 1);
+
+        // The actor is held after its first request while the one non-Step queue slot is filled.
+        let mut queued = submit_after_busy(&client, SessionOperation::Status);
+        assert_eq!(queued.id().sequence(), 2);
+        let capture_operation = SessionOperation::CaptureFrame {
+            at_least_tick: None,
+            timeout: Some(Duration::from_secs(2)),
+        };
+        let queue_full_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match client.try_submit(capture_operation.clone()) {
+                Err(SessionSubmitError::Busy) => {
+                    assert!(Instant::now() < queue_full_deadline);
+                    thread::yield_now();
+                }
+                Err(SessionSubmitError::QueueFull) => break,
+                Err(error) => panic!("expected full normal queue, got {error:?}"),
+                Ok(ticket) => {
+                    drop(ticket);
+                    panic!("capture was admitted while the normal request queue was full");
+                }
+            }
+        }
+
+        drop(cleanup_release);
+        let queued_progress = wait_terminal(&queued);
+        assert!(queued_progress.terminal().unwrap().is_ok());
+        acknowledge_after_busy(&mut first);
+        acknowledge_after_busy(&mut queued);
+        drop(first_progress);
+        drop(queued_progress);
+
+        // Both normal tickets were accepted, so a successful capture must be sequence three.
+        // Its admission also proves QueueFull did not strand the image reservation.
+        let mut capture = submit_after_busy(&client, capture_operation);
+        assert_eq!(capture.id().sequence(), 3);
+        let mut request = wait_for_capture_request(&handoff);
+        complete_capture_after_busy(
+            request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        assert!(matches!(
+            wait_terminal(&capture).terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        acknowledge_after_busy(&mut capture);
+
+        drop(request);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn capture_ticket_and_enqueue_sequence_exhaustion_roll_back_admission() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start capture service for exhaustion rollback checks");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+        let capture_operation = SessionOperation::CaptureFrame {
+            at_least_tick: None,
+            timeout: Some(Duration::from_secs(2)),
+        };
+
+        client
+            .attachment
+            .next_ticket
+            .store(u64::MAX, Ordering::Release);
+        assert_submit_error_after_busy(
+            &client,
+            capture_operation.clone(),
+            SessionSubmitError::TicketIdExhausted,
+        );
+        client.attachment.next_ticket.store(1, Ordering::Release);
+
+        let original_enqueue_sequence = {
+            let mut queue = service.session().shared.queue.state.lock().unwrap();
+            let original = queue.next_enqueue_sequence;
+            queue.next_enqueue_sequence = u64::MAX;
+            original
+        };
+        assert_submit_error_after_busy(
+            &client,
+            capture_operation.clone(),
+            SessionSubmitError::QueueSequenceExhausted,
+        );
+        service
+            .session()
+            .shared
+            .queue
+            .state
+            .lock()
+            .unwrap()
+            .next_enqueue_sequence = original_enqueue_sequence;
+
+        // Both failures happened after result-credit reservation. The next capture must still
+        // acquire the image slot and receive the first ticket ID.
+        let mut ticket = submit_after_busy(&client, capture_operation);
+        assert_eq!(ticket.id().sequence(), 1);
+        let mut request = wait_for_capture_request(&handoff);
+        complete_capture_after_busy(
+            request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        assert!(matches!(
+            wait_terminal(&ticket).terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        acknowledge_after_busy(&mut ticket);
+
+        drop(request);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn capture_result_credit_refusal_does_not_consume_ticket_or_image_capacity() {
+        let fixture = PreparationTestProject::with_audio();
+        let mut config = default_config();
+        config.limits.max_pending_per_client = 2;
+        config.limits.max_pending_total = 2;
+        config.limits.max_result_bytes_total = 2 * 1024 * 1024;
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                config,
+            )
+            .expect("start capture service with one normal result credit");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+
+        let mut status = submit_after_busy(&client, SessionOperation::Status);
+        let status_progress = wait_terminal(&status);
+        assert!(status_progress.terminal().unwrap().is_ok());
+        assert_submit_error_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(2)),
+            },
+            SessionSubmitError::ResultCapacity,
+        );
+        acknowledge_after_busy(&mut status);
+        drop(status_progress);
+
+        let mut ticket = submit_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(2)),
+            },
+        );
+        assert_eq!(ticket.id().sequence(), 2);
+        let mut request = wait_for_capture_request(&handoff);
+        complete_capture_after_busy(
+            request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        assert!(matches!(
+            wait_terminal(&ticket).terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        acknowledge_after_busy(&mut ticket);
+
+        drop(request);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn invalid_capture_timeouts_do_not_consume_a_ticket_id() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with capture handoff");
+        let ready = CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+            .expect("valid readiness bounds");
+        handoff.try_set_ready(ready).unwrap();
+        assert_eq!(
+            handoff.try_set_ready(ready),
+            Err(crate::CaptureHandoffError::AlreadyResolved)
+        );
+        let client = service.session().attach().unwrap();
+        for timeout in [Duration::ZERO, Duration::from_secs(31)] {
+            assert_eq!(
+                client
+                    .try_submit(SessionOperation::CaptureFrame {
+                        at_least_tick: None,
+                        timeout: Some(timeout),
+                    })
+                    .err()
+                    .unwrap(),
+                SessionSubmitError::InvalidRequest
+            );
+        }
+        let mut ticket = submit_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(2)),
+            },
+        );
+        assert_eq!(ticket.id().sequence(), 1);
+        let mut request = wait_for_capture_request(&handoff);
+        complete_capture_after_busy(
+            request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        assert!(matches!(
+            wait_terminal(&ticket).terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        acknowledge_after_busy(&mut ticket);
+        drop(request);
+
+        let default_timeout = crate::DEFAULT_CAPTURE_TIMEOUT;
+        let operation = SessionOperation::CaptureFrame {
+            at_least_tick: None,
+            timeout: None,
+        };
+        let admission_deadline = Instant::now() + Duration::from_secs(2);
+        let (mut default_ticket, attempted_before, returned_after) = loop {
+            let attempted_before = Instant::now();
+            match client.try_submit(operation.clone()) {
+                Ok(ticket) => break (ticket, attempted_before, Instant::now()),
+                Err(SessionSubmitError::Busy | SessionSubmitError::QueueFull) => {
+                    assert!(
+                        Instant::now() < admission_deadline,
+                        "default-timeout capture admission stayed busy"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("default-timeout capture was rejected: {error:?}"),
+            }
+        };
+        assert_eq!(default_ticket.id().sequence(), 2);
+        let mut default_request = wait_for_capture_request(&handoff);
+        assert!(default_request.deadline() >= attempted_before + default_timeout);
+        assert!(default_request.deadline() <= returned_after + default_timeout);
+        complete_capture_after_busy(
+            default_request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        assert!(matches!(
+            wait_terminal(&default_ticket).terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        acknowledge_after_busy(&mut default_ticket);
+
+        drop(default_request);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+    #[test]
+    fn capture_metadata_rejects_linear_label_for_srgb_surface_but_allows_manual_srgb() {
+        let service = start(default_config());
+        let client = service.attach().unwrap();
+        let frame = wait_for_frame(&client);
+        let publication = ProjectPublicationIdentity::from_frame(&frame)
+            .expect("use the actor's actual publication identity");
+        let view = CaptureView::new(
+            16,
+            16,
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            1.0,
+            0.1,
+            100.0,
+            CaptureProjection::Perspective,
+            [1.0; 16],
+        )
+        .unwrap();
+        let png = CapturePngMetadata::new(16, 16, 16, [4; 32]).unwrap();
+        assert!(matches!(
+            CaptureFrameMetadata::new(
+                publication,
+                1,
+                view.clone(),
+                CaptureSurfaceFormat::Rgba8UnormSrgb,
+                CapturePixelEncoding::Linear,
+                png.clone(),
+            ),
+            Err(CaptureMetadataError::InvalidView)
+        ));
+        let manual_srgb = CaptureFrameMetadata::new(
+            ProjectPublicationIdentity::from_frame(&frame).unwrap(),
+            1,
+            view,
+            CaptureSurfaceFormat::Rgba8Unorm,
+            CapturePixelEncoding::SrgbEncoded,
+            png,
+        )
+        .expect("non-sRGB surfaces may carry manually sRGB-encoded pixels");
+        assert_eq!(
+            manual_srgb.surface_format(),
+            CaptureSurfaceFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            manual_srgb.surface_encoding(),
+            CapturePixelEncoding::SrgbEncoded
+        );
+        drop(frame);
+        let _ = service.shutdown();
+    }
+
+    #[test]
+    fn capture_uses_full_ticket_identity_waits_for_requested_tick_and_keeps_step_lane_free() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, _render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with capture handoff");
+        let ready = CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+            .expect("valid readiness bounds");
+        handoff.try_set_ready(ready).unwrap();
+
+        let first_client = service.session().attach().unwrap();
+        let second_client = service.session().attach().unwrap();
+        let third_client = service.session().attach().unwrap();
+        let mut first_ticket = submit_after_busy(
+            &first_client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: Some(Tick(1)),
+                timeout: Some(Duration::from_secs(3)),
+            },
+        );
+        assert_eq!(first_ticket.id().sequence(), 1);
+        assert_eq!(wait_for_frame(&first_client).tick(), Tick(0));
+        let mut first_request = wait_for_capture_request(&handoff);
+        assert_eq!(first_request.at_least_tick(), Tick(1));
+
+        let second_capture = SessionOperation::CaptureFrame {
+            at_least_tick: None,
+            timeout: Some(Duration::from_secs(3)),
+        };
+        let admission_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match second_client.try_submit(second_capture.clone()) {
+                Err(SessionSubmitError::CaptureCapacity) => break,
+                Err(SessionSubmitError::Busy | SessionSubmitError::QueueFull) => {
+                    assert!(Instant::now() < admission_deadline);
+                    thread::yield_now();
+                }
+                Ok(ticket) => {
+                    drop(ticket);
+                    panic!("a second client consumed the session's single image slot");
+                }
+                Err(error) => panic!("unexpected capture admission failure: {error}"),
+            }
+        }
+
+        // The held capture owns the image slot, but Manual Step retains its independent reserve.
+        let mut step = submit_after_busy(&third_client, SessionOperation::Step { count: 1 });
+        assert!(matches!(
+            wait_terminal(&step).terminal().unwrap(),
+            Ok(SessionRequestResult::Step(reports))
+                if reports.len() == 1 && reports[0].tick == Tick(1)
+        ));
+        acknowledge_after_busy(&mut step);
+        let frame_one = {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let frame = wait_for_frame(&first_client);
+                if frame.tick() == Tick(1) {
+                    break frame;
+                }
+                drop(frame);
+                assert!(
+                    Instant::now() < deadline,
+                    "Manual Step did not publish tick one"
+                );
+                thread::yield_now();
+            }
+        };
+        let publication = ProjectPublicationIdentity::from_frame(&frame_one).unwrap();
+        let metadata = capture_metadata_for_publication(
+            publication,
+            16,
+            16,
+            CaptureSurfaceFormat::Rgba8UnormSrgb,
+        );
+        complete_capture_after_busy(
+            first_request.responder_mut(),
+            CaptureCompletion::Captured(Box::new(metadata)),
+        );
+        drop(first_request);
+        let first_result = wait_terminal(&first_ticket);
+        {
+            let capture = match first_result.terminal().unwrap() {
+                Ok(SessionRequestResult::CaptureFrame(capture)) => capture,
+                other => panic!("expected a capture at the requested tick, got {other:?}"),
+            };
+            assert_eq!(capture.metadata().publication().tick(), Tick(1));
+            assert_eq!(capture.artifact().id().ticket().client(), first_client.id());
+        }
+        acknowledge_after_busy(&mut first_ticket);
+        drop(first_result);
+        drop(frame_one);
+
+        let mut second_ticket = submit_after_busy(&second_client, second_capture);
+        assert_eq!(second_ticket.id().sequence(), 1);
+        assert_ne!(second_ticket.id().client(), first_ticket.id().client());
+        let mut second_request = wait_for_capture_request(&handoff);
+        assert_eq!(second_request.id().ticket(), second_ticket.id());
+        complete_capture_after_busy(
+            second_request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        drop(second_request);
+        assert_eq!(
+            wait_terminal(&second_ticket).terminal().unwrap(),
+            &Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            ))
+        );
+        acknowledge_after_busy(&mut second_ticket);
+        drop(first_client);
+        drop(second_client);
+        drop(third_client);
+        drop(handoff);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn capture_timeout_cleans_unclaimed_work_and_taken_work_keeps_the_image_slot() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with capture handoff");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+        let short_capture = || SessionOperation::CaptureFrame {
+            at_least_tick: None,
+            timeout: Some(Duration::from_millis(100)),
+        };
+
+        // Observe a real dispatched request in the capacity-one slot, leave it unclaimed, and
+        // verify timeout terminalization also drains the request and its image reservation.
+        let mut unclaimed_ticket = submit_after_busy(&client, short_capture());
+        let dispatch_deadline = Instant::now() + Duration::from_secs(2);
+        while !handoff.has_unclaimed_request() {
+            assert!(
+                Instant::now() < dispatch_deadline,
+                "capture was not dispatched before its deadline"
+            );
+            thread::yield_now();
+        }
+        let unclaimed_progress = wait_terminal(&unclaimed_ticket);
+        assert!(matches!(
+            unclaimed_progress.terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::TimedOut
+            )))
+        ));
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while handoff.has_unclaimed_request() {
+            assert!(
+                Instant::now() < cleanup_deadline,
+                "timed-out unclaimed capture remained in the handoff slot"
+            );
+            thread::yield_now();
+        }
+        acknowledge_after_busy(&mut unclaimed_ticket);
+        drop(unclaimed_progress);
+
+        // Once taken, a timed-out request observes cancellation and a closed responder, but its
+        // independent work lease keeps the single image credit until the consumer drops it.
+        let mut taken_ticket = submit_after_busy(&client, short_capture());
+        let mut taken_request = wait_for_capture_request(&handoff);
+        let taken_progress = wait_terminal(&taken_ticket);
+        assert!(matches!(
+            taken_progress.terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::TimedOut
+            )))
+        ));
+        assert!(taken_request.is_cancelled());
+        assert_eq!(
+            taken_request
+                .responder_mut()
+                .try_complete(&CaptureCompletion::Failed(CaptureFailure::Cancelled)),
+            Err(crate::CaptureResponderError::Stopped)
+        );
+
+        let capacity_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match client.try_submit(short_capture()) {
+                Err(SessionSubmitError::CaptureCapacity) => break,
+                Err(SessionSubmitError::Busy | SessionSubmitError::QueueFull) => {
+                    assert!(
+                        Instant::now() < capacity_deadline,
+                        "capture admission stayed busy while checking the retained image lease"
+                    );
+                    thread::yield_now();
+                }
+                Ok(ticket) => {
+                    drop(ticket);
+                    panic!("a held consumer request failed to retain the image slot");
+                }
+                Err(error) => panic!("unexpected capture capacity result: {error:?}"),
+            }
+        }
+        drop(taken_request);
+        acknowledge_after_busy(&mut taken_ticket);
+        drop(taken_progress);
+
+        let mut dropped_request_ticket = submit_after_busy(&client, short_capture());
+        let dropped_request = wait_for_capture_request(&handoff);
+        drop(dropped_request);
+        let dropped_request_progress = wait_terminal(&dropped_request_ticket);
+        assert!(matches!(
+            dropped_request_progress.terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::ResponderDropped
+            )))
+        ));
+        acknowledge_after_busy(&mut dropped_request_ticket);
+        drop(dropped_request_progress);
+
+        // Releasing the held request returns capacity; a subsequent responder completion is
+        // one-shot and the actor records its typed failure exactly once. The previous request
+        // also proves that dropping the responder releases the image slot after terminalization.
+        let mut final_ticket = submit_after_busy(&client, short_capture());
+        let mut final_request = wait_for_capture_request(&handoff);
+        complete_capture_after_busy(
+            final_request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        assert_eq!(
+            final_request
+                .responder_mut()
+                .try_complete(&CaptureCompletion::Failed(CaptureFailure::Cancelled)),
+            Err(crate::CaptureResponderError::AlreadyCompleted)
+        );
+        let final_progress = wait_terminal(&final_ticket);
+        assert!(matches!(
+            final_progress.terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        acknowledge_after_busy(&mut final_ticket);
+
+        drop(final_progress);
+        drop(final_request);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn dropping_capture_ticket_cancels_before_and_after_consumer_take() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with capture handoff");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+
+        let unclaimed_ticket =
+            submit_capture_until_image_available(&client, Duration::from_secs(3));
+        let dispatch_deadline = Instant::now() + Duration::from_secs(2);
+        while !handoff.has_unclaimed_request() {
+            assert!(
+                Instant::now() < dispatch_deadline,
+                "capture was not dispatched before abandonment"
+            );
+            thread::yield_now();
+        }
+        drop(unclaimed_ticket);
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while handoff.has_unclaimed_request() {
+            assert!(
+                Instant::now() < cleanup_deadline,
+                "abandoned unclaimed capture remained in the handoff slot"
+            );
+            thread::yield_now();
+        }
+
+        let taken_ticket = submit_capture_until_image_available(&client, Duration::from_secs(3));
+        let mut taken_request = wait_for_capture_request(&handoff);
+        drop(taken_ticket);
+        let cancel_deadline = Instant::now() + Duration::from_secs(2);
+        while !taken_request.is_cancelled() {
+            assert!(
+                Instant::now() < cancel_deadline,
+                "ticket abandonment did not reach the taken capture request"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            taken_request
+                .responder_mut()
+                .try_complete(&CaptureCompletion::Failed(CaptureFailure::Cancelled)),
+            Err(crate::CaptureResponderError::Stopped)
+        );
+
+        let capacity_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match client.try_submit(SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(3)),
+            }) {
+                Err(SessionSubmitError::CaptureCapacity) => break,
+                Err(SessionSubmitError::Busy | SessionSubmitError::QueueFull) => {
+                    assert!(Instant::now() < capacity_deadline);
+                    thread::yield_now();
+                }
+                Ok(ticket) => {
+                    drop(ticket);
+                    panic!("taken work lease did not retain the image slot after ticket drop");
+                }
+                Err(error) => panic!("unexpected capture admission result: {error:?}"),
+            }
+        }
+        drop(taken_request);
+
+        let mut final_ticket =
+            submit_capture_until_image_available(&client, Duration::from_secs(3));
+        let mut final_request = wait_for_capture_request(&handoff);
+        complete_capture_after_busy(
+            final_request.responder_mut(),
+            CaptureCompletion::Failed(CaptureFailure::Cancelled),
+        );
+        assert!(matches!(
+            wait_terminal(&final_ticket).terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        acknowledge_after_busy(&mut final_ticket);
+
+        drop(final_request);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn capture_handoff_busy_keeps_the_request_owned_while_manual_step_progresses() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with capture handoff");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+        let busy_count = handoff.dispatch_busy_count_for_test();
+        let request_slot = handoff.hold_request_slot_for_test();
+        let mut capture_ticket = submit_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(3)),
+            },
+        );
+        let dispatch_deadline = Instant::now() + Duration::from_secs(2);
+        while handoff.dispatch_busy_count_for_test() == busy_count {
+            assert!(
+                Instant::now() < dispatch_deadline,
+                "actor did not exercise the bounded busy handoff path"
+            );
+            thread::yield_now();
+        }
+
+        // The actor returned the still-owned request to its pending slot instead of blocking on
+        // the consumer mutex; the reserved Manual Step lane remains available meanwhile.
+        let mut step_ticket = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+        assert!(matches!(
+            wait_terminal(&step_ticket).terminal(),
+            Some(Ok(SessionRequestResult::Step(reports)))
+                if reports.len() == 1 && reports[0].tick == Tick(1)
+        ));
+        drop(request_slot);
+
+        let mut request = wait_for_capture_request(&handoff);
+        let frame = wait_for_frame(&client);
+        let publication = ProjectPublicationIdentity::from_frame(&frame).unwrap();
+        assert!(publication.tick() >= request.at_least_tick());
+        let metadata = capture_metadata_for_publication(
+            publication,
+            16,
+            16,
+            CaptureSurfaceFormat::Rgba8UnormSrgb,
+        );
+        complete_capture_after_busy(
+            request.responder_mut(),
+            CaptureCompletion::Captured(Box::new(metadata)),
+        );
+        let capture_progress = wait_terminal(&capture_ticket);
+        assert!(matches!(
+            capture_progress.terminal(),
+            Some(Ok(SessionRequestResult::CaptureFrame(_)))
+        ));
+        acknowledge_after_busy(&mut capture_ticket);
+        acknowledge_after_busy(&mut step_ticket);
+
+        drop(capture_progress);
+        drop(request);
+        drop(frame);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn capture_actor_panic_cancels_taken_work_and_closes_the_responder() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with capture handoff");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+        let mut capture_ticket = submit_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(3)),
+            },
+        );
+        let mut request = wait_for_capture_request(&handoff);
+        service
+            .session()
+            .shared
+            .panic_after_next_engine_step
+            .store(true, Ordering::Release);
+        let mut step_ticket = submit_after_busy(&client, SessionOperation::Step { count: 1 });
+
+        let capture_progress = wait_terminal(&capture_ticket);
+        assert!(matches!(
+            capture_progress.terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        assert!(request.is_cancelled());
+        assert_eq!(
+            request
+                .responder_mut()
+                .try_complete(&CaptureCompletion::Failed(CaptureFailure::Cancelled)),
+            Err(crate::CaptureResponderError::Stopped)
+        );
+        assert!(matches!(
+            wait_terminal(&step_ticket).terminal(),
+            Some(Err(SessionRequestError::ActorFailed(_)))
+        ));
+        acknowledge_after_busy(&mut capture_ticket);
+        acknowledge_after_busy(&mut step_ticket);
+
+        drop(request);
+        drop(capture_progress);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match service.try_shutdown() {
+                Ok(NativeProjectActivationShutdown::Stopping) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "panicked actor did not finish shutdown"
+                    );
+                    thread::yield_now();
+                }
+                Err(crate::NativeProjectActivationShutdownError::ActorFailed) => break,
+                other => panic!("unexpected shutdown result after actor panic: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn capture_normal_stop_cancels_taken_work_and_closes_the_responder() {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with capture handoff");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256)
+                    .expect("valid readiness bounds"),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+        let mut ticket = submit_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(3)),
+            },
+        );
+        let mut request = wait_for_capture_request(&handoff);
+
+        service.request_stop();
+        let progress = wait_terminal(&ticket);
+        assert!(matches!(
+            progress.terminal(),
+            Some(Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::Cancelled
+            )))
+        ));
+        assert!(request.is_cancelled());
+        assert_eq!(
+            request
+                .responder_mut()
+                .try_complete(&CaptureCompletion::Failed(CaptureFailure::Cancelled)),
+            Err(crate::CaptureResponderError::Stopped)
+        );
+        acknowledge_after_busy(&mut ticket);
+
+        drop(request);
+        drop(progress);
+        drop(ticket);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    #[test]
+    fn capture_dispatch_binds_committed_source_even_while_an_old_frame_is_held() {
+        let fixture = PreparationTestProject::with_audio();
+        std::fs::write(fixture.path().join("scene.json"), ONE_ENTITY_SCENE).unwrap();
+        let (mut service, render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one actor with generation consumer and capture handoff");
+        handoff
+            .try_set_ready(
+                CaptureReadyInfo::new(CaptureSurfaceFormat::Rgba8UnormSrgb, 16, 16, 256).unwrap(),
+            )
+            .unwrap();
+        let client = service.session().attach().unwrap();
+        let old_frame = wait_for_frame(&client);
+        let old_publication = ProjectPublicationIdentity::from_frame(&old_frame).unwrap();
+        let initial_lease = consumer_call_after_busy("initial capture-test lease", || {
+            render_port.try_take_initial()
+        })
+        .unwrap()
+        .expect("initial source lease");
+        report_frame_presented(&render_port, &old_frame, 1);
+        drop(initial_lease);
+
+        let replacement_scene = ONE_ENTITY_SCENE.replace("\"revision\": 37", "\"revision\": 38");
+        std::fs::write(fixture.path().join("scene.json"), replacement_scene).unwrap();
+        let candidate = prepare_activation_candidate(&client, 89_381);
+        wait_for_preparation_state(&client, PreparationState::CpuPrepared, candidate.epoch());
+        let activation = stage_activation_candidate(&client, candidate, 89_382, 1);
+        let candidate_lease = wait_for_candidate_lease(&render_port);
+        let candidate_identity = candidate_lease.identity().clone();
+        assert_eq!(
+            consumer_call_after_busy("candidate capture-test Ready", || {
+                render_port
+                    .try_report_stage(&candidate_identity, ProjectConsumerStageOutcome::Ready)
+            }),
+            Ok(ProjectConsumerReportProgress::Queued)
+        );
+        wait_for_consumer_stage_progress(&render_port, ProjectConsumerStageProgress::ReadyApplied);
+        drop(candidate_lease);
+        let committed = terminal_result_after_activation_busy(
+            &client,
+            SessionOperation::AssetActivation(AssetActivationOperation::Commit {
+                command_id: Some(CommandId::from_raw(89_383)),
+                activation,
+                expected_active_generation: 1,
+            }),
+        )
+        .expect("ready replacement should commit after actual initial presentation");
+        assert!(matches!(
+            committed,
+            SessionRequestResult::AssetActivation(AssetActivationRequestResult::Command(command))
+                if matches!(command.outcome(), AssetActivationCommandOutcome::CommitApplied { generation: 2, .. })
+        ));
+        assert_eq!(
+            wait_for_activation_state(&client, AssetActivationState::Committed).active_generation(),
+            2
+        );
+
+        let mut ticket = submit_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(3)),
+            },
+        );
+        let mut request = wait_for_capture_request(&handoff);
+        assert_eq!(request.source().project_generation(), 2);
+        assert_ne!(
+            request.source().source_digest(),
+            old_publication.source_digest()
+        );
+        let stale_metadata = capture_metadata_for_publication(
+            old_publication,
+            16,
+            16,
+            CaptureSurfaceFormat::Rgba8UnormSrgb,
+        );
+        complete_capture_after_busy(
+            request.responder_mut(),
+            CaptureCompletion::Captured(Box::new(stale_metadata)),
+        );
+        drop(request);
+        assert_eq!(
+            wait_terminal(&ticket).terminal().unwrap(),
+            &Err(SessionRequestError::CaptureFailed(
+                CaptureFailure::StaleIdentity
+            ))
+        );
+        ticket.acknowledge().unwrap();
+        drop(old_frame);
+        drop(client);
+        drop(handoff);
+        drop(render_port);
+        stop_activation_service(&mut service);
+    }
+
+    fn capture_metadata_for_publication(
+        publication: ProjectPublicationIdentity,
+        width: u32,
+        height: u32,
+        surface_format: CaptureSurfaceFormat,
+    ) -> CaptureFrameMetadata {
+        let view = CaptureView::new(
+            width,
+            height,
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            1.0,
+            0.1,
+            100.0,
+            CaptureProjection::Perspective,
+            [1.0; 16],
+        )
+        .expect("valid finite selected view");
+        CaptureFrameMetadata::new(
+            publication,
+            1,
+            view,
+            surface_format,
+            CapturePixelEncoding::SrgbEncoded,
+            CapturePngMetadata::new(width, height, 16, [9; 32])
+                .expect("bounded encoded PNG metadata"),
+        )
+        .expect("internally consistent capture metadata")
+    }
+
+    fn assert_capture_completion_rejected(
+        ready: CaptureReadyInfo,
+        width: u32,
+        height: u32,
+        reported_surface_format: CaptureSurfaceFormat,
+        expected: CaptureFailure,
+    ) {
+        let fixture = PreparationTestProject::with_audio();
+        let (mut service, _render_port, handoff) =
+            NativeProjectActivationService::start_with_render_consumer_and_capture(
+                NativeProjectPreparationOptions::new(fixture.path()),
+                default_config(),
+            )
+            .expect("start one native actor with capture handoff");
+        handoff
+            .try_set_ready(ready)
+            .expect("report actual fixture readiness");
+        let client = service.session().attach().unwrap();
+        let mut ticket = submit_after_busy(
+            &client,
+            SessionOperation::CaptureFrame {
+                at_least_tick: None,
+                timeout: Some(Duration::from_secs(2)),
+            },
+        );
+        let mut request = wait_for_capture_request(&handoff);
+        let frame = wait_for_frame(&client);
+        let publication = ProjectPublicationIdentity::from_frame(&frame)
+            .expect("use the actor's real current publication identity");
+        let view = CaptureView::new(
+            width,
+            height,
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            1.0,
+            0.1,
+            100.0,
+            CaptureProjection::Perspective,
+            [1.0; 16],
+        )
+        .expect("valid finite selected view");
+        let metadata = CaptureFrameMetadata::new(
+            publication,
+            1,
+            view,
+            reported_surface_format,
+            CapturePixelEncoding::SrgbEncoded,
+            CapturePngMetadata::new(width, height, 16, [7; 32])
+                .expect("bounded encoded PNG metadata"),
+        )
+        .expect("well-formed capture completion metadata");
+        complete_capture_after_busy(
+            request.responder_mut(),
+            CaptureCompletion::Captured(Box::new(metadata)),
+        );
+        drop(request);
+        assert_eq!(
+            wait_terminal(&ticket).terminal().unwrap(),
+            &Err(SessionRequestError::CaptureFailed(expected))
+        );
+        ticket.acknowledge().unwrap();
+        drop(frame);
+        stop_activation_service(&mut service);
+    }
+
+    fn wait_for_capture_request(handoff: &CaptureHandoffPort) -> crate::CaptureRequest {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match handoff.try_take_request() {
+                Ok(Some(request)) => return request,
+                Ok(None) | Err(crate::CaptureHandoffError::Busy) => {}
+                Err(error) => panic!("capture handoff failed while waiting for request: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "actor did not dispatch the accepted capture request"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn complete_capture_after_busy(
+        responder: &mut crate::CaptureResponder,
+        completion: CaptureCompletion,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match responder.try_complete(&completion) {
+                Ok(()) => return,
+                Err(crate::CaptureResponderError::Busy) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "capture completion slot stayed busy"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("capture completion failed: {error}"),
+            }
+        }
     }
 
     #[test]

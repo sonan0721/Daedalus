@@ -1,0 +1,6 @@
+[alias]
+dev-build = [
+    "build",
+    "--config",
+    'profile.dev.package.daedalus-renderer.debug="line-tables-only"',
+]

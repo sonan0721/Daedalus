@@ -1,6 +1,6 @@
 # Live capture renderer의 반환 슬롯과 GPU 완료 경계
 
-상태: P02.3a.2 구현 전 계약, source feasibility 감사·root 검토 반영 · 2026-10-18
+상태: P02.3a.2 구현 중 계약, 실제 GPU 인수 전 · 2026-10-18
 
 ## 만든 이유
 
@@ -16,11 +16,12 @@ Luna의 세 차례 읽기 전용 감사와 root의 `window.rs`·`packet_renderer
 managed_packet_window_capture_channel()
     -> (ManagedPacketWindowClient, ManagedCaptureClient, ManagedPacketWindowServer)
 
-ManagedCaptureClient::try_status() -> ManagedCaptureState
+ManagedCaptureClient::try_status() -> Result<ManagedCaptureState, EndpointError>
 ManagedCaptureClient::try_submit(request)
     -> Result<(), /* original owned request + typed rejection */>
-ManagedCaptureClient::try_take_return()
-    -> /* Empty | Busy | Submitted(readback) | Cleanup(cleanup) | Failed(key, reason) */
+ManagedCaptureWorker::try_take_return()
+    -> /* Empty | Busy | Submitted(readback) | Cleanup(cleanup)
+          | Failed { key, failure, cleanup } */
 ```
 
 이 header는 역할을 동결하는 표기다. 정확한 Rust type 이름·visibility·error shape는 구현 소유자가 source 작성 전 consumer에게 공유한다. 공개 request에는 scalar key·generation identity·tick floor·deadline·작은 취소 신호만 담는다. runtime ticket/responder/image lease·artifact capability·파일 path는 host에 남긴다.
@@ -37,7 +38,7 @@ runtime a.1은 `f3880d7`에서 로컬 통합 인수했다. Luna가 정확한 ren
 | `ManagedCaptureClient` | readiness 전용 `try_status() -> Result<State, EndpointError>`, 원래 request 보존 submit, keyed cancel, idempotent OOB detach. ReadyInfo는 format/max getter 제공 |
 | `register_worker` | 창 시작 전 non-Clone worker 한 번 등록. 중복은 AlreadyRegistered. durable worker 참조가 수락보다 먼저 존재해야 함 |
 | `ManagedCaptureWorker` | `try_take_return() -> Result<Option<Return>, WorkerError>`와 keyed cell progress. readiness와 queue/map progress를 혼동하지 않음 |
-| `ManagedCaptureReturn` | Submitted(readback) / Cleanup(cleanup) / Failed(key, fixed failure). 한 return reserve이며 큰 inline payload는 쓰지 않음 |
+| `ManagedCaptureReturn` | Submitted(readback) / Cleanup(cleanup) / Failed { key, failure, cleanup }. pre-copy 실패도 같은 cleanup handle로 return 소비·실제 Released를 마감한다. 한 return reserve이며 큰 inline payload는 쓰지 않음 |
 | `ManagedCaptureReadback` | actual view/format getter, borrowed `try_read_rgba8()`는 Pending(None)/Busy/typed production failure/성공 pixels. 성공 후 재호출은 InvalidState. `into_cleanup(self)`가 같은 cell을 옮겨 실패에도 정리 소유권 보존 |
 | `ManagedCaptureCleanup` | borrowed `try_finish()`는 실제 Released 뒤에만 true. Pending/Busy/DevicePollFailed 등을 성공으로 바꾸지 않음 |
 | `ManagedCapturePixels::into_parts` | key·actual view·format·RGBA Vec를 move해 host가 전달 때문에 큰 복사를 한 번 더 하지 않음 |
@@ -95,4 +96,4 @@ host a.3는 기존 CPU worker의 per-iteration catch 바깥에 `{runtime Capture
 
 CPU 시험은 별도 lane 포화/Busy·거부 ownership, one-shot Ready, limit/alignment/format·serial 고갈, post-submit panic/cleanup state와 잔류 owner를 검증한다. 실제 GPU 시험은 같은 surface의 known pixels·PNG decode·RGBA/BGRA와 manual-sRGB·overlay·resize·old-ready packet·반복 capture·close와 map/queue/worker 정리까지 확인한다. synthetic CPU metadata나 별도 offscreen PNG는 이 gate를 대신하지 않는다. 실제 창/host/protocol 연결은 a.3/a.4의 후속 인수다.
 
-관련 pinned wgpu Buffer/Device/types 1차 자료와 기존 source 제한은 [전체 계약의 자료](live-capture-and-artifacts.md#확인한-1차-자료)에 남겼다. 새 renderer 구현이 없으므로 a.2·상위 P02.3a·D1은 미통과다.
+관련 pinned wgpu Buffer/Device/types 1차 자료와 기존 source 제한은 [전체 계약의 자료](live-capture-and-artifacts.md#확인한-1차-자료)에 남겼다. channel/readback source의 lib-only compile checkpoint는 [작업 기록](../06-worklog/2026-10-18-live-capture-renderer.md)에 남기며, 실제 surface copy 연결과 GPU 인수 전이므로 a.2·상위 P02.3a·D1은 미통과다.

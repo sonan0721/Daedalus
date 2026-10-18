@@ -1,6 +1,6 @@
 # Native project view activation: CLI adapter와 report v2
 
-상태: P03.3b.3.3d source·실제 CLI 교체 metadata35통과 · 2026-10-18 · pixels/전체 인수 전
+상태: source·실제 전체 flags65·CI Mac package72·PR20 인수 · 2026-10-18 · live pixels/전체 인수 전
 
 ## 목적과 source 감사
 

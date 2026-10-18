@@ -114,3 +114,27 @@ root는 양쪽 source freeze/hash를 확인하고 전체 diff를 리뷰했다. r
 managed report는 protocol·session1·gen2/tick1/publication3/authority snapshot2·present sequence65를 기록했다. committed digest는 앞선04와 같은 `sha256:fe3ec0938cf560c14adda2662713d720ce96d2778fe9bebc56a4e553aac11d85`이고 handle session1/index1/generation0·translation[-1,0.25,-3]·scale[1.1,1,1]을 보존했다. retired cooked bytes/generation count는0, final host_shutdown은stopped·adapter_error는null이다. 독립 sprite viewer는 authority camera translation[0.25,0.5,0]과 실제 표시/최종 camera를 일치시켰다.
 
 model/sprite batch PNG는 별도 capture session이고 managed `pixel_capture`는 여전히null이다. 이번 통과는 같은 live window의 readback·OS scanout·144fps·전체 물리 메모리 회수를 증명하지 않는다. 원래 실패01~03을 그대로 유지하며 두 package/다섯 CI와 후속 live capture gate는 계속 열어 둔다.
+
+## PR20·CI package·main 인수
+
+[PR20](https://github.com/sonan0721/Daedalus/pull/20)은 head `819093b801f5a39b57cac3c5dcb1e8be9f84d93b`에서 다섯 check를 통과했다. [docs](https://github.com/sonan0721/Daedalus/actions/runs/39084849584), [Rust](https://github.com/sonan0721/Daedalus/actions/runs/39084849572), [managed native integration](https://github.com/sonan0721/Daedalus/actions/runs/39084849655), 두 [native package](https://github.com/sonan0721/Daedalus/actions/runs/39084849577)가 성공했고 Publish는 skipped다. Rust CI는398통과·장치33 ignored였으며 Mac local의 추가 platform 장치 diagnostic1개를 합산하지 않는다. 두 staged binary의 combined CPU62 step과 Linux ALSA linkage step도 성공했다.
+
+Mac artifact는 CI synthetic checkout `ef7be974322f5b4f8d70a6b3c223368ea53fa6be`·dirty=false다. archive checksum·manifest·notices·dependency inventory와 target/profile/features를 기존 `package_cli.py --verify-archive --metadata-only --commit <synthetic>`로 검증했다. 추출 실행 파일 hash는 `ad3be34919e3eb88aa4bd7683bf1f399dbe06c77127a4874c3723958b955942d`로 manifest와 일치했다. 새 local release를 중복 빌드하지 않았다.
+
+그 추출 binary에 기존 전체 native flags와 `--audio`를 추가한 실행이72/72통과했다. exit0·20.904초, raw `p03-pr20-mac-extracted-native-root-attempt01.log` SHA-256 `d4461972e9ef6c63986c38640d4bf1b437bd3afe1f4ac0609f12e6398cbef021`이다. offline audio이며 native 출력 장치를 열지 않았다. 같은 session/gen2/digest·state 유지·retired cooked0·host stopped를 다시 확인했고 `pixel_capture`는null이다. package CPU62·local65와 검사 중복이 있으므로 합산하지 않는다.
+
+| 보존 raw | SHA-256 |
+| --- | --- |
+| `p03-pr20-final-checks-root-attempt01.log` | `28f2b7a73ef8cbb1e8f9d91928f960f79c89b2a43ba80c5929a2af04a1480282` |
+| `p03-pr20-rust-ci-root-attempt01.log` | `83b8b6756c6edfd45a4ee9c7fb622fc3f127b828a51d56f146b3fe6efce5dbe1` |
+| `p03-pr20-managed-ci-root-attempt01.log` | `262e3c588f037ac6d4c40df7ad324612b38f0a9bc31e4388cff517797e870d92` |
+| `p03-pr20-release-jobs-root-attempt01.log` | `aa5aa7fc8510f3a9cc9cc8e89544f70723d10f4356e6c54feca8656be7273d54` |
+| `p03-pr20-mac-package-ci-root-attempt01.log` | `a97f70e471db343ec51487a38c50421315ec94873ae188a32dbc017f3217dbc2` |
+| `p03-pr20-linux-package-ci-root-attempt01.log` | `2fbfd1249d78671ab24676f5ec2e90070f8009068a6c56e1564db0c8fa060d04` |
+| `p03-pr20-mac-archive-verify-root-attempt01.log` | `bb7ca5574265f9d0728fe1df449dfbf3cfb439c4d838564ecfdbfd17d7f21ce1` |
+
+strict/protected contexts3개와 제품 절차5개를 구분해 확인하고 ready→`--squash --match-head-commit <verified head>`로 병합했다. main `261812a0048f45f80445b528287669a303ee3b9b`·head·CI synthetic의 tree는 모두 `b34a59d2793457f7e33b09a1a36d46deac3f9c38`로 같다. 공개 tag/Release는 만들지 않았다. 이 인수는 공통 host/managed CLI 연결과 검증한 source 범위이며, 픽셀을 포함한 P03.3b.3.3·P02·P03·D1/D2/D3 전체는 계속 미완료다.
+
+## 후속 capture 소유권 동결
+
+별도 branch에서 [capture 소유권 문서](../03-architecture/live-capture-ownership.md)를 추가했다. 만든 이유는 기존 RequestProgress reader·GPU map·encoder·file이 ticket ACK/timeout과 다른 수명을 가져 image credit이 조기에 반환되거나 registry가 strong capability를 영구 보유하는 문제를 설계 단계에서 막기 위해서다. Luna read-only 감사와 root source 대조로 strong capability/weak interest·독립 work lease·worker backstop을 정리했다. public signature의 최종 source 대조를 먼저 배정했으며 runtime/renderer/host/CLI capture 구현·실제 PNG는 아직 없다.

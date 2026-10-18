@@ -2,6 +2,8 @@
 
 상태: P02.3a 구현 전 계약·runtime/renderer 독립 bridge 감사 반영 · 2026-10-18 · DEV04/DEV06
 
+후속 [요청·이미지·artifact 소유권 계약](live-capture-ownership.md)은 ACK/reader·timeout·GPU map·worker/file 수명의 독립성, concrete capability와 weak interest, coordinator unwind 밖의 backstop을 고정한다. public signature를 source와 대조한 뒤 runtime foundation부터 구현하며 아직 live_capture capability를 켜지 않는다.
+
 ## 목적과 현재 차이
 
 AI가 `수정 → 적용 확인 → 실제 frame 관찰 → assertion`을 같은 실행 세션에서 반복하게 한다. 현재 `latest_frame`은 metadata이며 PNG가 아니다. batch `project capture`와 창 종료 후 capture는 별도 render다. 이를 live capture로 부르지 않는다. 현재 protocol 2는 `live_capture: false`이며 아래 기능을 구현·실측한 뒤에만 바꾼다.

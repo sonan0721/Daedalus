@@ -1,6 +1,6 @@
 # Native renderer owner: 부분 초기화와 창 종료의 수명
 
-상태: P03.3b.3.3a source·집중 CPU/Metal 검증 통과 · 2026-10-18 · 최종 CI/package 인수 전
+상태: source·집중 CPU/Metal·PR20/최종 CI/package 회귀 인수 · 2026-10-18 · 후속 live readback owner는 별도 계약
 
 ## 목적과 적용 범위
 

@@ -1,6 +1,6 @@
 # Native viewer의 입력 소스와 자동 검증
 
-상태: additive API 구현·로컬 전체 Rust/Python·실제 Mac 통합65 통과, CI/package 대기 · 2026-10-18 · DEV06/P02/P03
+상태: additive API·로컬 실제 통합65·CI Mac package72·다섯 CI/PR20 인수, 전체 제품 gate 미완료 · 2026-10-18 · DEV06/P02/P03
 
 ## 목적과 관측 근거
 

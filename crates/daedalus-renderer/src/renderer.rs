@@ -99,6 +99,7 @@ fn apply_png_alpha_representation(rgba: &mut [u8], representation: PngAlphaRepre
 pub enum RendererError {
     NoAdapter(String),
     RequestDevice(String),
+    InitializationIncomplete,
     InvalidScene(String),
     InvalidCaptureSize {
         width: u32,
@@ -121,6 +122,9 @@ impl std::fmt::Display for RendererError {
         match self {
             Self::NoAdapter(message) => write!(f, "no compatible wgpu adapter: {message}"),
             Self::RequestDevice(message) => write!(f, "could not create wgpu device: {message}"),
+            Self::InitializationIncomplete => {
+                write!(f, "renderer initialization is incomplete")
+            }
             Self::InvalidScene(message) => write!(f, "invalid render scene: {message}"),
             Self::InvalidCaptureSize {
                 width,
@@ -229,6 +233,65 @@ pub struct Renderer {
     pub(crate) maximum_dimension: u32,
     pub(crate) maximum_buffer_size: u64,
     pub(crate) maximum_storage_binding_size: u64,
+    init_handles: RendererInitHandles,
+    retain_lazy_init_handles: bool,
+    #[cfg(test)]
+    lazy_init_panic_point: Option<LazyInitPanicPoint>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LazyInitPanicPoint {
+    ModelAfterLayout,
+    ModelAfterShader,
+}
+
+#[cfg(test)]
+fn panic_lazy_init_if_requested(
+    pending: &mut Option<LazyInitPanicPoint>,
+    point: LazyInitPanicPoint,
+) {
+    if *pending == Some(point) {
+        *pending = None;
+        panic!("injected lazy pipeline initialization panic");
+    }
+}
+
+/// Fixed temporary-handle retention for managed initialization. These handles
+/// are not needed by the pipelines after creation, but managed owners keep them
+/// until the designated GPU cleanup worker drops the renderer.
+#[derive(Default)]
+struct RendererInitHandles {
+    _base_shader: Option<wgpu::ShaderModule>,
+    _mesh_pipeline_layout: Option<wgpu::PipelineLayout>,
+    _overlay_shader: Option<wgpu::ShaderModule>,
+    _overlay_layout: Option<wgpu::BindGroupLayout>,
+    _overlay_pipeline_layout: Option<wgpu::PipelineLayout>,
+    _model_shader: Option<wgpu::ShaderModule>,
+    _model_pipeline_layout: Option<wgpu::PipelineLayout>,
+    _sprite_shader: Option<wgpu::ShaderModule>,
+    _sprite_pipeline_layout: Option<wgpu::PipelineLayout>,
+}
+
+/// Renderer initialization state that owns every handle as soon as the GPU
+/// returns it. It is intentionally separate from `Renderer` so an error or
+/// unwind can leave the partial state in `WindowGpuOwner`.
+pub(crate) struct RendererInitOwner {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    info: RendererInfo,
+    format: wgpu::TextureFormat,
+    limits: Option<wgpu::Limits>,
+    globals_layout: Option<wgpu::BindGroupLayout>,
+    materials_layout: Option<wgpu::BindGroupLayout>,
+    mesh_pipeline: Option<wgpu::RenderPipeline>,
+    packet_mesh_pipeline: Option<wgpu::RenderPipeline>,
+    overlay_pipeline: Option<wgpu::RenderPipeline>,
+    overlay_globals: Option<wgpu::Buffer>,
+    overlay_bind_group: Option<wgpu::BindGroup>,
+    init_handles: RendererInitHandles,
+    #[cfg(test)]
+    panic_after_globals_layout: bool,
 }
 
 impl Renderer {
@@ -255,6 +318,29 @@ impl Renderer {
 
     pub fn info(&self) -> &RendererInfo {
         &self.info
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_init_handle_count(&self) -> usize {
+        [
+            self.init_handles._base_shader.is_some(),
+            self.init_handles._mesh_pipeline_layout.is_some(),
+            self.init_handles._overlay_shader.is_some(),
+            self.init_handles._overlay_layout.is_some(),
+            self.init_handles._overlay_pipeline_layout.is_some(),
+            self.init_handles._model_shader.is_some(),
+            self.init_handles._model_pipeline_layout.is_some(),
+            self.init_handles._sprite_shader.is_some(),
+            self.init_handles._sprite_pipeline_layout.is_some(),
+        ]
+        .into_iter()
+        .filter(|retained| *retained)
+        .count()
+    }
+
+    #[cfg(test)]
+    fn inject_lazy_init_panic_for_test(&mut self, point: LazyInitPanicPoint) {
+        self.lazy_init_panic_point = Some(point);
     }
 
     /// Converts this initialized renderer into a persistent packet renderer.
@@ -337,26 +423,46 @@ impl Renderer {
             .model_textures_layout
             .as_ref()
             .expect("shared texture layout created");
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        self.init_handles._model_pipeline_layout = Some(self.device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
                 label: Some("Daedalus packet model pipeline layout"),
                 bind_group_layouts: &[&self.globals_layout, &self.materials_layout, texture_layout],
                 push_constant_ranges: &[],
-            });
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
+            },
+        ));
+        #[cfg(test)]
+        panic_lazy_init_if_requested(
+            &mut self.lazy_init_panic_point,
+            LazyInitPanicPoint::ModelAfterLayout,
+        );
+        let pipeline_layout = self
+            .init_handles
+            ._model_pipeline_layout
+            .as_ref()
+            .expect("model packet layout created");
+        self.init_handles._model_shader = Some(self.device.create_shader_module(
+            wgpu::ShaderModuleDescriptor {
                 label: Some("Daedalus packet model textured PBR shader"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-            });
+            },
+        ));
+        #[cfg(test)]
+        panic_lazy_init_if_requested(
+            &mut self.lazy_init_panic_point,
+            LazyInitPanicPoint::ModelAfterShader,
+        );
+        let shader = self
+            .init_handles
+            ._model_shader
+            .as_ref()
+            .expect("model packet shader created");
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Daedalus packet model textured PBR pipeline"),
-                layout: Some(&pipeline_layout),
+                layout: Some(pipeline_layout),
                 vertex: wgpu::VertexState {
-                    module: &shader,
+                    module: shader,
                     entry_point: Some("vs_packet_model"),
                     compilation_options: Default::default(),
                     buffers: &[
@@ -430,7 +536,7 @@ impl Renderer {
                     ],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shader,
+                    module: shader,
                     entry_point: Some("fs_model"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
@@ -460,6 +566,10 @@ impl Renderer {
                 cache: None,
             });
         self.model_packet_mesh_pipeline = Some(pipeline);
+        if !self.retain_lazy_init_handles {
+            self.init_handles._model_shader = None;
+            self.init_handles._model_pipeline_layout = None;
+        }
         Ok(())
     }
 
@@ -537,26 +647,36 @@ impl Renderer {
                 "sprite packets require 11 vertex attributes, a 128-byte instance stride and three bind groups".into(),
             ));
         }
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        self.init_handles._sprite_pipeline_layout = Some(self.device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
                 label: Some("Daedalus sprite packet pipeline layout"),
                 bind_group_layouts: &[&self.globals_layout, &self.materials_layout, texture_layout],
                 push_constant_ranges: &[],
-            });
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
+            },
+        ));
+        let pipeline_layout = self
+            .init_handles
+            ._sprite_pipeline_layout
+            .as_ref()
+            .expect("sprite packet layout created");
+        self.init_handles._sprite_shader = Some(self.device.create_shader_module(
+            wgpu::ShaderModuleDescriptor {
                 label: Some("Daedalus sprite packet shader"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-            });
+            },
+        ));
+        let shader = self
+            .init_handles
+            ._sprite_shader
+            .as_ref()
+            .expect("sprite packet shader created");
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Daedalus sprite packet pipeline"),
-                layout: Some(&pipeline_layout),
+                layout: Some(pipeline_layout),
                 vertex: wgpu::VertexState {
-                    module: &shader,
+                    module: shader,
                     entry_point: Some("vs_sprite"),
                     compilation_options: Default::default(),
                     buffers: &[
@@ -634,7 +754,7 @@ impl Renderer {
                     ],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shader,
+                    module: shader,
                     entry_point: Some("fs_sprite"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
@@ -669,6 +789,10 @@ impl Renderer {
                 cache: None,
             });
         self.sprite_packet_pipeline = Some(pipeline);
+        if !self.retain_lazy_init_handles {
+            self.init_handles._sprite_shader = None;
+            self.init_handles._sprite_pipeline_layout = None;
+        }
         Ok(())
     }
 
@@ -681,312 +805,9 @@ impl Renderer {
         adapter: wgpu::Adapter,
         format: wgpu::TextureFormat,
     ) -> Result<Self, RendererError> {
-        let supported_limits = adapter.limits();
-        let required_limits =
-            wgpu::Limits::downlevel_defaults().using_resolution(supported_limits.clone());
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Daedalus renderer device"),
-                required_features: wgpu::Features::empty(),
-                required_limits,
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|error| RendererError::RequestDevice(error.to_string()))?;
-
-        let adapter_info = adapter.get_info();
-        let info = RendererInfo {
-            adapter_name: adapter_info.name,
-            backend: format!("{:?}", adapter_info.backend),
-            device_type: format!("{:?}", adapter_info.device_type),
-        };
-        let limits = device.limits();
-        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Daedalus renderer globals layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<GlobalsUniform>() as u64
-                    ),
-                },
-                count: None,
-            }],
-        });
-        let materials_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Daedalus material storage layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<MaterialUniform>() as u64
-                    ),
-                },
-                count: None,
-            }],
-        });
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Daedalus metallic-roughness shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-        let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Daedalus mesh pipeline layout"),
-            bind_group_layouts: &[&globals_layout, &materials_layout],
-            push_constant_ranges: &[],
-        });
-        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Daedalus opaque metallic-roughness pipeline"),
-            layout: Some(&mesh_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GpuVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let packet_mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Daedalus shared PBR packet pipeline"),
-            layout: Some(&mesh_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_packet"),
-                compilation_options: Default::default(),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 12,
-                                shader_location: 1,
-                            },
-                        ],
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: 128,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 0,
-                                shader_location: 2,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 16,
-                                shader_location: 3,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 32,
-                                shader_location: 4,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 48,
-                                shader_location: 5,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 64,
-                                shader_location: 6,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 80,
-                                shader_location: 7,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 96,
-                                shader_location: 8,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 112,
-                                shader_location: 9,
-                            },
-                        ],
-                    },
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let overlay_globals = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Daedalus local loading overlay state"),
-            size: std::mem::size_of::<OverlayUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Daedalus local presentation overlay shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("overlay.wgsl").into()),
-        });
-        let overlay_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Daedalus loading overlay layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<OverlayUniform>() as u64
-                    ),
-                },
-                count: None,
-            }],
-        });
-        let overlay_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Daedalus loading overlay bind group"),
-            layout: &overlay_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: overlay_globals.as_entire_binding(),
-            }],
-        });
-        let overlay_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Daedalus loading overlay pipeline layout"),
-                bind_group_layouts: &[&overlay_layout],
-                push_constant_ranges: &[],
-            });
-        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Daedalus loading overlay pipeline"),
-            layout: Some(&overlay_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &overlay_shader,
-                entry_point: Some("vs_overlay"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &overlay_shader,
-                entry_point: Some("fs_overlay"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let renderer = Self {
-            device,
-            queue,
-            info,
-            format,
-            manual_srgb: !format.is_srgb(),
-            globals_layout,
-            materials_layout,
-            mesh_pipeline,
-            packet_mesh_pipeline,
-            model_packet_mesh_pipeline: None,
-            sprite_packet_pipeline: None,
-            model_textures_layout: None,
-            overlay_pipeline,
-            overlay_globals,
-            overlay_bind_group,
-            maximum_dimension: limits.max_texture_dimension_2d,
-            maximum_buffer_size: limits.max_buffer_size,
-            maximum_storage_binding_size: u64::from(limits.max_storage_buffer_binding_size),
-        };
-        Ok(renderer)
+        let mut owner = RendererInitOwner::request_device(adapter, format).await?;
+        owner.initialize_base()?;
+        owner.finish(false)
     }
 
     /// Renders the scene to a real GPU texture, copies it through a row-aligned
@@ -1378,6 +1199,457 @@ impl Renderer {
     }
 }
 
+impl RendererInitOwner {
+    pub(crate) async fn request_device(
+        adapter: wgpu::Adapter,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self, RendererError> {
+        Self::request_device_with_features(adapter, format, wgpu::Features::empty()).await
+    }
+
+    pub(crate) async fn request_device_with_features(
+        adapter: wgpu::Adapter,
+        format: wgpu::TextureFormat,
+        required_features: wgpu::Features,
+    ) -> Result<Self, RendererError> {
+        let adapter_info = adapter.get_info();
+        let info = RendererInfo {
+            adapter_name: adapter_info.name,
+            backend: format!("{:?}", adapter_info.backend),
+            device_type: format!("{:?}", adapter_info.device_type),
+        };
+        let supported_limits = adapter.limits();
+        let required_limits = wgpu::Limits::downlevel_defaults().using_resolution(supported_limits);
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Daedalus renderer device"),
+                required_features,
+                required_limits,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .map_err(|error| RendererError::RequestDevice(error.to_string()))?;
+
+        // Construct the owner immediately after the device pair is returned.
+        // No adapter/device query or heap allocation precedes this assignment.
+        let owner = Self {
+            device,
+            queue,
+            info,
+            format,
+            limits: None,
+            globals_layout: None,
+            materials_layout: None,
+            mesh_pipeline: None,
+            packet_mesh_pipeline: None,
+            overlay_pipeline: None,
+            overlay_globals: None,
+            overlay_bind_group: None,
+            init_handles: RendererInitHandles::default(),
+            #[cfg(test)]
+            panic_after_globals_layout: false,
+        };
+        Ok(owner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_after_globals_layout_for_test(&mut self) {
+        self.panic_after_globals_layout = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retains_first_base_layout_for_test(&self) -> bool {
+        self.globals_layout.is_some() && self.materials_layout.is_none()
+    }
+
+    pub(crate) fn initialize_base(&mut self) -> Result<(), RendererError> {
+        if self.limits.is_none() {
+            self.limits = Some(self.device.limits());
+        }
+        let device = &self.device;
+        let format = self.format;
+        self.globals_layout = Some(device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Daedalus renderer globals layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<GlobalsUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                }],
+            },
+        ));
+        #[cfg(test)]
+        if std::mem::take(&mut self.panic_after_globals_layout) {
+            panic!("injected base renderer initialization panic after globals layout");
+        }
+        let globals_layout = self
+            .globals_layout
+            .as_ref()
+            .expect("globals_layout initialized");
+        self.materials_layout = Some(device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Daedalus material storage layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<MaterialUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                }],
+            },
+        ));
+        let materials_layout = self
+            .materials_layout
+            .as_ref()
+            .expect("materials_layout initialized");
+
+        self.init_handles._base_shader =
+            Some(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Daedalus metallic-roughness shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            }));
+        let shader = self
+            .init_handles
+            ._base_shader
+            .as_ref()
+            .expect("shader initialized");
+        self.init_handles._mesh_pipeline_layout = Some(device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label: Some("Daedalus mesh pipeline layout"),
+                bind_group_layouts: &[globals_layout, materials_layout],
+                push_constant_ranges: &[],
+            },
+        ));
+        let mesh_pipeline_layout = self
+            .init_handles
+            ._mesh_pipeline_layout
+            .as_ref()
+            .expect("mesh_pipeline_layout initialized");
+        self.mesh_pipeline = Some(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Daedalus opaque metallic-roughness pipeline"),
+                layout: Some(mesh_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            }),
+        );
+
+        self.packet_mesh_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("Daedalus shared PBR packet pipeline"),
+                layout: Some(mesh_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_packet"),
+                    compilation_options: Default::default(),
+                    buffers: &[
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x3,
+                                    offset: 0,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x3,
+                                    offset: 12,
+                                    shader_location: 1,
+                                },
+                            ],
+                        },
+                        wgpu::VertexBufferLayout {
+                            array_stride: 128,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 0,
+                                    shader_location: 2,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 16,
+                                    shader_location: 3,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 32,
+                                    shader_location: 4,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 48,
+                                    shader_location: 5,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 64,
+                                    shader_location: 6,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 80,
+                                    shader_location: 7,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x4,
+                                    offset: 96,
+                                    shader_location: 8,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Uint32,
+                                    offset: 112,
+                                    shader_location: 9,
+                                },
+                            ],
+                        },
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        ));
+
+        self.overlay_globals = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Daedalus local loading overlay state"),
+            size: std::mem::size_of::<OverlayUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        let overlay_globals = self
+            .overlay_globals
+            .as_ref()
+            .expect("overlay_globals initialized");
+        self.init_handles._overlay_shader =
+            Some(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Daedalus local presentation overlay shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("overlay.wgsl").into()),
+            }));
+        let overlay_shader = self
+            .init_handles
+            ._overlay_shader
+            .as_ref()
+            .expect("overlay_shader initialized");
+        self.init_handles._overlay_layout = Some(device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Daedalus loading overlay layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<OverlayUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                }],
+            },
+        ));
+        let overlay_layout = self
+            .init_handles
+            ._overlay_layout
+            .as_ref()
+            .expect("overlay_layout initialized");
+        self.overlay_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Daedalus loading overlay bind group"),
+            layout: overlay_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: overlay_globals.as_entire_binding(),
+            }],
+        }));
+        self.init_handles._overlay_pipeline_layout = Some(device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label: Some("Daedalus loading overlay pipeline layout"),
+                bind_group_layouts: &[overlay_layout],
+                push_constant_ranges: &[],
+            },
+        ));
+        let overlay_pipeline_layout = self
+            .init_handles
+            ._overlay_pipeline_layout
+            .as_ref()
+            .expect("overlay_pipeline_layout initialized");
+        self.overlay_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("Daedalus loading overlay pipeline"),
+                layout: Some(overlay_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: overlay_shader,
+                    entry_point: Some("vs_overlay"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: overlay_shader,
+                    entry_point: Some("fs_overlay"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        ));
+
+        Ok(())
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.globals_layout.is_some()
+            && self.materials_layout.is_some()
+            && self.mesh_pipeline.is_some()
+            && self.packet_mesh_pipeline.is_some()
+            && self.overlay_pipeline.is_some()
+            && self.overlay_globals.is_some()
+            && self.overlay_bind_group.is_some()
+            && self.init_handles._base_shader.is_some()
+            && self.init_handles._mesh_pipeline_layout.is_some()
+            && self.init_handles._overlay_shader.is_some()
+            && self.init_handles._overlay_layout.is_some()
+            && self.init_handles._overlay_pipeline_layout.is_some()
+            && self.limits.is_some()
+    }
+
+    pub(crate) fn finish(self, retain_init_handles: bool) -> Result<Renderer, RendererError> {
+        if !self.is_ready() {
+            return Err(RendererError::InitializationIncomplete);
+        }
+        Ok(self.into_ready(retain_init_handles))
+    }
+
+    pub(crate) fn into_ready(mut self, retain_init_handles: bool) -> Renderer {
+        debug_assert!(self.is_ready());
+        if !retain_init_handles {
+            self.init_handles = RendererInitHandles::default();
+        }
+        let limits = self.limits.take().expect("readiness checked");
+        Renderer {
+            device: self.device,
+            queue: self.queue,
+            info: self.info,
+            format: self.format,
+            manual_srgb: !self.format.is_srgb(),
+            globals_layout: self.globals_layout.take().expect("readiness checked"),
+            materials_layout: self.materials_layout.take().expect("readiness checked"),
+            mesh_pipeline: self.mesh_pipeline.take().expect("readiness checked"),
+            packet_mesh_pipeline: self.packet_mesh_pipeline.take().expect("readiness checked"),
+            model_packet_mesh_pipeline: None,
+            sprite_packet_pipeline: None,
+            model_textures_layout: None,
+            overlay_pipeline: self.overlay_pipeline.take().expect("readiness checked"),
+            overlay_globals: self.overlay_globals.take().expect("readiness checked"),
+            overlay_bind_group: self.overlay_bind_group.take().expect("readiness checked"),
+            maximum_dimension: limits.max_texture_dimension_2d,
+            maximum_buffer_size: limits.max_buffer_size,
+            maximum_storage_binding_size: u64::from(limits.max_storage_buffer_binding_size),
+            init_handles: self.init_handles,
+            retain_lazy_init_handles: retain_init_handles,
+            #[cfg(test)]
+            lazy_init_panic_point: None,
+        }
+    }
+}
+
 fn align_to(value: u32, alignment: u32) -> Option<u32> {
     let remainder = value % alignment;
     if remainder == 0 {
@@ -1591,6 +1863,61 @@ mod tests {
         ClearAlphaPolicy, PngAlphaRepresentation, align_to, apply_png_alpha_representation,
         linear_to_srgb, target_clear_color,
     };
+
+    fn managed_base_renderer() -> super::Renderer {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .expect("offscreen adapter");
+        let mut initialization = pollster::block_on(super::RendererInitOwner::request_device(
+            adapter,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ))
+        .expect("renderer device");
+        initialization
+            .initialize_base()
+            .expect("base renderer initialization");
+        initialization.into_ready(true)
+    }
+
+    #[test]
+    #[ignore = "requires a real wgpu adapter; checks lazy layout and shader retention after unwind"]
+    fn managed_lazy_model_shader_handles_survive_unwind_before_pipeline() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let mut renderer = managed_base_renderer();
+        renderer.inject_lazy_init_panic_for_test(super::LazyInitPanicPoint::ModelAfterShader);
+        let result = catch_unwind(AssertUnwindSafe(|| renderer.ensure_model_packet_pipeline()));
+        assert!(
+            result.is_err(),
+            "the configured lazy initialization panic must execute"
+        );
+        assert!(renderer.init_handles._model_pipeline_layout.is_some());
+        assert!(renderer.init_handles._model_shader.is_some());
+        assert!(renderer.model_packet_mesh_pipeline.is_none());
+        assert_eq!(renderer.retained_init_handle_count(), 7);
+    }
+
+    #[test]
+    #[ignore = "requires a real wgpu adapter; checks lazy layout retention before shader creation"]
+    fn managed_lazy_model_layout_survives_unwind_before_shader() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let mut renderer = managed_base_renderer();
+        renderer.inject_lazy_init_panic_for_test(super::LazyInitPanicPoint::ModelAfterLayout);
+        let result = catch_unwind(AssertUnwindSafe(|| renderer.ensure_model_packet_pipeline()));
+        assert!(
+            result.is_err(),
+            "the configured lazy initialization panic must execute"
+        );
+        assert!(renderer.init_handles._model_pipeline_layout.is_some());
+        assert!(renderer.init_handles._model_shader.is_none());
+        assert!(renderer.model_packet_mesh_pipeline.is_none());
+        assert_eq!(renderer.retained_init_handle_count(), 6);
+    }
 
     #[cfg(feature = "window")]
     #[test]

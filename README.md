@@ -42,6 +42,8 @@ cargo run -p daedalus-cli --features window -- project view /path/to/project --c
 
 The [viewer contract](docs/03-architecture/project-view-control.md) describes tickets, explicit Step, bounded I/O, and shutdown. Camera controls work without a selected entity; `--controlled-entity <stable-id>` enables diagnostic arrow movement, and manual mode uses F10 for one tick. Protocol 1 remains available through `project serve`. Live image capture, MCP, and managed attach to this viewer are still pending.
 
+For automated viewing, add `--input-source protocol`. This disables physical keyboard, pointer, and wheel controls while preserving protocol edits, Step, resize, and OS close. Both legacy and managed project views report the selected input source. Interactive viewing defaults to `--input-source native`; see the [input policy](docs/03-architecture/native-view-input-policy.md).
+
 The renderer's additive [packet API](docs/03-architecture/renderer-resource-reuse.md) shares immutable geometry, retains device-local buffers, and updates changed instance/material rows. Small native GPU tests verify reuse and pixel parity with the original capture path. Broader rendering quality, live project reload, and complete P02/D1 acceptance remain open.
 
 ## CPU asset preparation
@@ -81,6 +83,18 @@ cargo run -p daedalus-cli -- project serve /path/to/project --protocol 2 --asset
 ```
 
 This includes preparation and adds `asset_activation_status`, `asset_activation_stage`, `asset_activation_commit`, and `asset_activation_cancel` to the same ticket/replay service. A compatible candidate can replace the source while retaining the Engine, entity handles, live transforms, and authority tick. Stage acceptance precedes actual staging; clients wait for Staged before Commit. Previous CPU backing remains accounted until the worker reclaims it. The [headless activation contract](docs/03-architecture/headless-asset-generation.md) defines IDs, errors, bounds, and shutdown. This mode rejects attached audio and native viewing; successful CPU commit does not mean new pixels were displayed or an audio bank changed.
+
+## Native source activation (experimental)
+
+A window build can use the reusable `daedalus-project-host` library to prepare and activate compatible asset changes in the same project session:
+
+```sh
+cargo run -p daedalus-cli --features window -- project view /path/to/project --clock manual --stdio-control --asset-activation
+```
+
+Use protocol 2 preparation, Stage, and Commit operations; `view_status` reports the actual presented generation separately from queued work. The [host contract](docs/03-architecture/native-project-host.md) and [CLI contract](docs/03-architecture/native-project-view-activation.md) describe ownership, bounded work, and report version 2. A focused actual Mac run verified mixed model/sprite replacement, preserved entity state, and old-source retirement; [integration evidence](docs/06-worklog/2026-10-18-native-host-integration.md) records failures and the exact scope.
+
+This path currently rejects attached audio. Automatic file watching, general scene reload, and live-window image capture remain unfinished; initial CPU loading still happens before the window opens. `view_status` provides metadata, and `live_capture` remains false. The new host/CLI product gate and full D1 engine acceptance remain open.
 
 ## Build a local CLI package
 

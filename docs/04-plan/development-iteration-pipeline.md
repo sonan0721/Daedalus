@@ -220,6 +220,14 @@ renderer source 리뷰에서는 미참조 legacy mesh의 불필요 stage 요청�
 
 device production과 실제 GPU 시나리오 테스트를 한 작업자에게 직렬로 몰지 않도록, 새 test module 파일만 별도 Luna가 작성하고 device 담당이 parent 선언/기존 helper의 최소 visibility를 소유하도록 분리했다. CPU 담당의 실제 PreparedProject/validated-frame 경계를 공유하며 forged FrameHandle이나 별도 smoke framework는 만들지 않는다. compile은 관련 source가 모두 동결된 뒤 단일 owner가 맡아 작성 병렬화와 불안정한 동시 빌드를 구분한다. 실제 검증/효과는 후속 기록 대상이다.
 
+PR19/mainc507835에서 CPU owner·canonical slot/token·same-device stage library를 인수했다. workspace359·실제 Metal19와 downloaded CI Mac package의 기존 native72가 해당 경계를 검사했으며 실제 host edit→present는 후속이다. 같은 Mac CI artifact를 checksum/checkout/dirty=false와 실제 binary hash로 검증해 native 회귀에 재사용했고, main에서 같은 binary bytes가 나온 뒤 하드웨어 회귀를 다시 실행하지 않았다. 검증 범위가 다른 실행들을 합쳐 고유 테스트 수나 속도 개선율로 보고하지 않는다.
+
+다음 host/window 연결에서도 반복 제거를 코드 계약에 둔다. Busy로 소비된 StageInput은 canonical CPU generation에서 Arc projection만 다시 요청한다. source import·CPU prepare·validation·새 GPU device를 다시 만들지 않는다. 초기화 owner와 legacy 생성자는 같은 builder를 쓰며 shader/pipeline 코드를 두 벌로 복제하지 않는다. 기존 WindowApp의 surface/input/camera와 combined stage+draw를 확장하고 CLI는 후속 host의 transport/report adapter로 좁힌다. 이 source 작업의 실제 검사·iteration 효과는 [generation 기록](../06-worklog/2026-10-17-render-generation.md)에 남기며 현재 설계를 이미 측정된 개선이라고 부르지 않는다.
+
+host 구현 검토에서는 기존 digest validator·runtime compact publication token·service shutdown report·renderer의 actual view-projection 수식을 재사용하도록 정했다. identifier를 진단 문자열처럼 자른 실제 CPU 실패를 고쳤고 최종 renderer CPU85/Metal29는 해당 worklog에 기록했다. host/CLI 통합 통과는 별도다. CPU Busy status memoization은 같은 준비의 무의미한 반복을 줄이는 방향이지만 cancellation/currentness가 바뀌면 장부가 같아도 pending lease/snapshot을 해제해야 한다. 재시도 절감과 무효화 정확성을 함께 검사하며 단순 cache/memo 추가를 성능 달성으로 계산하지 않는다.
+
+후속 CLI는 direct view_status와 final report의 host 요약에 같은 serializer를 사용한다. native smoke도 기존 project writer·JSONL process·ticket/command-ID issuer·종료 helper를 확장한다. 작은 신뢰 publication token/key는 ACK 뒤에도 보존해 같은 packet의 redraw 때문에 prepare/extract/재전송을 반복하지 않게 한다. 새 publication의 retirement ACK는 보존하고 같은 publication의 redraw/resize 최신성은 host actual status로 보고한다. 이 경계는 root 리뷰에서 발견한 실제 source 오류를 고치기 위한 설계이며 실행 시간 절감 결과가 아니다. shutdown/status contention의 polling은 기존 작은 sleep/deadline을 재사용해 yield spin을 줄인다. host source 수정 동안 비어 있는 단일 lease를 Python 검증과 의존 없는 managed 회귀에 넘겨 기다리는 시간을 사용하되, 같은 crate를 편집하면서 빌드하거나 무거운 검사를 겹치지 않는다. 실제 결과는 위 작업 기록을 기준으로 한다.
+
 ### 검증 출력 보존의 공통 실행기
 
 서로 다른 작업에서 기존 로그 덮어쓰기·zsh readonly 종료 변수·빈 출력 파일이 반복됐다. 규칙만 다시 읽게 하는 대신 noninteractive 명령의 출력 보존만 담당하는 `scripts/run_logged.py`를 추가하는 작은 도구 작업을 채택했다. 테스트 선택·Cargo lease·timeout·재시도·성공 판정은 기존 caller의 책임이며 새 smoke/test framework를 만들지 않는다. 아래는 착수 전에 고정한 계약과 실제 검증 범위다.
@@ -227,3 +235,24 @@ device production과 실제 GPU 시나리오 테스트를 한 작업자에게 �
 `python3 scripts/run_logged.py --log dist/project-evidence/<unique>.log -- <program> <args...>`는 파일을 exclusive로 먼저 열고, 이미 존재하거나 열 수 없으면 자식 명령을 시작하지 않는다. parent directory는 caller가 준비한다. shell 없이 argv를 실행하고 stdout/stderr를 같은 열린 파일로 연결하며 stdin은 DEVNULL이다. 시작 metadata와 정상 종료 시 실제 child exit code/elapsed footer를 남기고 닫은 뒤 raw SHA-256·경로·실행 여부·종료 상태를 작은 JSON으로 출력한다. child 실패는 성공으로 바꾸지 않으며 launch 자체 실패는 child 실행 실패와 구분한다. launcher/finalization/report 오류는125, POSIX child signal은 원래 음수 returncode와128+signal의 wrapper status를 구분한다. 환경변수/credential 목록을 덤프하지 않는다. 강제 process kill·디스크 오류 등으로 footer가 없으면 완료 검증 근거가 아니며 원본을 덮어쓰지 않는다.
 
 필수 회귀는 실제 자식 process의 stdout+stderr·비영 종료 보존, 기존 파일 거부 시 child 미실행·기존 bytes 불변, launch 실패의 명시적 상태와 hash 일치다. 자동 재빌드/재시도/병렬화는 없다. Luna xhigh가 두 Python 파일만 구현했고 조정자가 source를 리뷰했다. local focused5개와 실제 docs 명령의 출력/footer/독립 hash 대조가 통과해 noninteractive 검사에 도입한다. 세부 raw는 [작업 기록](../06-worklog/2026-10-17-render-generation.md)에 둔다. 이전 잃은 로그를 재구성하지 않으며 CI/시간 절감 배율·전체 엔진 인수는 이 결과에 포함되지 않는다.
+
+
+## 저장소와 로컬 산출물 관리
+
+| 위치 | 관리 기준 |
+| --- | --- |
+| `crates/`, `managed/`, `docs/`, `scripts/`, `third_party/` | 엔진 소스·SDK·설계·검증 도구·라이선스 자료다. 미커밋 파일도 삭제 대상으로 취급하지 않는다. |
+| `Cargo.lock`, toolchain 파일, `.github/` | 재현 가능한 빌드와 검증에 필요한 추적 파일이다. 디스크 정리를 위해 지우지 않는다. |
+| `target/` | 재생성 가능한 로컬 빌드 산출물이다. 현재 CLI와 의존성 빌드 캐시는 유지하고, 동작 중인 compiler/runtime이 없을 때 오래된 증분 캐시를 선별 정리한다. |
+| `dist/project-evidence/`, `dist/ci-artifacts/` | 성공·실패 원본, hash, CI package와 검증 기록이다. 일반 캐시 정리에 포함하지 않는다. |
+| `dist/local/`, `dist/qa-assets/` | 버전별 로컬 CLI·공개 에셋의 출처와 테스트 입력이다. 검증 근거와 연결되어 있으므로 일괄 삭제하지 않는다. |
+
+현재 정리 기준은 증분 캐시 그룹 내부의 모든 파일·디렉터리 중 가장 최근 변경 시각이24시간보다 오래된 경우다. 그룹 최상위 mtime만으로 판정하지 않는다. 소스 작업·Cargo/장치 검증 소유자가 비어 있는지 먼저 확인하고, 대상 root가 저장소의 `target/debug/incremental`인지 검증한다. 삭제 목록과 전후 측정은 고유 raw에 보존한다. 소스와 기존 증거의 hash, 현재 CLI hash, Git 상태를 정리 전후 대조한다. 이24시간 기준은 이번 로컬 유지보수 판단이며 자동 실행 일정이나 성능 보장이 아니다.
+
+공유 target 전체를 비우거나 `git clean -fdx`로 소스·검증물을 함께 제거하지 않는다. 새 기능의 확인된 소스는 기능별 checkpoint commit으로 보존하고, 통합/제품 인수 전인 사항을 작업 기록에 남긴다. 캐시 정리를 빌드 속도 개선이나 엔진 기능 완성으로 보고하지 않는다. [실제 정리 결과](../06-worklog/2026-10-17-render-generation.md)는 할당 byte 추정과 시스템 여유 공간의 관측값을 구분한다.
+
+## 자동 viewer 검증의 명시적 입력 정책
+
+실제 전체 native 검증은 quiet-camera 전제 중 key6/local camera change5를 관측해 실패했다. 해당 검사를 완화하거나 창 전체를 다른 offscreen 경로로 바꾸는 대신 [입력 정책](../03-architecture/native-view-input-policy.md)을 추가했다. CLI 기본 Native와 공개 옵션 구조체는 유지하고 기존 공통 smoke command helper가 ProtocolOnly를 명시한다. 창/app의 activation 요청도 이 모드에 맞게 줄인다. 관측한 물리 event counter와 focus/resize/close·실제 GPU 표시·protocol Step/Commit은 보존하므로 자동화의 전제와 사람이 사용하는 조작 정책을 각각 검증할 수 있다.
+
+source freeze 뒤 전체 Rust/Python과 원래 전체 flags의 실제 Mac65가 통과했다. 정확한 실패/수정/후속 결과와 raw hash는 [통합 기록](../06-worklog/2026-10-18-native-host-integration.md)을 따른다. 별도 framework·game fixture project·숨은 retry·deadline/예산 증가를 추가하지 않았다. 재시도 원인 하나를 명시적 엔진 API로 다룬 개선이며 일반 실행 시간 단축 배율이나 모든 OS의 focus 보장을 측정한 것은 아니다.

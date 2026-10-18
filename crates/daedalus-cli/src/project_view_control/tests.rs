@@ -10,7 +10,14 @@ use std::time::{Duration, Instant};
 
 use daedalus_content::project::{PreparedProject, ProjectLimits, prepare_project_from_bytes};
 use daedalus_content::scene::StableId;
+#[cfg(feature = "window")]
+use daedalus_core::SessionId;
 use daedalus_core::{Revision, Tick};
+#[cfg(feature = "window")]
+use daedalus_project_host::{
+    NativeProjectHost, NativeProjectHostOptions, NativeProjectHostShutdown,
+    NativeProjectHostStatusRead,
+};
 use daedalus_runtime::{
     EngineConfig, NativeProjectActivationService, NativeProjectPreparationOptions,
     NativeProjectPreparationService, PreparationWorkerShutdown, RequestTicket, SessionClockMode,
@@ -1127,6 +1134,182 @@ fn audio_operation_is_explicitly_unavailable_when_session_audio_is_disabled() {
         activation_response["error"]["code"],
         "asset_activation_unavailable"
     );
+}
+
+#[test]
+fn view_status_is_direct_and_unavailable_without_managed_host_attachment() {
+    let (mut harness, input, output, _) = harness(SessionClockMode::Manual, 4);
+    let capabilities = request(
+        &mut harness,
+        &input,
+        &output,
+        "view-status-unavailable-capabilities",
+        json!({"op":"capabilities"}),
+    );
+    assert_eq!(capabilities["result"]["data"]["view_status"], false);
+    assert!(
+        !capabilities["result"]["data"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "view_status")
+    );
+    let unavailable = request(
+        &mut harness,
+        &input,
+        &output,
+        "view-status-unavailable",
+        json!({"op":"view_status"}),
+    );
+    assert_eq!(unavailable["ok"], false);
+    assert_eq!(unavailable["error"]["code"], "view_status_unavailable");
+}
+
+#[cfg(feature = "window")]
+#[test]
+fn managed_view_status_reports_bounded_real_host_identity_and_cpu_accounting() {
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+    let root = std::env::temp_dir().join(format!(
+        "daedalus-cli-view-status-{}-{}",
+        std::process::id(),
+        NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("create unique view-status fixture root");
+    fs::write(
+        root.join("daedalus.project.json"),
+        br#"{"schema_version":1,"name":"wire view status","scene":"scene.json"}"#,
+    )
+    .expect("write view-status manifest");
+    fs::write(root.join("scene.json"), ONE_ENTITY_SCENE).expect("write view-status scene");
+
+    let mut host = NativeProjectHost::start(
+        NativeProjectHostOptions::for_project(&root).with_session_config(SessionControlConfig {
+            engine: EngineConfig::default(),
+            clock_mode: SessionClockMode::Manual,
+            ..SessionControlConfig::default()
+        }),
+    )
+    .expect("start real native project host");
+    let client = host.attach_control().expect("attach host client");
+    let control = host.control();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let session = loop {
+        match control.try_status().expect("read host status") {
+            NativeProjectHostStatusRead::Value(status)
+                if !status.active_source_digest().is_empty() =>
+            {
+                break status.session();
+            }
+            NativeProjectHostStatusRead::Value(_) | NativeProjectHostStatusRead::Busy => {
+                assert!(
+                    Instant::now() < deadline,
+                    "host did not publish initial source status"
+                );
+                thread::yield_now();
+            }
+        }
+    };
+    let (mut harness, input, output, _) =
+        harness_for_client(client, None, SessionClockMode::Manual, 4, false);
+    harness
+        .controller
+        .attach_managed_view_status(control.clone(), session);
+
+    let capabilities = request(
+        &mut harness,
+        &input,
+        &output,
+        "managed-view-status-capabilities",
+        json!({"op":"capabilities"}),
+    );
+    assert_eq!(capabilities["result"]["data"]["view_status"], true);
+    assert!(
+        !capabilities["result"]["data"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "view_status")
+    );
+    let response = request(
+        &mut harness,
+        &input,
+        &output,
+        "managed-view-status",
+        json!({"op":"view_status"}),
+    );
+    assert_eq!(response["result"]["kind"], "view_status");
+    let status = &response["result"]["data"];
+    assert_eq!(status["session"], session.get().to_string());
+    assert_eq!(status["active_generation"], "1");
+    assert_eq!(status["active_source_digest"].as_str().unwrap().len(), 71);
+    assert_eq!(status["view_started"], false);
+    assert_eq!(status["view_closed"], false);
+    assert!(status["queued_publication"].is_null());
+    assert!(status["last_presented"].is_null());
+    assert_eq!(status["live_capture"], false);
+    assert!(status["failure"].is_null());
+    let cpu = status["cpu"].as_object().expect("CPU ledger object");
+    assert_eq!(
+        cpu.keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "generation_slots_used",
+            "generation_slots_limit",
+            "frame_slots_used",
+            "frame_slots_limit",
+            "prepared_metadata_bytes",
+            "prepared_metadata_reserved_bytes",
+            "legacy_mesh_copy_bytes",
+            "legacy_mesh_copy_reserved_bytes",
+            "frame_bytes",
+            "frame_reserved_bytes",
+            "scratch_current_bytes",
+            "scratch_peak_bytes",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(cpu.values().all(serde_json::Value::is_number));
+    assert!(serde_json::to_vec(&response).unwrap().len() < MAX_PROTOCOL_RESPONSE_BYTES);
+
+    harness
+        .controller
+        .attach_managed_view_status(control.clone(), SessionId::from_raw(session.get() + 1));
+    let mismatch = request(
+        &mut harness,
+        &input,
+        &output,
+        "managed-view-status-session-mismatch",
+        json!({"op":"view_status"}),
+    );
+    assert_eq!(mismatch["ok"], false);
+    assert_eq!(mismatch["error"]["code"], "view_status_session_mismatch");
+
+    let busy = match managed_view_status_result(Ok(NativeProjectHostStatusRead::Busy), session) {
+        Ok(_) => panic!("Busy must not fabricate a status value"),
+        Err(error) => error,
+    };
+    assert_eq!(busy.code, "view_status_busy");
+    assert_eq!(busy.retryable, Some(true));
+
+    host.request_stop();
+    let shutdown_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match host.try_shutdown().expect("advance bounded host shutdown") {
+            NativeProjectHostShutdown::Stopped => break,
+            NativeProjectHostShutdown::Stopping => {
+                assert!(
+                    Instant::now() < shutdown_deadline,
+                    "host did not stop after status test"
+                );
+                thread::yield_now();
+            }
+        }
+    }
+    drop(harness);
+    drop(host);
+    fs::remove_dir_all(root).expect("remove view-status fixture root");
 }
 
 #[test]

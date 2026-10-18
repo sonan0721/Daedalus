@@ -1,5 +1,7 @@
 //! Native external-project viewer backed by the shared project control service.
 
+mod activation;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
@@ -16,8 +18,8 @@ use daedalus_content::scene::StableId;
 use daedalus_core::EntityHandle;
 use daedalus_renderer::{
     PacketAssetLimits, PacketPresentationWindowOutcome, PacketRendererLimits, PacketWindowMessage,
-    ProjectRenderResources, WindowInput, WindowKeyCode, WindowOptions,
-    run_packet_windowed_presented, window_input_channel,
+    ProjectRenderResources, WindowInput, WindowInputPolicy, WindowKeyCode, WindowOptions,
+    run_packet_windowed_presented_with_input_policy, window_input_channel,
 };
 use daedalus_runtime::{
     EngineConfig, NativeProjectPreparationOptions, NativeProjectPreparationService,
@@ -30,6 +32,28 @@ use serde_json::{Value, json};
 
 use super::project::{ProjectAudioArg, ProjectClockArg};
 use super::project_view_control::{ProtocolController, StdioTransport};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub(super) enum ProjectViewInputSource {
+    Native,
+    Protocol,
+}
+
+impl ProjectViewInputSource {
+    const fn renderer_policy(self) -> WindowInputPolicy {
+        match self {
+            Self::Native => WindowInputPolicy::Native,
+            Self::Protocol => WindowInputPolicy::ProtocolOnly,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Protocol => "protocol",
+        }
+    }
+}
 
 const MAX_VIEW_WIDTH: u32 = 4_096;
 const MAX_VIEW_HEIGHT: u32 = 4_096;
@@ -58,9 +82,12 @@ pub(super) struct ProjectViewArgs {
     /// Enable the native bounded live asset-preparation worker (requires --stdio-control).
     #[arg(long)]
     pub asset_preparation: bool,
-    /// Reserved for native headless serve; project view does not yet attach the generation consumer.
+    /// Use the native project host and managed generation consumer for this view.
     #[arg(long)]
     pub asset_activation: bool,
+    /// Select native window controls or protocol-only viewer controls.
+    #[arg(long, value_enum, default_value = "native")]
+    pub input_source: ProjectViewInputSource,
     /// Stable entity ID controlled by the arrow-key diagnostic action.
     #[arg(long)]
     pub controlled_entity: Option<String>,
@@ -117,6 +144,9 @@ enum InputTicket {
 
 pub(super) fn run(args: ProjectViewArgs) -> Result<(), Box<dyn Error>> {
     validate_args(&args)?;
+    if args.asset_activation {
+        return activation::run(args);
+    }
     let clock = args.clock.runtime();
     if args.audio.is_some() && !cfg!(feature = "audio") {
         return Err(
@@ -198,11 +228,11 @@ fn session_termination_error(termination: &SessionTermination) -> Option<String>
 }
 
 fn validate_args(args: &ProjectViewArgs) -> Result<(), Box<dyn Error>> {
-    if args.asset_activation {
-        return Err(
-            "--asset-activation is supported only by `project serve --protocol 2`; project view has no generation consumer"
-                .into(),
-        );
+    if args.asset_activation && !args.stdio_control {
+        return Err("--asset-activation requires --stdio-control for project view".into());
+    }
+    if args.asset_activation && args.audio.is_some() {
+        return Err("--asset-activation cannot be combined with --audio".into());
     }
     if args.asset_preparation && !args.stdio_control {
         return Err("--asset-preparation requires --stdio-control for project view".into());
@@ -312,8 +342,14 @@ fn run_window(
         ..WindowOptions::default()
     };
 
-    let window_result =
-        run_packet_windowed_presented(initial_packet, packet_rx, options, limits, asset_limits);
+    let window_result = run_packet_windowed_presented_with_input_policy(
+        initial_packet,
+        packet_rx,
+        options,
+        limits,
+        asset_limits,
+        args.input_source.renderer_policy(),
+    );
     worker_stop.store(true, Ordering::Release);
     let coordinator = worker.join().map_err(|payload| {
         format!(
@@ -828,6 +864,7 @@ fn build_report(
     });
     let mut report = json!({
         "command":"project_view",
+        "input_source":args.input_source.as_str(),
         "project_name":project.manifest().name,
         "source_digest":project.digest(),
         "source_schema_version":project.scene().schema_version,
@@ -900,7 +937,10 @@ mod tests {
     use daedalus_renderer::PacketWindowMessage;
     use daedalus_runtime::SessionTermination;
 
-    use super::{ProjectViewArgs, send_pending_close, session_termination_error, validate_args};
+    use super::{
+        ProjectViewArgs, ProjectViewInputSource, send_pending_close, session_termination_error,
+        validate_args,
+    };
 
     #[test]
     fn normal_session_stop_succeeds_but_engine_failure_and_panic_fail_closed() {
@@ -919,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_activation_is_rejected_by_view_before_project_io() {
+    fn asset_activation_requires_stdio_control_before_project_io() {
         let args = ProjectViewArgs {
             directory: std::path::PathBuf::from("/definitely/not/a/project"),
             clock: crate::project::ProjectClockArg::Realtime,
@@ -927,6 +967,7 @@ mod tests {
             stdio_control: false,
             asset_preparation: false,
             asset_activation: true,
+            input_source: ProjectViewInputSource::Native,
             controlled_entity: None,
             width: 1280,
             height: 720,
@@ -935,7 +976,73 @@ mod tests {
             report: None,
         };
         let error = validate_args(&args).unwrap_err().to_string();
-        assert!(error.contains("project serve --protocol 2"));
+        assert!(error.contains("--stdio-control"));
+    }
+
+    #[test]
+    fn asset_activation_rejects_audio_before_project_io() {
+        let args = ProjectViewArgs {
+            directory: std::path::PathBuf::from("/definitely/not/a/project"),
+            clock: crate::project::ProjectClockArg::Realtime,
+            audio: Some(crate::project::ProjectAudioArg::Offline),
+            stdio_control: true,
+            asset_preparation: false,
+            asset_activation: true,
+            input_source: ProjectViewInputSource::Native,
+            controlled_entity: None,
+            width: 1280,
+            height: 720,
+            seconds: None,
+            frames: None,
+            report: None,
+        };
+        let error = validate_args(&args).unwrap_err().to_string();
+        assert!(error.contains("cannot be combined with --audio"));
+    }
+
+    #[test]
+    fn asset_preparation_flag_is_allowed_with_activation() {
+        let args = ProjectViewArgs {
+            directory: std::path::PathBuf::from("/definitely/not/a/project"),
+            clock: crate::project::ProjectClockArg::Realtime,
+            audio: None,
+            stdio_control: true,
+            asset_preparation: true,
+            asset_activation: true,
+            input_source: ProjectViewInputSource::Native,
+            controlled_entity: None,
+            width: 1280,
+            height: 720,
+            seconds: None,
+            frames: None,
+            report: None,
+        };
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn input_source_defaults_to_native_and_accepts_protocol() {
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            view: ProjectViewArgs,
+        }
+
+        use clap::Parser;
+
+        let default = TestCli::try_parse_from(["daedalus", "project"]).unwrap();
+        assert_eq!(default.view.input_source, ProjectViewInputSource::Native);
+
+        let protocol =
+            TestCli::try_parse_from(["daedalus", "project", "--input-source", "protocol"]).unwrap();
+        assert_eq!(protocol.view.input_source, ProjectViewInputSource::Protocol);
+
+        let native =
+            TestCli::try_parse_from(["daedalus", "project", "--input-source", "native"]).unwrap();
+        assert_eq!(native.view.input_source, ProjectViewInputSource::Native);
+        assert!(
+            TestCli::try_parse_from(["daedalus", "project", "--input-source", "keyboard"]).is_err()
+        );
     }
 
     #[test]

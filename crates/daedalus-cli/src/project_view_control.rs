@@ -14,6 +14,11 @@ use daedalus_content::asset_replacement::AssetReplacementMismatch;
 use daedalus_content::assets::{AssetImportMemorySummary, AssetImportMetrics};
 use daedalus_content::scene::StableId;
 use daedalus_core::{CommandId, EntityHandle, Revision, SessionId, Tick, Transform};
+#[cfg(feature = "window")]
+use daedalus_project_host::{
+    NativePresentedSummary, NativeProjectHostControl, NativeProjectHostLifecycle,
+    NativeProjectHostStatus, NativeProjectHostStatusRead,
+};
 use daedalus_runtime::{
     ActivationId, AssetActivationCommandOutcome, AssetActivationOperation,
     AssetActivationRequestResult, AssetActivationState, AssetActivationStatus,
@@ -30,6 +35,8 @@ use daedalus_runtime::{
     SessionAudioResult, SessionAudioVoiceId, SessionAudioVoiceState,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "window")]
+use serde_json::{Value, json};
 
 pub(crate) const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_PROTOCOL_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -271,6 +278,7 @@ struct Envelope {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum ClientRequest {
     Capabilities {},
+    ViewStatus {},
     Submit { operation: WireOperation },
     Poll { ticket: String },
     Ack { ticket: String },
@@ -800,6 +808,8 @@ struct EnvelopeOut {
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 enum WireResult {
     Capabilities(Capabilities),
+    #[cfg(feature = "window")]
+    ViewStatus(serde_json::Value),
     Submitted(Submitted),
     Poll(Box<PollResponse>),
     Acked,
@@ -815,6 +825,7 @@ struct Capabilities {
     audio_enabled: bool,
     asset_preparation_enabled: bool,
     asset_activation_enabled: bool,
+    view_status: bool,
     max_line_bytes: usize,
     max_response_bytes: usize,
     max_retained_tickets: usize,
@@ -1354,6 +1365,8 @@ pub(crate) struct ProtocolController {
     audio_enabled: bool,
     asset_preparation_enabled: bool,
     asset_activation_enabled: bool,
+    #[cfg(feature = "window")]
+    view_status: Option<ManagedViewStatusAttachment>,
     tickets: HashMap<String, TicketEntry>,
     submit_ids: HashMap<String, String>,
     detached_reason: Option<String>,
@@ -1361,6 +1374,12 @@ pub(crate) struct ProtocolController {
     duplicate_submissions: u64,
     errors: u64,
     closing: bool,
+}
+
+#[cfg(feature = "window")]
+struct ManagedViewStatusAttachment {
+    control: NativeProjectHostControl,
+    session: SessionId,
 }
 
 impl ProtocolController {
@@ -1381,6 +1400,8 @@ impl ProtocolController {
             audio_enabled,
             asset_preparation_enabled,
             asset_activation_enabled,
+            #[cfg(feature = "window")]
+            view_status: None,
             tickets: HashMap::new(),
             submit_ids: HashMap::new(),
             detached_reason: None,
@@ -1389,6 +1410,15 @@ impl ProtocolController {
             errors: 0,
             closing: false,
         }
+    }
+
+    #[cfg(feature = "window")]
+    pub(crate) fn attach_managed_view_status(
+        &mut self,
+        control: NativeProjectHostControl,
+        session: SessionId,
+    ) {
+        self.view_status = Some(ManagedViewStatusAttachment { control, session });
     }
 
     /// Process a bounded batch. No blocking IO, runtime wait, or renderer callback occurs here.
@@ -1497,6 +1527,7 @@ impl ProtocolController {
                 audio_enabled: self.audio_enabled,
                 asset_preparation_enabled: self.asset_preparation_enabled,
                 asset_activation_enabled: self.asset_activation_enabled,
+                view_status: self.managed_view_status_enabled(),
                 max_line_bytes: MAX_PROTOCOL_LINE_BYTES,
                 max_response_bytes: MAX_PROTOCOL_RESPONSE_BYTES,
                 max_retained_tickets: MAX_PROTOCOL_TICKETS,
@@ -1514,6 +1545,7 @@ impl ProtocolController {
                 live_capture: false,
                 mcp: false,
             })),
+            ClientRequest::ViewStatus {} => self.read_managed_view_status(),
             ClientRequest::Submit { .. } => Err(ProtocolError::new(
                 "protocol_internal",
                 "submit dispatch requires request_id",
@@ -1530,6 +1562,37 @@ impl ProtocolController {
                 // performs its own shutdown or renderer-message handoff.
                 Ok(WireResult::CloseRequested)
             }
+        }
+    }
+
+    fn managed_view_status_enabled(&self) -> bool {
+        #[cfg(feature = "window")]
+        {
+            self.view_status.is_some()
+        }
+        #[cfg(not(feature = "window"))]
+        {
+            false
+        }
+    }
+
+    fn read_managed_view_status(&self) -> Result<WireResult, ProtocolError> {
+        #[cfg(feature = "window")]
+        {
+            let Some(attachment) = self.view_status.as_ref() else {
+                return Err(ProtocolError::new(
+                    "view_status_unavailable",
+                    "live view status is available only on a managed project view attachment",
+                ));
+            };
+            managed_view_status_result(attachment.control.try_status(), attachment.session)
+        }
+        #[cfg(not(feature = "window"))]
+        {
+            Err(ProtocolError::new(
+                "view_status_unavailable",
+                "live view status is available only on a managed project view attachment",
+            ))
         }
     }
 
@@ -1665,6 +1728,40 @@ impl ProtocolController {
     }
 }
 
+#[cfg(feature = "window")]
+fn managed_view_status_result(
+    read: Result<
+        NativeProjectHostStatusRead,
+        daedalus_project_host::NativeProjectHostStatusReadError,
+    >,
+    expected_session: SessionId,
+) -> Result<WireResult, ProtocolError> {
+    let status = match read {
+        Ok(NativeProjectHostStatusRead::Value(status)) => status,
+        Ok(NativeProjectHostStatusRead::Busy) => {
+            return Err(ProtocolError::retryable(
+                "view_status_busy",
+                "managed project view status is temporarily busy",
+            ));
+        }
+        Err(_) => {
+            return Err(ProtocolError::new(
+                "view_status_poisoned",
+                "managed project view status is unavailable after an internal failure",
+            ));
+        }
+    };
+    if status.session() != expected_session {
+        return Err(ProtocolError::new(
+            "view_status_session_mismatch",
+            "managed project view status belongs to another session",
+        ));
+    }
+    Ok(WireResult::ViewStatus(native_project_host_status_json(
+        &status,
+    )))
+}
+
 // The request ID is part of submit replay semantics; dispatch owns it so every submit is
 // correlated before entering the bounded native ticket book.
 impl ProtocolController {
@@ -1736,6 +1833,84 @@ impl ProtocolController {
             ),
         }
     }
+}
+
+#[cfg(feature = "window")]
+pub(crate) fn native_project_host_status_json(status: &NativeProjectHostStatus) -> Value {
+    let cpu = status.cpu();
+    json!({
+        "lifecycle": match status.lifecycle() {
+            NativeProjectHostLifecycle::Initializing => "initializing",
+            NativeProjectHostLifecycle::InitialPreparing => "initial_preparing",
+            NativeProjectHostLifecycle::CpuPrepared => "cpu_prepared",
+            NativeProjectHostLifecycle::Ready => "ready",
+            NativeProjectHostLifecycle::ViewRunning => "view_running",
+            NativeProjectHostLifecycle::ViewClosed => "view_closed",
+            NativeProjectHostLifecycle::Stopping => "stopping",
+            NativeProjectHostLifecycle::Stopped => "stopped",
+            NativeProjectHostLifecycle::Failed => "failed",
+        },
+        "session": status.session().get().to_string(),
+        "view_started": status.view_started(),
+        "view_closed": status.view_closed(),
+        "active_generation": status.active_generation().to_string(),
+        "active_source_digest": status.active_source_digest(),
+        "queued_publication": status.last_queued_publication().map(project_publication_identity_json),
+        "last_presented": status.last_presented().map(native_presented_summary_json),
+        "cpu": {
+            "generation_slots_used": cpu.generation_slots_used,
+            "generation_slots_limit": cpu.generation_slots_limit,
+            "frame_slots_used": cpu.frame_slots_used,
+            "frame_slots_limit": cpu.frame_slots_limit,
+            "prepared_metadata_bytes": cpu.prepared_metadata_bytes,
+            "prepared_metadata_reserved_bytes": cpu.prepared_metadata_reserved_bytes,
+            "legacy_mesh_copy_bytes": cpu.legacy_mesh_copy_bytes,
+            "legacy_mesh_copy_reserved_bytes": cpu.legacy_mesh_copy_reserved_bytes,
+            "frame_bytes": cpu.frame_bytes,
+            "frame_reserved_bytes": cpu.frame_reserved_bytes,
+            "scratch_current_bytes": cpu.scratch_current_bytes,
+            "scratch_peak_bytes": cpu.scratch_peak_bytes,
+        },
+        "failure": status.failure().map(|failure| json!({
+            "code":failure.code(),
+            "message":failure.message(),
+        })),
+        "live_capture": false,
+    })
+}
+
+#[cfg(feature = "window")]
+pub(crate) fn project_publication_identity_json(
+    identity: &daedalus_runtime::ProjectPublicationIdentity,
+) -> Value {
+    json!({
+        "session":identity.session().get().to_string(),
+        "tick":identity.tick().get().to_string(),
+        "sequence":identity.publication_sequence().to_string(),
+        "authority_snapshot_sequence":identity.authority_snapshot_sequence().to_string(),
+        "project_generation":identity.project_generation().to_string(),
+        "source_digest":identity.source_digest(),
+        "scene_revision":identity.scene_revision().to_string(),
+    })
+}
+
+#[cfg(feature = "window")]
+pub(crate) fn native_presented_summary_json(summary: &NativePresentedSummary) -> Value {
+    let (physical_width, physical_height) = summary.physical_size();
+    json!({
+        "session":summary.session().get().to_string(),
+        "tick":summary.tick().to_string(),
+        "sequence":summary.publication_sequence().to_string(),
+        "authority_snapshot_sequence":summary.authority_snapshot_sequence().map(|value| value.to_string()),
+        "project_generation":summary.project_generation().to_string(),
+        "source_digest":summary.source_digest(),
+        "present_sequence":summary.present_sequence().to_string(),
+        "physical_width":physical_width,
+        "physical_height":physical_height,
+        "render_view":Value::Null,
+        "view_projection":Value::Null,
+        "actual_view_available":false,
+    })
 }
 
 fn valid_request_id(id: &str) -> bool {

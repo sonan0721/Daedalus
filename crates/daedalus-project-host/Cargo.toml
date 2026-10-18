@@ -1,0 +1,27 @@
+[package]
+name = "daedalus-project-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native project/session host facade for Daedalus SDKs"
+
+[features]
+default = []
+window = ["daedalus-renderer/window"]
+
+[dependencies]
+daedalus-content = { path = "../daedalus-content" }
+daedalus-core = { path = "../daedalus-core" }
+daedalus-renderer = { path = "../daedalus-renderer", default-features = false }
+daedalus-runtime = { path = "../daedalus-runtime" }
+thiserror.workspace = true
+
+[[example]]
+name = "native_host_smoke"
+path = "examples/native_host_smoke.rs"
+required-features = ["window"]
+
+[lints]
+workspace = true

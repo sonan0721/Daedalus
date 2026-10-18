@@ -276,29 +276,114 @@ enum ViewOverride<'a> {
     Camera(&'a Camera),
 }
 
-impl PacketRenderer {
+struct PacketRendererInitPlan {
+    stage_state: staging::StageState,
+    instance_size: u64,
+    material_size: u64,
+    sprite_uv_buffer_bytes: usize,
+    fixed_resident_bytes: usize,
+    bookkeeping_bytes: usize,
+    slot_state: Vec<Option<SlotState>>,
+    slots: ManagedSlotAssignments,
+    completion_watermark: Arc<AtomicU64>,
+}
+
+/// Fixed packet resource initialization state. All buffer/group handles are
+/// installed in this owner immediately after creation so a later panic does
+/// not unwind through their last local owner.
+pub(crate) struct PacketRendererInitOwner {
+    renderer: Option<Renderer>,
+    limits: PacketRendererLimits,
+    asset_limits: PacketAssetLimits,
+    plan: Option<PacketRendererInitPlan>,
+    instance_buffer: Option<wgpu::Buffer>,
+    material_buffer: Option<wgpu::Buffer>,
+    globals_buffer: Option<wgpu::Buffer>,
+    globals_bind_group: Option<wgpu::BindGroup>,
+    materials_bind_group: Option<wgpu::BindGroup>,
+    #[cfg(test)]
+    panic_after_instance_buffer: bool,
+    #[cfg(test)]
+    panic_after_globals_bind_group: bool,
+}
+
+impl PacketRendererInitOwner {
     pub(crate) fn new(
         renderer: Renderer,
         limits: PacketRendererLimits,
         asset_limits: PacketAssetLimits,
-    ) -> Result<Self, PacketRenderError> {
-        limits.validate()?;
-        asset_limits.validate()?;
+    ) -> Self {
+        Self {
+            renderer: Some(renderer),
+            limits,
+            asset_limits,
+            plan: None,
+            instance_buffer: None,
+            material_buffer: None,
+            globals_buffer: None,
+            globals_bind_group: None,
+            materials_bind_group: None,
+            #[cfg(test)]
+            panic_after_instance_buffer: false,
+            #[cfg(test)]
+            panic_after_globals_bind_group: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_after_instance_buffer_for_test(&mut self) {
+        self.panic_after_instance_buffer = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_after_globals_bind_group_for_test(&mut self) {
+        self.panic_after_globals_bind_group = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retains_only_first_buffer_for_test(&self) -> bool {
+        self.renderer.is_some()
+            && self.instance_buffer.is_some()
+            && self.material_buffer.is_none()
+            && self.globals_buffer.is_none()
+            && self.globals_bind_group.is_none()
+            && self.materials_bind_group.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retains_buffers_and_first_bind_group_for_test(&self) -> bool {
+        self.renderer.is_some()
+            && self.instance_buffer.is_some()
+            && self.material_buffer.is_some()
+            && self.globals_buffer.is_some()
+            && self.globals_bind_group.is_some()
+            && self.materials_bind_group.is_none()
+    }
+
+    fn preflight(&self) -> Result<PacketRendererInitPlan, PacketRenderError> {
+        self.limits.validate()?;
+        self.asset_limits.validate()?;
+        let renderer = self.renderer.as_ref().ok_or_else(|| {
+            PacketRenderError::InvalidPacket(
+                "packet renderer initialization lost its renderer".into(),
+            )
+        })?;
         let stage_state = staging::StageState::new().ok_or_else(|| {
             PacketRenderError::InvalidPacket("packet renderer stage identity exhausted".into())
         })?;
         let device_limits = renderer.device.limits();
-        let instance_size = (limits.max_instances as u64)
+        let instance_size = (self.limits.max_instances as u64)
             .checked_mul(std::mem::size_of::<GpuInstance>() as u64)
             .ok_or_else(|| {
                 PacketRenderError::DeviceLimit("instance buffer size overflowed".into())
             })?;
-        let material_size = (limits.max_instances as u64)
+        let material_size = (self.limits.max_instances as u64)
             .checked_mul(std::mem::size_of::<MaterialUniform>() as u64)
             .ok_or_else(|| {
                 PacketRenderError::DeviceLimit("material buffer size overflowed".into())
             })?;
-        let sprite_uv_buffer_bytes = limits
+        let sprite_uv_buffer_bytes = self
+            .limits
             .max_instances
             .checked_mul(std::mem::size_of::<SpriteUvUniform>())
             .ok_or_else(|| {
@@ -329,60 +414,140 @@ impl PacketRenderer {
             .ok_or_else(|| {
                 PacketRenderError::DeviceLimit("fixed packet resource bytes overflowed".into())
             })?;
-        if fixed_resident_bytes > asset_limits.resident_working_bytes {
+        if fixed_resident_bytes > self.asset_limits.resident_working_bytes {
             return Err(PacketRenderError::AssetWorkingSetExceeded {
                 bytes: fixed_resident_bytes,
-                limit: asset_limits.resident_working_bytes,
+                limit: self.asset_limits.resident_working_bytes,
             });
         }
-        let bookkeeping_bytes = packet_bookkeeping_bytes(limits, asset_limits)?;
-        if bookkeeping_bytes > asset_limits.bookkeeping_bytes {
+        let bookkeeping_bytes = packet_bookkeeping_bytes(self.limits, self.asset_limits)?;
+        if bookkeeping_bytes > self.asset_limits.bookkeeping_bytes {
             return Err(PacketRenderError::InvalidAssetLimits);
         }
-        let instance_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Daedalus persistent packet instances"),
-            size: instance_size.max(std::mem::size_of::<GpuInstance>() as u64),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let material_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Daedalus persistent packet materials"),
-            size: material_size.max(std::mem::size_of::<MaterialUniform>() as u64),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let globals_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Daedalus persistent packet camera and light"),
-            size: std::mem::size_of::<GlobalsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let globals_bind_group = renderer
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Daedalus persistent packet globals"),
-                layout: &renderer.globals_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: globals_buffer.as_entire_binding(),
-                }],
-            });
-        let materials_bind_group = renderer
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Daedalus persistent packet materials"),
-                layout: &renderer.materials_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: material_buffer.as_entire_binding(),
-                }],
-            });
         let mut slot_state = Vec::new();
-        slot_state.resize_with(limits.max_instances, || None);
-        Ok(Self {
-            renderer,
-            limits,
-            asset_limits,
+        slot_state
+            .try_reserve_exact(self.limits.max_instances)
+            .map_err(|_| PacketRenderError::CpuAllocationFailed)?;
+        slot_state.resize_with(self.limits.max_instances, || None);
+        Ok(PacketRendererInitPlan {
+            stage_state,
+            instance_size,
+            material_size,
+            sprite_uv_buffer_bytes,
+            fixed_resident_bytes,
+            bookkeeping_bytes,
+            slot_state,
+            slots: Arc::new(HashMap::new()),
+            completion_watermark: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    pub(crate) fn initialize(&mut self) -> Result<(), PacketRenderError> {
+        if self.plan.is_none() {
+            self.plan = Some(self.preflight()?);
+        }
+        let plan = self.plan.as_ref().expect("packet preflight stored");
+        let renderer = self.renderer.as_ref().expect("renderer owner present");
+        if self.instance_buffer.is_none() {
+            self.instance_buffer = Some(
+                renderer.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Daedalus persistent packet instances"),
+                    size: plan
+                        .instance_size
+                        .max(std::mem::size_of::<GpuInstance>() as u64),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+            );
+            #[cfg(test)]
+            if std::mem::take(&mut self.panic_after_instance_buffer) {
+                panic!("injected packet initialization panic after first buffer");
+            }
+        }
+        if self.material_buffer.is_none() {
+            self.material_buffer = Some(
+                renderer.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Daedalus persistent packet materials"),
+                    size: plan
+                        .material_size
+                        .max(std::mem::size_of::<MaterialUniform>() as u64),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+            );
+        }
+        if self.globals_buffer.is_none() {
+            self.globals_buffer = Some(renderer.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Daedalus persistent packet camera and light"),
+                size: std::mem::size_of::<GlobalsUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if self.globals_bind_group.is_none() {
+            let globals_buffer = self
+                .globals_buffer
+                .as_ref()
+                .expect("globals buffer created");
+            self.globals_bind_group = Some(renderer.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("Daedalus persistent packet globals"),
+                    layout: &renderer.globals_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: globals_buffer.as_entire_binding(),
+                    }],
+                },
+            ));
+            #[cfg(test)]
+            if std::mem::take(&mut self.panic_after_globals_bind_group) {
+                panic!("injected packet initialization panic after first bind group");
+            }
+        }
+        if self.materials_bind_group.is_none() {
+            let material_buffer = self
+                .material_buffer
+                .as_ref()
+                .expect("material buffer created");
+            self.materials_bind_group = Some(renderer.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("Daedalus persistent packet materials"),
+                    layout: &renderer.materials_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: material_buffer.as_entire_binding(),
+                    }],
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.plan.is_some()
+            && self.instance_buffer.is_some()
+            && self.material_buffer.is_some()
+            && self.globals_buffer.is_some()
+            && self.globals_bind_group.is_some()
+            && self.materials_bind_group.is_some()
+    }
+
+    pub(crate) fn finish(self) -> Result<PacketRenderer, PacketRenderError> {
+        if !self.is_ready() {
+            return Err(PacketRenderError::InvalidPacket(
+                "packet renderer initialization is incomplete".into(),
+            ));
+        }
+        Ok(self.into_ready())
+    }
+
+    pub(crate) fn into_ready(mut self) -> PacketRenderer {
+        debug_assert!(self.is_ready());
+        let plan = self.plan.take().expect("readiness checked");
+        PacketRenderer {
+            renderer: self.renderer.take().expect("renderer owner present"),
+            limits: self.limits,
+            asset_limits: self.asset_limits,
             geometry: HashMap::new(),
             active_keys: HashSet::new(),
             textures: HashMap::new(),
@@ -393,15 +558,15 @@ impl PacketRenderer {
             active_texture_bind_groups: HashSet::new(),
             default_model_texture: None,
             active_default_texture: false,
-            slots: Arc::new(HashMap::new()),
-            slot_state,
-            instance_buffer,
-            material_buffer,
+            slots: plan.slots,
+            slot_state: plan.slot_state,
+            instance_buffer: self.instance_buffer.take().expect("readiness checked"),
+            material_buffer: self.material_buffer.take().expect("readiness checked"),
             sprite_uv_buffer: None,
-            sprite_uv_buffer_bytes,
-            globals_buffer,
-            globals_bind_group,
-            materials_bind_group,
+            sprite_uv_buffer_bytes: plan.sprite_uv_buffer_bytes,
+            globals_buffer: self.globals_buffer.take().expect("readiness checked"),
+            globals_bind_group: self.globals_bind_group.take().expect("readiness checked"),
+            materials_bind_group: self.materials_bind_group.take().expect("readiness checked"),
             depth: None,
             last_globals: None,
             ready_packet: None,
@@ -409,26 +574,43 @@ impl PacketRenderer {
             active_resource_set_token: None,
             stats: PacketResourceStats::default(),
             asset_stats: PacketAssetResourceStats {
-                bookkeeping_reserved_bytes: bookkeeping_bytes,
+                bookkeeping_reserved_bytes: plan.bookkeeping_bytes,
                 ..PacketAssetResourceStats::default()
             },
             submission_serial: 0,
-            completion_watermark: Arc::new(AtomicU64::new(0)),
+            completion_watermark: plan.completion_watermark,
             staging_submissions: VecDeque::new(),
             staging_in_flight_bytes: 0,
             cpu_scratch_current_bytes: 0,
             cpu_scratch_peak_bytes: 0,
-            fixed_resident_bytes,
-            bookkeeping_base_bytes: bookkeeping_bytes,
+            fixed_resident_bytes: plan.fixed_resident_bytes,
+            bookkeeping_base_bytes: plan.bookkeeping_bytes,
             staging_bookkeeping_bytes: 0,
             touch_serial: 0,
-            stage_state,
-        })
+            stage_state: plan.stage_state,
+        }
+    }
+}
+
+impl PacketRenderer {
+    pub(crate) fn new(
+        renderer: Renderer,
+        limits: PacketRendererLimits,
+        asset_limits: PacketAssetLimits,
+    ) -> Result<Self, PacketRenderError> {
+        let mut owner = PacketRendererInitOwner::new(renderer, limits, asset_limits);
+        owner.initialize()?;
+        owner.finish()
     }
 
     #[cfg(any(feature = "window", test))]
     pub(crate) fn device(&self) -> &wgpu::Device {
         &self.renderer.device
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_init_handle_count(&self) -> usize {
+        self.renderer.retained_init_handle_count()
     }
 
     #[cfg(feature = "window")]

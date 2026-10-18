@@ -1,6 +1,6 @@
 # Native project host: 엔진 라이브러리와 CLI의 조합 경계
 
-상태: b.2 인수·runtime consumer 계약 동결·renderer/host API 최종 리뷰 전 · 2026-10-17
+상태: 공개 API·실제 SDK 창·CLI 교체 metadata 집중 검증 통과 · 2026-10-18 · pixels/CI/package 인수 전
 
 ## 목적과 현재 사실
 
@@ -19,13 +19,15 @@ CLI가 가진 project 실행·입력·snapshot 추출·창 연결을 게임별�
 
 프로젝트 filesystem resolver/import/cache는 이미 content/runtime의 책임이며 CLI 전용으로 옮기지 않는다. native library 사용자가 CLI process 없이도 같은 실행 기능을 소비해야 한다. C#·MCP의 전체 attach/SDK는 별도 제품 항목이며 이 Rust host 경계만으로 구현됐다고 하지 않는다. crate 이름은 위와 같이 채택하고 renderer의 default features는 끈다. host 기본 feature는 비장치 SDK 경계, native 창은 opt-in `window`다. activation-enabled host의 audio/native-audio는 P03.3c 전에는 제공하지 않으며 CLI의 기존 non-activation audio 경로를 보존한다.
 
+여기서 비장치는 실행 중 device/window/audio를 초기화하지 않는다는 뜻이다. renderer의 CPU owner/packet type을 소비하므로 현재 renderer의 무조건 dependency인 `wgpu`는 host의 no-default graph에도 남는다. `default-features = false`는 window/winit 선택을 끄지만 wgpu crate를 제거하지 않는다. wgpu dependency-free SDK·별도 CPU renderer crate 분리가 구현됐다고 하지 않는다. CLI의 optional host dependency는 window feature에서 선택한다. 이번 연결을 위해 renderer crate를 다시 분할하지 않는다.
+
 ## 외부 facade와 startup
 
 외형은 `NativeProjectHostOptions`, `NativeProjectHost`, `NativeProjectViewOptions`, compact `NativeViewOutcome`으로 좁힌다. start/attach_control/run_view/request_stop/try_shutdown 책임을 분리한다. attach는 기존 `SessionControlClient`를 반환해 모든 frontend가 한 authority를 사용한다. run_view는 macOS의 OS event loop 제약을 따라 호출 thread에서 실행하며 별도 임의 window thread를 만들지 않는다. 정확한 renderer 입력/반환 type과 library 파일 소유권은 연결 API 동결 뒤 배정한다.
 
 `run_view(&mut self, options)` 동안 같은 host borrow로 `request_stop(&self)`를 호출할 수 없으므로 미리 얻는 cloneable `NativeProjectHostControl`을 둔다. handle은 out-of-band `request_stop()`, `request_view_close()`, nonwaiting `try_status()`만 담당하며 작은 atomic/상태 metadata를 보유한다. source/packet/prepared roots를 넣지 않는다. control/input/packet queue가 가득 차도 close/stop은 관측한다. 새 일반 controller framework를 만들지 않는다.
 
-source 감사상 SessionControlClient에는 owner stop API가 없다. 첫 host 구현은 host와 장수 coordinator가 `Arc<NativeProjectActivationService>`를 내부에서만 공유하는 선택을 먼저 검증한다. 공개 control handle은 service/ControlShared의 strong/weak handle을 받지 않고 host-only atomic signals·작은 status만 보유한다. coordinator가 whole-stop을 관측해 기존 service의 request_stop을 호출하고 private Arc를 반환한다. 이 선택은 actual host compile에서 service의 Sync를 확인해야 하며 현재 검증 사실이 아니다. Sync가 맞지 않으면 코딩을 확장하기 전에 소유권 계약을 다시 리뷰한다. 임의 두 번째 actor나 UI mutex 대기로 우회하지 않는다.
+source 감사상 SessionControlClient에는 owner stop API가 없다. 첫 host 구현은 host와 장수 coordinator가 `Arc<NativeProjectActivationService>`를 내부에서만 공유한다. 공개 control handle은 service/ControlShared의 strong/weak handle을 받지 않고 host-only atomic signals·작은 status만 보유한다. coordinator가 whole-stop을 관측해 기존 service의 request_stop을 호출하고 private Arc를 반환한다. 2026-10-17의 기존 artifact rustc probe에서 service의 Send+Sync와 private Arc의 Send를 확인했다. 이는 해당 Mac feature 조합의 compile 근거이며 actual host 구현·종료 검증은 아니다. 임의 두 번째 actor나 UI mutex 대기로 우회하지 않는다.
 
 host try_shutdown은 종료 신호를 보낸 뒤 finished coordinator만 join한다. 그 전에는 Stopping이고 private Arc가 실제 반환된 뒤 `Arc::get_mut`으로 기존 service try_shutdown을 호출한다. CPU owner/device 반환·drain은 별도 진행이며 unfinished join을 하지 않는다. coordinator panic도 finished 뒤 관측/유한 failure를 기록하고 host가 가진 service로 stop·cleanup polling을 계속한다. view-close만으로 coordinator를 종료해 whole-stop 경로를 잃지 않으며 authority Step/read는 유지한다. 이 설계는 작은 control capability를 추가하려고 runtime의 큰 queue/frame state를 일시 upgrade하는 새 경로를 피하기 위한 내부 소유권 선택이다.
 
@@ -33,7 +35,13 @@ host try_shutdown은 종료 신호를 보낸 뒤 finished coordinator만 join한
 
 작은 status/outcome은 session·active generation/digest·activation/CPU owner/view lifecycle·논리 장부·bounded resource counters·latest accepted publication과 last actual-present identity/view·최대 유한 failure code/message를 구분한다. publication/authority sequence와 tick은 각각 보존한다. `PacketPresentationWindowOutcome`이나 final packet Arc를 public outcome으로 반환하지 않는다. window interval samples 등 기존 유한 report를 재사용하되 source/이미지/instance 배열을 넣지 않는다.
 
+CLI 연결의 첫 compact publication 관측은 `NativeProjectHostStatus::last_queued_publication() -> Option<&ProjectPublicationIdentity>`로 구체화한다. 기존 runtime의 실제 publication token을 재사용하고 window Frame payload의 try_send가 성공한 뒤에만 갱신한다. 이는 ingress enqueue 사실이며 UI dequeue/accept·draw·present를 뜻하지 않는다. non-window/아직 전달 전은 None이다. 별도의 UI-accepted 관측은 이 getter로 구현됐다고 하지 않는다. `NativeProjectHost::shutdown_report() -> Option<&SessionShutdownReport>`는 기존 private service의 bounded 보고를 빌려 반환하고, 미완료에는 None을 유지한다. source/snapshot/packet root가 없는 기존 type을 재사용한다.
+
 첫 host slice의 `start`는 현재 native 준비 factory처럼 **동기 initial load**다. 호출 전에 창이 생겼다고 하거나 async로 문서화하지 않는다. initial source를 두 번 읽지 않으려면 runtime의 additive render-consumer factory가 exact initial source lease를 제공해야 한다. 이후 교체는 같은 session 안에서 background 준비한다.
+
+구체 startup 순서는 pure options/limits 검증 → signals/유한 slots 할당 → 기존 render-consumer factory → host가 service/port 즉시 보유 → private coordinator와 단일 CPU owner 시작이다. coordinator는 run_view 전부터 OOB stop을 service에 전달한다. `start -> Result<NativeProjectHost, StartError>`의 Err는 service 반환 전 검증/factory 실패까지만 쓴다. factory는 기존 동기 partial cleanup을 수행하므로 start 전체를 nonwaiting API라고 하지 않는다. service가 생긴 뒤 spawn 등의 실패는 consumer close/service stop과 Failed status를 가진 host를 Ok로 반환해 caller가 실제 try_shutdown을 계속할 수 있게 한다. Ok는 Ready/Running 보장이 아니며 status를 확인한다. 살아 있는 service/thread를 잃는 plain late Err를 만들지 않는다.
+
+initial CPU prepare는 같은 owner에서 한 번 수행하고 InitialPreparing status로 노출한다. 첫 run_view는 실제 initial StageInput이 준비될 때까지 **창 생성 전에** 기다리며, 이미 실행 중인 coordinator의 whole-stop이 cooperative cancel을 요청할 수 있다. 이후 managed 창에 실제 initial resource input만 주고 첫 frame은 GPU Ready 이후 실제 SessionFrame에서 추출한다. 이 startup 대기는 현재 additive API의 명시적 제한이며 D1의 CPU load 전 loading UI gate를 닫지 않는다. view 준비/실행 실패는 host를 소비하지 않는 typed outcome으로 남긴다.
 
 동기 초기 CPU 로드는 D1의 로딩 UI 요구를 면제하지 않는다. 후속 P02/P08 bootstrap은 아직 project가 없는 실제 Starting 상태에서 UI/입력을 표시하고, 준비 후 첫 실제 publication을 받도록 설계·검증해야 한다. 초기 packet을 임의로 꾸며 project load 성공으로 처리하지 않는다.
 
@@ -41,17 +49,19 @@ host try_shutdown은 종료 신호를 보낸 뒤 finished coordinator만 join한
 
 bootstrap surface present는 game presented/ACK가 아니다. actor의 generation1/source는 이미 initial publication으로 존재할 수 있으나 view는 Starting·presented 없음이다. initial device-ready 뒤 실제 최신 SessionFrame에서 첫 packet을 추출하고 정상 draw/present 경계에서만 initial identity의 ACK를 보낸다. candidate/activation ID를 만들거나 초기 source를 다시 Commit하지 않는다. startup 실패도 candidate stage 실패로 위장하지 않고 host 초기 준비 실패/종료로 보고한다.
 
+후보 CPU 준비는 bootstrap과 겹칠 수 있지만 candidate BeginStage는 window의 실제 active generation을 관측한 뒤 전달한다. initial DeviceReady만으로 첫 실제 frame보다 후보를 먼저 enqueue하지 않는다. 다음 입력의 generation이 renderer가 실제 표시 중인 active+1 계약을 만족하도록 first-frame 전달을 우선한다. 초기 준비 도중 protocol Stage가 빠르게 도착한 경우도 fatal identity 오류로 바뀌지 않아야 한다.
+
 ### managed window의 additive 연결 경계
 
 source 리뷰에서 기존 `run_packet_windowed_presented`는 필수 initial packet을 요구하고 결과의 `final_packet` Arc를 유지하며, 실제 present metadata에는 authority snapshot sequence가 없음을 확인했다. 새 연결은 기존 `WindowApp`/surface/input/camera/event loop를 managed mode로 확장한다. 기존 public packet 함수·message·outcome의 동작과 struct literal은 보존한다.
 
 managed 시작 입력은 실제 initial `PacketStageInput`과 유한 options/limits이며 **initial CpuFrameHandle은 요구하지 않는다**. 실제 GPU Ready 전에는 bootstrap clear/loading만 표시한다. 이후 첫/후속 frame은 실제 SessionFrame에서 추출한 `Arc<CpuFrameHandle>`이고, resource stage 입력과 구분한다. UI는 최신 active frame과 candidate 준비를 따로 보관해 로딩 중에도 최신 authority pose를 그린다. CPU validation map을 UI에서 다시 만들지 않는다.
 
-payload 전달은 capacity1의 typed 경계로 초기/후보 StageInput·최신 frame·cancel identity를 순서/현재성 검증 후 접수한다. 큐 포화 시 소유권은 sender에게 반환되며 host는 canonical CPU roots를 유지한다. close/whole stop은 이 큐의 여유에 의존하지 않는 atomic 신호다. ready/failure stage 상태와 last actual-present metadata는 각각 유한 슬롯에 보존해 하나가 다른 필수 ACK를 덮어쓰지 않는다. host는 renderer-local stage ID를 runtime의 실제 Initial/Candidate identity에 연결하며 renderer가 runtime ID/type을 import하지 않는다.
+payload 전달은 capacity1의 typed 경계로 초기/후보 StageInput·최신 frame을 순서/현재성 검증 후 접수한다. 큐 포화 시 소유권은 sender에게 반환되며 host는 canonical CPU roots를 유지한다. close/whole stop/cancel-through는 이 큐의 여유에 의존하지 않는 별도 atomic 신호다. ready/failure/deferred stage event와 last actual-present metadata는 각각 유한 슬롯에 보존해 하나가 다른 필수 ACK를 덮어쓰지 않는다. host는 renderer-local key와 GPU stage ID를 runtime의 실제 Initial/Candidate identity에 연결하며 renderer가 runtime ID/type을 import하지 않는다. 정확한 additive window API는 [managed 창 계약](managed-packet-window.md)을 따른다.
 
 managed window의 metadata는 session/generation/digest·publication sequence·authority snapshot sequence·tick·실제 physical dimensions/view와 checked present sequence를 함께 보존한다. UI는 `surface.present()` 경계 뒤에만 presented를 기록한다. Busy로 acquired frame을 버린 시도·bootstrap clear는 actual game present 횟수/ACK에 포함하지 않는다. compact host 결과에는 packet/frame/source Arc를 담지 않는다.
 
-window 내부 finalizer는 작은 결과를 복사한 뒤 UI의 CPU-frame/packet aliases, SurfaceState, Window를 순서대로 해제하고 device owner를 별도 capacity1 disposition 경계로 반환한다. 완료된 PacketRenderer뿐 아니라 packet 준비 전의 Renderer와 device 생성 뒤 부분 초기화 owner도 구분해야 한다. NoDeviceCreated는 engine이 실제 device handle을 얻기 전의 실패에만 쓴다. native host의 같은 CPU owner/backstop이 이 반환을 수신해 실제 nonwaiting drain과 CPU registry 회수를 끝내며, UI에서 unfinished worker를 join하지 않는다. public 실패가 발생했다고 초기화된 device를 UI에서 곧바로 최종 drop하는 반환형을 만들지 않는다. 정확한 새 symbol/signature와 source 소유권은 renderer API compile 확인 뒤 host/window 착수 전에 동결한다. 이 경계는 설계 요구이며 아직 구현/실제 창·오류·panic 검증을 통과하지 않았다.
+window 내부 finalizer는 작은 결과를 복사한 뒤 UI의 CPU-frame/packet aliases, SurfaceState, Window를 순서대로 해제하고 device owner를 항상 소유권을 돌려주는 run 결과로 반환한다. host가 private capacity1 disposition 경계로 worker에 전달한다. 완료된 PacketRenderer뿐 아니라 packet 준비 전의 Renderer와 device 생성 뒤 부분 초기화 owner도 구분한다. handle 미반환과 device 소유 이후 실패를 구분하는 정확한 owner phase·in-place 초기화·paired create·반환 규칙은 [owner 수명 계약](native-renderer-owner-lifecycle.md)으로 동결했다. native host의 같은 CPU owner/backstop이 반환을 수신해 실제 nonwaiting drain과 CPU registry 회수를 끝내며 UI에서 unfinished worker를 join하지 않는다. public 실패가 발생했다고 초기화된 device를 UI에서 곧바로 최종 drop하는 반환형을 만들지 않는다. managed window/host 연결 API는 착수 전에 별도 동결한다. 아직 구현/실제 창·오류·panic 검증을 통과하지 않았다.
 
 ### 초기화 실패 경계의 source 감사
 
@@ -59,7 +69,7 @@ window 내부 finalizer는 작은 결과를 복사한 뒤 UI의 CPU-frame/packet
 
 새 managed 경로는 생성된 Renderer를 즉시 app의 owner slot에 넣고, borrowed packet 준비가 성공한 뒤에만 PacketRenderer로 승격하도록 설계한다. app이 살아 있는 범위에서 오류/unwind를 수집하고 surface/window 해제 뒤 소유권을 반환한다. 기존 consuming public API의 호환성은 보존한다. Renderer::from_adapter 내부에도 request_device 성공 뒤 layouts/pipelines/buffers 생성 구간이 있으므로, 이 구간은 별도의 recoverable partial-init owner가 필요하다. 단순 Device clone만으로 부분 GPU 자원의 마지막 해제 thread까지 보장했다고 하지 않는다.
 
-부분 초기화 holder의 필드·실패 반환형·Send와 finalizer 순서는 코드 착수 전 추가 리뷰 대상이다. engine에 handle이 반환되기 전 backend 내부 실패와 engine이 이미 소유한 handle의 실패를 구분한다. 이 설계가 동결되고 실제 일반 오류/주입 panic·반환/drain 시험을 통과할 때까지 host 종료 소유권 항목은 열린 상태다. 현재 staged-upload 코드 작업의 통과로 이 항목을 닫지 않는다.
+부분 초기화 holder의 고정 필드·실패에도 owner를 반환하는 경계·finalizer 순서는 별도 owner 계약으로 동결했다. 새 type의 Send와 실제 일반 오류/주입 panic·반환/drain은 구현 뒤 검증한다. engine에 handle이 반환되기 전 backend 내부 실패와 engine이 이미 소유한 handle의 실패를 구분한다. 해당 시험을 통과할 때까지 host 종료 소유권 항목은 열린 상태다. 기존 staged-upload library 통과로 이 항목을 닫지 않는다.
 
 ## runtime-neutral consumer port 구체안
 
@@ -95,7 +105,13 @@ host는 window의 present 관측을 받았다는 이유만으로 이전 generati
 
 Stage마다 detached thread를 만들지 않는다. engine TaskPool의 shared completion receiver를 다른 poller가 몰래 가져가지 않는다. 이 host CPU owner는 별도 process worker budget/진단에 표시하며 Bevy/tasks와 합쳐 이미 모든 thread를 제한한다고 하지 않는다. 장치 callback/CLI I/O worker도 별도다. worker 수와 cache/queue budget은 서로 다른 단위다.
 
-frame request도 latest-only snapshot 한 개, CPU 작업 중 한 개로 제한한다. coordinator는 snapshot 참조/identity를 전달하며 큰 extraction/validation을 실행하지 않는다. 교체된 pending snapshot/packet의 마지막 free는 CPU owner에 맡긴다. candidate prepare에는 frame 우선권과 유한 단위의 취소/checkpoint를 두어 큰 prepare가 입력/새 frame을 무기한 막지 않게 한다. 현재 renderer의 새 packet validation은 submit 경로에서 실행된다. 이를 이미 worker에서 한다고 보고하지 않는다. 후속 opaque CPU-validated input은 실제 packet/검증 limits와 묶고 기존 검사 로직을 재사용해야 하며, public legacy API의 검증을 boolean으로 건너뛰는 경로는 만들지 않는다. 정확한 type/retained validation 비용은 API 동결 대상이다.
+frame request도 latest-only 한 개, CPU 작업 중 한 개로 제한한다. coordinator는 작은 desired identity/추출 허용 신호를 전달하고 CPU owner가 같은 authority의 private attached client.try_latest_frame으로 실제 최신 SessionFrame을 읽는 방식을 우선한다. 그곳에서 opaque ProjectPublicationIdentity::from_frame과 CPU frame을 함께 만들고 snapshot을 해제한다. coordinator가 큰 snapshot payload를 최신 것으로 교체하며 마지막 free를 수행하거나 별도 frame mailbox를 복제하지 않는다. 어떤 이유로 payload 전달이 필요해도 교체된 pending snapshot/packet의 마지막 free는 CPU owner에 맡긴다. PR19의 PacketCpuOwner/CpuFrameHandle은 opaque CPU validation·정확한 limits/token·실제 backing registry를 제공한다. host는 이 검증을 같은 CPU owner에서 재사용한다. legacy packet submit의 validation은 보존하며 managed 경로에서 boolean skip/revalidation map 복제로 우회하지 않는다. prepare에는 cooperative 취소 checkpoint가 있지만 현재 synchronous prepare가 frame request를 선점한다고 주장하지 않는다. 실제 host 지연 계측 뒤 continuation 단위가 필요하면 후속 설계·검증한다.
+
+CPU 전달은 prepare(실행1+pending1), latest-frame 요청1, stage-input 재투영 요청1과 각각의 유한 result slot을 분리한다. initial prepare는 병합하지 않으며 후보 pending 교체는 stale/currentness 확인 뒤 한다. 모든 요청/결과는 runtime identity와 CPU generation/publication을 명시한다. UI try_begin_stage가 Busy로 input을 소비하면 host는 같은 key/identity/CpuGenerationId를 유지하고 CPU owner의 `stage_input(id)`만 다시 요청한다. canonical Arc projection이며 source import/prepare/validation을 반복하지 않는다. renderer event를 복사한 뒤에도 coordinator는 stage/present 보고 metadata를 runtime Applied 또는 명시적 stale/closed 거부까지 유지한다.
+
+lease는 non-Clone이며 CPU prepare로 이동한다. coordinator는 consumer status에서 desired/current identity를 관측해 host-owned AtomicBool을 갱신하고 CPU checkpoint가 이를 읽는다. 완료 뒤 lease.is_current를 다시 확인한 뒤에만 handoff한다. exported lease 내부에 즉시 취소 shared cell이 있다고 가정하지 않으며 cancellation latency는 cooperative poll 간격과 현재 work 단위에 의존한다.
+
+Busy 후 같은 CPU 장부 상태에서 prepare/extract를 반복하지 않는 최적화는 취소/currentness 검사를 생략할 이유가 아니다. 매 poll에서 먼저 cancelled/stale을 확인해 pending lease/snapshot을 owner thread에서 해제하고, 살아 있는 작업에만 이전 Busy status와의 비교를 적용한다. held alias가 영구 유지되어 status가 변하지 않아도 무효화된 작업은 해제되어야 한다. 실제 held-alias Busy→취소와 Busy→alias 해제→같은 lease 재개를 각각 검사한다.
 
 ## publication과 표시 identity
 
@@ -104,6 +120,14 @@ runtime frame의 publication sequence와 authority_snapshot_sequence는 다르�
 기존 packet 생성자/extract는 유지하고 새 explicit publication extraction 경계를 추가한다. RenderPacket의 private optional authority-snapshot identity와 getter를 검토한다. legacy 임의 producer는 모르는 값을 None으로 표현하고 snapshot 관계를 만들어내지 않는다. host packet은 실제 SessionFrame의 두 sequence를 각각 전달한다. window transition의 publication 단조성·generation/digest·tick 검사를 느슨하게 풀지 않는다.
 
 실제 present ACK는 session·project generation·digest·publication sequence·authority snapshot sequence·tick·실제 view metadata를 갖는다. actor commit, submission, GPU completion, surface present 호출, CPU backing 회수는 독립 상태다. consumer ready/present는 trusted host의 보고이며 runtime이 GPU나 compositor를 직접 검증한 것처럼 표현하지 않는다. live 조회는 같은 control service의 bounded 상태로 노출할 방향이며 정확한 wire DTO/capability 추가는 코드 전 동결한다.
+
+compact last_presented는 실제 window 관측과 ACK 수락을 혼합해 과거로 되돌리지 않는다. 같은 session의 더 큰 present_sequence가 관측된 뒤 이전 pending ACK가 Applied되어도 최신 관측을 덮어쓰지 않는다. runtime ACK 진행은 별도 상태다. 성공 view outcome에는 실제 view/행렬이 있지만 첫 compact summary에는 identity/dimensions만 남을 수 있으므로 오류 report의 누락 표현은 CLI 계약을 따른다.
+
+하나의 authority publication을 창이 여러 번 그릴 수 있다. ACK Applied 뒤 ingress의 pending identity를 회수해도, 현재 표시한 신뢰된 publication token/key 하나는 작은 metadata로 유지해 같은 packet의 후속 present/resize를 검증한다. 정확한 session·key·generation·digest·tick·authority snapshot을 재확인하고 큰 frame/source pin은 보유하지 않는다. 새 frame을 추출하거나 같은 publication을 재전송해 redraw identity 오류를 숨기지 않는다. Commit 뒤 새 generation의 첫 frame 전에는 기존 active publication의 재표시도 허용한다. pending에도 마지막 신뢰 token에도 없는 publication은 여전히 unknown 오류다. 같은 publication/increasing present sequence의 ACK→다시 표시를 결정적 CPU 시험과 실제 Manual 창의 짧은 관측 구간에서 확인한다.
+
+같은 신뢰 publication의 후속 redraw는 host의 actual status만 갱신해도 되며 runtime에 retirement ACK를 매번 다시 보내지 않는다. 따라서 runtime의 latest_applied_present는 마지막 ACK된 관측이고 최신 redraw/resize라는 뜻은 아니다. 새로운 publication은 반드시 기존 ACK 경로를 통과하고, 새로운 generation의 실제 첫 present는 actual-view gate를 진행시킨다. runtime 보고와 host actual 관측을 같은 최신성으로 표시하지 않는다.
+
+성공 window outcome 뒤 host status가 poisoned라면 가짜 session/default counter로 compact status를 만들지 않고 typed status_poisoned 오류를 반환한다. GPU owner 반환은 이 status 조회보다 먼저 수행한다.
 
 ## 큰 CPU backing과 종료
 
@@ -131,20 +155,32 @@ engine-held frame slot은 ready·새 current/committed frame·held previous pres
 
 종료는 먼저 stop/cancel 요청, small final metadata 복사, 큰 outcome/packet/device owner 해제·회수 진행, actor/CPU/preparation worker의 finished 관측 순서다. `PacketWindowOutcome.final_packet`을 잡은 채 source 회수를 기다리는 coordinator에 join하지 않는다. `try_shutdown`은 실제로 finished인 thread만 join하며 다른 owner가 남으면 Stopping이다. Drop은 stop 요청만 한다. [설계 probe](../06-worklog/2026-10-17-native-host-design.md)에서 기존 PacketRenderer/PacketViewSubmission/ProjectRenderResources의 Send·RenderPacket의 Send+Sync는 compile 확인했다. 이는 실제 GPU completion drain/마지막 device drop의 검증이 아니다. 그 retirement owner는 후속 장치·종료 검사까지 열린 상태이며 winit Window/Surface를 임의 worker로 옮기지 않는다.
 
+device disposition slot은 run_view보다 오래 사는 private host/CPU cleanup 상태에 둔다. 첫 one-shot view에서는 `Arc<OnceLock<Mutex<Option<WindowGpuOwner>>>>`처럼 단일 publisher가 한 번 설치하고 worker만 get/try_take하는 유한 slot을 쓴다. Window를 만들기 전에 slot과 one-shot latch를 준비한다. UI는 Mutex를 획득하지 않고 owner를 감싼 새 Mutex를 OnceLock에 한 번 설치하며, worker는 get(nonwaiting) 이후 try_lock/take해 lock을 놓고 drain한다. worker나 다른 경로는 set/get_or_init/wait를 호출하지 않으므로 concurrent initializer가 없다. 이 ownership 조건을 코드/테스트로 유지하고 정상 반환 경합을 owner 유실·mem::forget으로 처리하지 않는다. 두 번째 view는 자원 생성 전에 거부한다.
+
+조사 근거는 [Rust 1.94.0 OnceLock 원본](https://raw.githubusercontent.com/rust-lang/rust/1.94.0/library/std/src/sync/once_lock.rs)이다(2026-10-17, S90). get은 대기하지 않지만 set은 다른 initializer와 경쟁하면 대기할 수 있다. 위 설계는 비공개 one-shot publisher로 그 경쟁을 배제하는 추론이며 OnceLock 자체나 host 전체가 형식적으로 wait-free라는 주장이 아니다. 실제 one-shot/반환/종료 시험은 별도로 남긴다.
+
+반환 publication과 worker의 실제 수신·drain 완료를 별도로 추적한다. worker가 slot을 빈 상태로 poll한 직후 UI가 owner를 설치해도, 뒤늦게 returned 신호만 보고 worker가 종료해서는 안 된다. expected owner는 worker가 실제로 take한 뒤 drain/drop한 경우에만 종료 조건을 충족한다. 이 순서를 결정적으로 재현하는 CPU 시험을 포함한다. facade Drop 후에는 소비자가 사라진 진단 결과 slot이 cleanup thread를 영구 유지하지 않게 하며, 살아 있는 facade에는 오류를 보존한다.
+
+CPU job의 catch는 CPU owner를 바깥에 보유한 범위에서 실행하며 job panic 뒤에도 owner가 device 반환 수신·drain/reclaim을 계속한다. run 결과는 UI가 surface/window를 해제한 뒤 그 slot에 이동한다. 실제 thread 자체가 backstop 밖에서 실패하면 Failed/Stopping과 retained disposition을 기록하고 정상 Drained/Stopped로 바꾸지 않는다. replacement reclaimer의 자동 복구는 첫 slice 범위 밖이며 테스트 없이 안전하다고 주장하지 않는다. host facade Drop 뒤에도 private cleanup 상태는 worker가 완료할 때까지 살아 있어야 한다. OOB control과 try_shutdown/status 경로는 blocking Mutex.lock으로 기다리지 않으며 metadata contention은 Busy/후속 갱신으로 남긴다.
+
 ## CLI에서 공통 library로 옮길 책임
 
 현재 `project_view.rs`의 BindingMap/collect_bindings·latest_frame/submit_wait·InputTicket와 native 입력/ticket 진행은 host로 옮긴다. run_window/coordinate는 host의 typed coordinator·CPU owner·window lifecycle로 나누며 무거운 prepare/extract를 작은 입력 loop에 남기지 않는다. CLI의 ProjectViewArgs/validate_args, ProtocolController/StdioTransport·wire DTO/JSONL, build_report/emit_report와 파일 출력은 adapter로 남긴다. protocol의 Close는 host control handle에 연결하며 별도 Engine을 시작하지 않는다.
 
 옮긴 코드의 동작을 복사한 두 번째 구현을 유지하지 않는다. 다만 P03.3c 이전의 기존 audio-view 경로는 지원을 잃지 않도록 별도 유지하고, 공통 입력/제어 helper 재사용 범위를 명시한다. 새 activation+audio 조합은 준비를 생략한 성공이 아니라 효과 전 unsupported 진단이다.
 
+첫 additive CLI 전환은 explicit `--asset-activation` 경로이며 기존 non-activation/audio 경로는 보존한다. 이 한정 때문에 기존 non-activation packet coordinator 전체가 이미 제거됐다고 하지 않는다. protocol·diagnostic 입력 mapping은 adapter에 남기고 새 활성화 경로의 load/CPU/frame/stage/window/회수는 host만 담당한다. flag·report v2·Close/whole stop·파일 소유권은 [CLI activation 연결 계약](native-project-view-activation.md)으로 동결한다.
+
 비장치 integration test는 새 crate의 public API만 import해 외부 temporary project start→attach/read/Step→status→stop/실제 shutdown을 수행한다. daedalus-cli를 dependency로 삼거나 CLI module을 test에 include하지 않는다. 후속 window hardware 검사는 실제 present→view close→같은 authority Step/read와 Stage/Commit 거부→whole shutdown을 확인한다. 이 최소 SDK 시험은 전체 C# SDK/AI 제작 제품 인수를 대신하지 않는다.
+
+macOS의 실제 window SDK 검증은 test worker thread 대신 호출 main thread에서 실행하는 opt-in `native_host_smoke` engine diagnostic example로 수행한다. 기존 외부 project 경로를 받고 같은 public host/session API만 사용한다. 별도 game project·actor·importer·packet coordinator·smoke framework를 추가하지 않는다. 작은 controller는 실제 present 관측 뒤 view-close를 요청하고, 창 반환 뒤 같은 authority의 read/Manual Step·실제 consumer Closed·whole stop/finished cleanup을 검사한다. native 창을 실행하지 않는 기본 CPU CI에서는 example 실행을 요구하지 않는다. `required-features = ["window"]`로 manifest에 표시하고 해당 hardware 명령/원본 결과를 별도 기록한다. Stage/Commit의 직접 거부 시험과 실제 source 교체는 runtime/CLI 통합의 근거와 각각 구분한다.
 
 ## 착수 전 남은 검증과 작업 분할
 
 1. b.2 실제 native/PR 인수는 main360ceb6에서 확인. 과거 native 실패 원인 미확정은 보존.
-2. runtime initial/candidate port·failure/cancel/ACK·Queued/Applied/Busy는 consumer 계약으로 동결. 구현/실제 검증은 후속.
-3. renderer의 combined stage+old-ready draw·partial resource completeness·CPU leaf/frame registry와 수치 동결.
-4. existing type의 Send/auto-trait compile probe3건은 확인. transient frame accounting·window-close 후 실제 device retirement owner는 미검증. probe를 production 기능 통과로 쓰지 않는다.
+2. runtime initial/candidate port·failure/cancel/ACK·Queued/Applied/Busy의 library 구현은 PR17에서 인수. 실제 renderer/window ACK 생성·host 전달은 후속.
+3. renderer combined stage+old-ready draw·partial resource completeness·CPU leaf/frame registry의 library 경계는 PR19/mainc507835에서 인수. 실제 host 연결은 미완료.
+4. 2026-10-17 새 public type의 auto-trait probe도 확인. PacketCpuOwner Send, CpuFrameHandle/PacketStageInput Send+Sync, PacketRenderer/Renderer Send와 service private Arc 전달이 해당 artifact에서 compile됐다. 실제 host frame 선점·window-close 후 device retirement·부분 초기화 실패 반환은 미검증이며 probe를 기능 통과로 쓰지 않는다.
 5. Luna xhigh에 runtime/renderer/host/CLI 파일 소유권과 단일 Cargo lease를 나눠 단계별 구현. 기존 helper/프로토콜/service를 확장하고 새 smoke framework를 만들지 않음.
 
 그 뒤 실제 같은 session의 source edit→Stage→Commit→현재 pose publication→실제 픽셀/present ACK→old CPU/GPU 회수를 검증한다. Rust SDK가 host를 소비하는 최소 통합도 확인해 CLI 안에서만 동작하는 구현을 통과시키지 않는다. P03 전체와 D1/D2/D3는 별도 최종 인수까지 계속 미완료다.

@@ -188,3 +188,184 @@ style 정리 전 같은 최종 로직의 renderer default는71pass/18ignored, no
 독립적인 기존 managed 회귀는 pinned home SDK10.0.402로 확인했다. bridge build, warning/error0의 Release solution build, 실제 Rust-backed self-test, native round-trip/module lifecycle 두 integration scenario가 통과했다. 순서대로 `p03-render-managed-{bridge-build,build,selftest,integration}-root-attempt01.log`의 SHA-256은 `868681d4f0bbad1b883d85a372c2c8d32bceb59b297a3b7c02e5dae28142d099`/`b1182587d1e1dc6239a83020d51a72445266792559e1978531660db3859a58bf`/`c958af7b5356db019fb0e871336978350000be3bbf694fa027be7522fdf6a7bb`/`6c403eb8673a0281cd18245d17a5fb54d4aaf0ef61c7207790e7e7ed20bb9e67`다. 새 renderer가 C# SDK나 host에 연결됐다는 뜻은 아니다.
 
 Luna가 작성한 source와 root 리뷰·로컬 검증은 이 범위까지다. 다음은 clean PR의 다섯 check·두 package와 실제 artifact의 회귀/동일성·main tree 인수다. 해당 인수 전 b.3.2a/b 체크는 열어두며, host/실제 세션·창/SDK 연결과 전체 b.3/P03/D1/D2/D3도 미완료다.
+
+## PR19 renderer library 경계 인수
+
+[PR19](https://github.com/sonan0721/Daedalus/pull/19)의 exact head `e3056f0fe1692ea2f3ade250f102b2025fba8dbe`, CI checkout `956893762e812425edeff34eb1a76ffeb67d6e16`, squash main `c507835c9920cab4b075904e80f2d7f7980e8cdf`의 tree는 모두 `a6588117dc712296e1bad9b8698f5ff4d897fc44`다. 다섯 성공과 아래 extracted artifact 회귀 뒤 ready/squash했다. 보호 contexts3개·strict=true·squash-only 설정도 재조회했다. Publish skipped·tag/공개 Release 없음이다.
+
+docs run39004284192/job117313445986는 실제 Python70·문서 검사, Rust39004284148/job117313446006은 CPU359/0failed/22ignored·locked check/fmt/strict, managed39004284146/job117313446226은 실제 native bridge/managed integration을 통과했다. release39004284190의 Linux117313446297/Mac117313446501는 각각 packaged CPU62/1.062378초·62/4.612823초를 통과했다. Linux audio linkage도 성공했다. staged binary SHA-256은 Linux `907f889d66112be7bffab900e272485fb40017ffb4685bdea3a3cbebb0172784`, Mac `73961a47103d00bb8ba6ea4414451c17d4c1965bbdc86aa625380502dd5fcdb0`다.
+
+실제 Mac artifact12090148045를 내려받았다. archive `daedalus-0.1.0-aarch64-apple-darwin-20261017T045435Z-506aa951a12a4036bfee7e29c0913927.tar.gz` SHA-256은 `76f24f5bd69fe8ea2417a3ad9b6031c63c223b9cac3e2227e2148849d7c5a5f5`다. checksum·embedded manifest/file hash·dirty=false·exact CI checkout과 extracted CPU/offline audio를 기존 archive verifier로 확인했다. 추출 binary는 위 Mac SHA와 같다. local package rebuild나 별도 smoke backend는 추가하지 않았다.
+
+그 binary에 기존 helper의 assets/view/models/sprites/audio/native-audio/preparation/activation 조합을 한 번 실행해 실제 M3 Pro/Metal의72/72·21.72137초를 확인했다. native finite voice도 실제 Ended였다. loopback/이 시도에 대한 새 사용자 가청 확인은 아니며 과거 audio 실패 원인은 여전히 미확정이다. 새 stage API는 별도 library GPU19로 검증했으며, 이 기존 CLI 회귀가 host activation을 연결했다는 뜻은 아니다.
+
+| 보존한 raw | SHA-256 |
+| --- | --- |
+| `p03-render-ci-rust-root-attempt01.log` | `b3bc748dfc57ac1f9ebe985e623f76344c55dc945a90e805fafa5347226df281` |
+| `p03-render-ci-release-root-attempt01.log` | `914e71bfbf6fd8ea9647805bf8e739c6a0a1f4ed838b73d0240a0cc68ab32a29` |
+| `p03-render-ci-docs-root-attempt01.log` | `be934e5f1283604b011a7e68ac85425a3c0e6140ba974b7b8b8fa128f987de01` |
+| `p03-render-ci-download-root-attempt01.log` | `03c2240e80e88358f38c99b362ac267a52c80334514ad78fe279ba0088d6174a` |
+| `p03-render-ci-archive-verify-root-attempt01.log` | `7d8b17a882c811fe07b0948f275f86f1a60364186594275c41b832e130d3b404` |
+| `p03-render-ci-macos-native-root-attempt01.log` | `c82696af29bebb58c48efed38cf1b9495a7f91e9b8f2ee9fdb931be57fb1f24c` |
+| `p03-render-ci-merge-root-attempt01.log` | `95b2254e568ee8e79609352a8661439deb4e6c61e97daa91599596e0450feced` |
+
+main c507835의 docs39004551395·Rust39004551392·managed39004551438·release39004551409도 성공했다. main package Mac117314235028/Linux117314235276 성공·Publish117314461500 skipped를 확인했다. status raw `p03-render-main-checks-root-attempt01.log` SHA-256은 `e7a5356b0af5a63b3ce34f332ae363383ce8a3cc01240f865ddef936be891268`다. 추가 hardware 실행으로 세지 않는다.
+
+main release raw `p03-render-main-release-root-attempt01.log` SHA-256은 `d77d13c4f0f34404ab17793fb287c7f96bf8437395203f421126029cd899103e`다. 두 main staged binary도 위 PR19의 Mac/Linux hash와 각각 같고 packaged CPU62가 통과했다. 같은 binary bytes에 장치 검사를 다시 반복하지 않았으며 새 archive 전체가 동일하다는 뜻은 아니다.
+
+이 근거로 b.3.2/2a/2b library 체크만 인수했다. b.3.3의 실제 host·window bootstrap/부분 초기화 회수·SDK·같은 authority의 실제 present ACK와 전체 b.3/P03/D1/D2/D3는 계속 미완료다. 다음 branch는 `feat/native-project-host`이며 exact API/오류 소유권을 먼저 문서화한다.
+
+## 다음 host의 auto-trait 설계 probe
+
+remote CI를 기다리는 동안 Luna D가 `/tmp`의 작은 Rust source만 작성해 기존 artifact에 rustc metadata probe를 실행했다. production/test/manifest/lock/dependency 변경이나 추가 Cargo build, runtime/GPU/audio 초기화는 없다. service Send+Sync·private Arc Send, PacketCpuOwner Send, CpuFrameHandle/PacketStageInput Send+Sync, PacketRenderer/Renderer Send가 해당 feature 조합에서 compile됐다. root도 probe source와 raw hash를 대조했다. 실제 host의 안전한 종료·device 마지막 drop·frame 선점은 여전히 별도 검증이다.
+
+source `/tmp/daedalus-host-traits-luna-attempt01.rs` SHA-256은 `757bba9247137ed946b31ac6552d285dea7176fcce25f9f7529d51f70dce6902`, raw `p03-host-traits-luna-attempt01.log`는 `670854115b876c9dd389e2f9530928149f5a211821e8f2d8fafa055c51cf824d`다. renderer default+test-fixtures+window artifact `libdaedalus_renderer-5638dc27dcc90085.rlib` SHA-256은 `84611d768570ed177e3403a951e7485e84ff97c2036505590682eb2423ef1aa3`, runtime audio+native-audio artifact `libdaedalus_runtime-bda12bd485c4cc76.rlib`는 `06d9d7b83b9bca96a797963076f98bd1e33eebe1624f3c11259f259f669a7c4f`다. 새 host crate 자체의 compile 결과로 보고하지 않는다.
+
+## 실제 host 연결 전의 owner 계약
+
+새 [native renderer owner 수명](../03-architecture/native-renderer-owner-lifecycle.md)은 초기화 중 실패를 완성 PacketRenderer/NoDevice 둘로 뭉개지 않기 위해 만들었다. source 감사와 Luna read-only 리뷰를 거쳐 DeviceRequest/RendererPartial/RendererReady/PacketPartial/PacketReady를 분리하고, 고정 base/lazy handle·stage paired create·app 내부 catch·항상 owner를 반환하는 managed 결과를 계약으로 정했다. 실제 구현·주입 오류/panic·장치 종료 시험은 아직 수행하지 않았다.
+
+첫 bounded 코드 task는 renderer owner와 stage partial pair이며 창/host 코드는 후속이다. 기존 CPU/GPU planner·legacy 생성자를 공통화해 코드 복제를 피하고 stage마다 새 thread/새 recovery framework를 만들지 않는다. 체크리스트 3.3a/b/c/d는 모두 열린 상태다. 같은 사용자 가청 답변을 새 테스트나 추가 확인으로 중복 계산하지 않는다.
+
+[Managed packet 창](../03-architecture/managed-packet-window.md)은 첫 실제 frame 없이 GPU loading을 표시하고 stage 준비/actual-present event를 분리하기 위해 추가했다. root는 Luna의 read-only 제안을 검토해 payload capacity1·원래 payload 반환, 별도 cancel-through atomic watermark, host가 발급하는 checked local key, noncoalescing stage event와 generation 내 latest-only present를 정했다. Busy 입력은 canonical CPU owner에서 다시 투영하며 import/prepare를 반복하지 않는다. window와 owner 파일을 분리하고 공통 export 소유자를 C로 고정해 동시 편집/compile 반복을 줄인다. 이 계약은 실제 창 인수 결과가 아니다.
+
+계약 MD 검사 raw는 각각 `p03-owner-contract-docs-root-attempt01.log` (`f7fd468050944985eb1c6095b5d9f7c21acf94cf67f35c15d7315902663727f8`), `p03-managed-window-contract-docs-root-attempt01.log` (`452474e1b1efce79f31b803b4394578c29af0329cd39b6c0f20a1f2bbc9bf417`), `p03-host-start-contract-docs-root-attempt01.log` (`48734e350678601b2a390f21201cf94444aa52c22d6f557cf828ed94062ea80f`)로 모두 exit0이다. 이 세 실행은 문서/링크 검사이며 새 source의 compile/기능 통과 근거가 아니다.
+
+코드 소유권은 C(renderer/packet/staging/owner·공통 export), A(window/하위 module), D(새 host source/외부 SDK integration tests)로 나눴다. D는 C/A의 focused compile 동안 manifest/Cargo.lock을 바꾸지 않는다. root가 공개 계약·리뷰·단일 검증 lease를 조정한다. 새 host의 기본 feature는 장치 없이, window는 opt-in이며 serde/별도 transport framework·새 registry dependency는 추가하지 않는 안을 채택했다. 실제 구현/테스트 결과는 뒤에 별도로 기록한다.
+
+source 리뷰로 계약의 두 과도한 표현도 고쳤다. WindowGpuOwner가 감싼 PacketRenderer에는 drain까지 필요한 source/frame pin이 실제로 남고, 일반 cache/stage retirement의 GPU handle drop은 기존 render 호출 thread에서 발생할 수 있다. 이번 작업은 초기화·fatal pair panic·창 종료 반환을 보존하는 범위이며 모든 정상 GPU 해제를 worker로 옮겼다는 주장이 아니다. 또 managed present에 실제 view-projection 행렬을 추가해 host가 camera 수학을 복제하지 않게 했고, CPU owner가 기존 authority frame mailbox를 직접 읽어 큰 snapshot을 coordinator에서 교체/해제하는 새 경로를 줄이는 방향으로 계약을 구체화했다. 실제 성능 개선율과 성공 여부는 미측정이다.
+
+후속 WIP 리뷰는 shared FIFO8/blocking result send가 stop/device drain을 막을 수 있는 초안을 거부하고 lane별 capacity1·관측까지 보유하는 결과 slot으로 고쳤다. 실제 saturation/stop 검증은 후속이다. 또 GPU owner 반환 try-lock 경합을 facade field/mem::forget으로 넘기는 초안 대신 단일 publisher의 one-shot 설치 slot을 계약에 명시했다. code가 이 계약을 만족하고 실제 종료 검사를 통과하기 전 host 인수는 열어둔다. renderer 오류 주입은 동일한 필드 대입마다 hook을 복제하기보다 서로 다른 소유권 전이·전체 고정 handle 보유를 검사하도록 표를 명시적으로 수정했으며 미실행 경계는 구분한다.
+
+S90은 pinned Rust1.94.0 source를 확인해 get 비대기와 set의 경쟁 초기화 시 대기 가능성을 분리했다. host의 private 단일 publisher 전제를 코드로 유지해야 하며 표준 type의 일반 wait-free 보장으로 바꾸지 않는다. 현재 온라인 rustdoc은1.99.1이고 versioned rustdoc 접근 실패도 출처 등록부에 남겼다.
+
+초안의 CPU worker 종료 조건에는 owner poll 이후 UI publication이 일어나면 returned flag만 보고 수신 전에 종료할 수 있는 경합도 있었다. 실제 take/drain 관측과 publication을 분리하도록 계약·Luna 작업을 수정했다. 아직 재현/수정 시험 통과로 기록하지 않는다. 같은 검토에서 facade Drop 뒤 오류 slot의 미관측 ACK가 cleanup을 영구 유지하지 않는지도 검사 항목으로 추가했다.
+
+## Owner/managed window 구현 중간 검증
+
+아래는 host/CLI 통합 전 WIP의 focused 결과다. 최종 source/전체 회귀 인수를 대신하지 않는다. Luna C가 단일 Cargo/GPU lease로 실행했고 root가 raw footer/hash를 대조했다. 실제 adapter는 Apple M3 Pro/Metal/IntegratedGpu다.
+
+| raw log | 실제 결과 | SHA-256 |
+| --- | --- | --- |
+| `p03-owner-gpu-owner-luna-attempt03.log` | request error·awaited request panic(모두 handle 없음), post-device/base partial, packet buffer/group partial, RendererReady validation error, 지정 worker의 ready owner drop의 7개 통과 | `85b629f226ca8590c66c28ec2f2c8110be4561d1610a1df83f1794ad7bf6af99` |
+| `p03-owner-gpu-lazy-luna-attempt02.log` | lazy layout/shader interruption 2개 통과 | `230b8d376b571f6ce17cbe863b533a9957cd79922346630d22815b1722b1ab17` |
+| `p03-owner-gpu-staged-all-luna-attempt02.log` | 기존 staged GPU와 새 paired-create 중단을 포함해 11개 통과 | `da5381eff1060aabba2042bd0208cafa5bd93b86a3f029247fd55c03591515b1` |
+| `p03-owner-clippy-luna-attempt04.log` | renderer no-default + test-fixtures strict Clippy exit0 | `50c1c57715dc9d31cbe32175c44ab2236f214940506fc3d8eff3bfaf32de6741` |
+
+오류 주입의 panic 출력은 catch와 owner 보존을 검사하는 예상 입력이며 전체 명령은 exit0이다. paired-create의 geometry vertex→index·texture→view·default texture→view 세 하위 경우는 한 테스트 안에 있고 위11개에 포함한다. 같은 owner subset·재실행을 합산해 unique 통과 수를 늘리지 않는다. 실제 surface 생성/표시·window 반환·host ACK/종료는 이 시험의 범위 밖이다.
+
+all-feature no-run 첫 시도는 A 소유 window의 import/borrow/privacy/derive 오류로 실패했다(`p03-owner-allfeatures-luna-attempt01.log`, `b6f0f09afd8cb930965a67a9995962342647b0f18af5f87557f22144bc0e32e7`). 수정 후 두 번째도 test fixture closure의 mutable borrow와 unused mut으로 실패했다(`p03-owner-allfeatures-luna-attempt02.log`, `1b849d5dd6fb5d41b82196d27313e6db04ecd90c96b54c9869b32b54a5cc879b`). A가 두 번째 수정을 마치고 파일을 재동결했다. 후속 성공은 별도 raw로 남긴다. 실패 기록을 덮어쓰지 않았다.
+
+one-shot disposition 계약의 문서 검사 `p03-host-disposition-contract-docs-root-attempt01.log`는 exit0·SHA-256 `d9beddccf1e755199accd39ccce1f77cbaa1cba3aefef1c0586774d87a591224`다. 이는 코드 기능 통과가 아니다.
+
+첫 all-feature CPU 실행은 83통과/1실패였다(`p03-owner-allfeatures-cpu-luna-attempt01.log`, `d74928310fa81b1fe0d612433f411fe5e5d353d595d3f6283fbe454ef6a14a15`). root가 source를 대조한 결과 content의 `sha256:<64hex>` 71바이트 digest를 새 managed identity가 진단 문자열처럼64바이트로 자르는 production 오류였다. 테스트의 identity 비교를 약하게 하지 않고 stage admission/present/summary와 host의 동일한 truncation 경로를 모두 바로잡도록 계약과 Luna 작업을 수정했다. 기존 packet validator의 형식 검증을 재사용한다. 수정 후 성공은 별도로 기록한다.
+
+### Renderer 구현 commit의 최종 focused 근거
+
+실제 digest를 그대로 보존하고 기존 packet validator를 crate 내부에서 공통 사용하도록 수정했다. 새 managed public API를 추가하면서 기존 packet/legacy API·기본값은 유지했다. owner in-place 초기화와 stage paired-create 보존은 같은 renderer helper를 사용한다. 아래는 renderer source 동결 뒤의 근거이며 host/CLI 코드는 아직 포함하지 않는다.
+
+| raw log | 결과 | SHA-256 |
+| --- | --- | --- |
+| `p03-owner-allfeatures-cpu-luna-attempt03.log` | CPU85통과/0실패·장치28ignored. 실제 CPU owner fixture의 포화/연결해제 원본 payload 반환·bootstrap camera·취소 중 active pose·invalid startup·71바이트 digest 보존 포함 | `d21731d6933da7430172c5c03f9bf600ad53c9618ca11162e767c9dc49f03bb5` |
+| `p03-owner-allfeatures-clippy-luna-attempt03.log` | renderer all-target/all-feature strict Clippy exit0 | `0b061833708ae6481de85a274c765f19a85eb17f58b67aa394e76252684b8b3f` |
+| `p03-owner-renderer-fmt-luna-attempt01.log` | renderer package fmt check exit0 | `5af79323d6d020951ab4e2d01e8a197d8c5013eebe165e44f1d1041372bcd61c` |
+| `p03-host-renderer-full-gpu-root-attempt01.log` | root가 전체 ignored renderer 명령을 한 번 실행. 실제 Metal library28+PNG capture1=29통과/0실패 | `7209ad719355ac6bf283115b13b377e07ce397ba7bcdd00a3840fee71044c2e8` |
+
+마지막 명령은 `cargo test -p daedalus-renderer --all-features --locked -- --ignored --nocapture --test-threads=1`이다. 이전 owner7/lazy2/staged11 subset과 기존 model/sprite/alpha/legacy capture를 모두 포함하므로 이29개에 subset 수를 더하지 않는다. 실제 adapter는 Apple M3 Pro/Metal/IntegratedGpu이며 root가 출력된 metal-roughness PNG의 세 구와 바닥을 시각 확인했다. 이미지 확인은 상용 비주얼 품질 인수가 아니다.
+
+앞선 strict Clippy01은 dead code·unused variable·조건문 정리를 요구했고02는 정리 뒤 unused import를 발견했다. raw `p03-owner-allfeatures-clippy-luna-attempt01.log` (`1e0b251b7eff255b7697134ea973ec906703bf0d81b65a4c94e027b5dbbd45c3`)와02를 보존했으며03이 최종 성공이다. 별도 focused digest 재실행은 위85개에 포함한다. renderer snapshot의 CPU/Metal 통과와 실제 새 managed 창/host 연결 통과를 혼합하지 않는다.
+
+C가 renderer lease를 반환한 뒤 root가 전체 Metal 회귀를 실행했다. 종료 후 D에게 새 host manifest/workspace member/Cargo.lock의 단독 편집·focused Cargo lease를 넘겼다. 기존 target cache를 재사용하고 새 registry dependency·추가 cold workspace·새 smoke framework를 만들지 않는다. 공개 Rust SDK start/attach/Step/Realtime/stop 및 실제 worker 포화/반환/Drop 시험은 source 작성 뒤 실행 대기 중이다. 전체 workspace·managed·CLI 실제 창/교체/ACK·CI/packaged 검증과 3.3a/b/c/d 최종 인수는 아직 남았다.
+
+검증한 renderer source는 `cf86707`로 commit/push했다. host source/manifest는 이 commit의 인수 범위에 포함하지 않았다. A의 후속 read-only CLI 감사는 host Closed event가 Empty/Busy와 합쳐져 CPU frame 요청이 계속되는 초안을 발견했고 D가 수정 중이다. report에는 last actual-present만 있고 legacy accepted_packet/final shutdown 보고를 채울 근거가 부족한 것도 확인했다.
+
+그래서 [CLI activation 연결 계약](../03-architecture/native-project-view-activation.md)을 새로 만들고 explicit activation branch·동일 host·redundant preparation 허용·activation+audio 효과 전 거부·report v2를 동결했다. 기존 runtime publication token을 queue ingress 관측에 재사용하고 기존 service의 SessionShutdownReport를 빌려 종료를 보고한다. queued 값을 UI accepted/present로 꾸미지 않는다. 별도의 identity type/큰 final packet/새 smoke framework를 만들지 않는 선택이다. 문서 검사 `p03-host-cli-adapter-contract-docs-root-attempt01.log`는 exit0·SHA-256 `d590abdf4b7d7d3d56e09d39359528323fbab37fb92bd8e74f2691d6eed72102`다. A는 CLI source만, D는 host와 manifests/lock/Cargo만 소유하도록 후속 구현을 나눴다.
+
+추가 source 감사는 CPU Busy memoization이 취소/currentness보다 먼저 return해 held alias가 계속 남으면 superseded lease를 해제하지 않는 초안을 발견했다. 같은 장부 상태의 반복 prepare를 줄이는 최적화에도 매 poll의 취소 검사는 유지하도록 계약을 구체화했다. D에게 실제 held-alias Busy 취소/동일 lease 재개·canonical stage_input 재투영 검사와 수정을 맡겼으며 성공으로 선기록하지 않는다.
+
+report v2의 오류 경로는 compact identity/dimensions만 확보한 경우 실제 view/행렬을 null·actual_view_available=false로 명시하기로 했다. 성공 outcome의 actual view와 혼합하거나 source camera로 복원하지 않는다. 후속 host 리뷰는 창 종료의 최신 present 관측을 이전 pending ACK Applied가 덮어쓸 수 있는 순서도 발견해 same-session present_sequence 단조성을 계약·검사에 추가했다. 아직 실제 통합 통과는 아니다.
+
+bootstrap 리뷰에서는 후보 stage의 gate가 initial DeviceReady뿐이어서 첫 실제 initial frame보다 빠른 candidate BeginStage가 renderer의 active+1 검사에서 실패할 수 있는 초안도 발견했다. 후보 CPU 준비는 병렬로 허용하되 window의 실제 active 관측 뒤 StageInput을 보내고 first frame을 우선하도록 계약·Luna 작업에 추가했다. CLI control pump의 무조건 join도 finished 관측/유한 polling 뒤 join으로 바꾸도록 요청했다. source 리뷰에서 찾은 수정 사항이며 실행 증거는 후속이다.
+
+## 공개 host API의 집중 검사와 다음 통합 경계
+
+Luna D는 같은 service의 Manual/Realtime clock·외부 SDK에서 이름 붙일 수 있는 public accessor type·실제 worker의 Busy/취소/회수와 Drop을 구현했다. 아래는 root가 원본 footer/hash와 실행된 test 이름을 대조한 focused 결과다. 기본과 all-feature의 중복 사례를 합산하지 않는다.
+
+| raw log | 결과 | SHA-256 |
+| --- | --- | --- |
+| `p03-host-test-allfeatures-luna-attempt12.log` | unit10+외부 public API3=13통과 | `80fd5ce7b0c1c49ef5588d94fad406c83ab892596eaed0c1c2e8b2e6c2d44bf4` |
+| `p03-host-test-no-default-luna-attempt07.log` | unit7+외부 public API3=10통과. 당시 window-off dead-code 경고는 남음 | `19a2205bfff8148b708d29255d2c326693b38130b0b6385dbacac5d52fa4605c` |
+| `p03-host-clippy-allfeatures-luna-attempt04.log` | all-target/all-feature strict Clippy exit0 | `3503d8e6e446da4e95b7a1b0ec882b94923a302cb0362724a7d14e3f8cd70674` |
+| `p03-host-test-default-luna-attempt01.log` | C의 manifest 연결 뒤 같은 기본10통과 | `2428ae77cd3d47bb130cb109ac569d27e6d05a19465d12c2ec8b5e4f693beec7` |
+| `p03-host-example-check-luna-attempt01.log` | public SDK `native_host_smoke` example compile exit0. 창 실행은 아님 | `d4e86f9827d14ef7c13852e7ede04762a4124b22599c532d8556b7459d12f2c7` |
+| `p03-host-clippy-default-luna-attempt01.log` | exit101. window-off 미사용 field/helper와 조건문 진단 보존, 수정 후 재검사 대기 | `0c0c70330d42abdd8f25c75dd9b79817ec77a2e626ae18c2bd1751810a15d6bd` |
+
+실제 worker 시험은 prepared result의 관측 ACK를 보류해도 반환 owner를 먼저 drain하고, ACK 후 종료하는 순서를 확인했다. 여기의 owner는 NoDevice variant이며 실제 device drain은 앞선 renderer GPU 시험과 구분한다. owner poll 직후 publication 경합·facade Drop 뒤 failure slot·실제 CPU prepare 실패 뒤 worker 종료도 포함한다. held-alias Busy 상태에서는 취소 시 같은 lease를 해제하고, alias 회수 뒤에는 같은 candidate로 재개하는 각각의 시험이 통과했다. bootstrap stage gate와 오래된 ACK의 last-present 덮어쓰기 방지는 작은 상태 정책 시험이며 실제 창에서 빠른 candidate와 첫 frame을 경쟁시킨 근거는 아직 아니다.
+
+앞선 host 실패 시도도 보존한다. fixture 파일명 `project.json`을 실제 규격 `daedalus.project.json`으로 고쳤고, CPU prepare 실패의 실제 host 진단 code에 기대를 맞췄다. Busy fixture는 Stage 전에 lease가 있다고 가정한 오류를 실제 Prepare→Stage→lease로 수정했다. no-default attempt06의 초기 lease 일회 조회는 실제 transient Busy를 허용하지 않아 실패했으며 bounded retry로 고친07이 위 성공이다. 실패 fixture를 production 한도 완화로 통과시키지 않았다.
+
+C가 Cargo/manifests/lock 단독 lease를 이어받아 CLI optional host 연결과 공개 SDK example을 작성한다. D의 default lint 정리는 owned source에만 제한하고 C가 동결 뒤 재검사한다. `cargo tree`에서 no-default host에도 renderer를 통한 wgpu dependency가 남음을 확인했다. 기본 API의 비장치 약속은 runtime device/window/audio 초기화 없음이며 dependency graph에서 wgpu 제거가 아니다.
+
+AI가 final report 전에 실제 표시를 관측하도록 기존 protocol2 attachment에 직접 `view_status` read를 추가하는 계약도 동결했다. 별도 actor/ticket/상태 복제 없이 같은 host control의 compact status를 읽는다. ingress queue 관측과 실제 present, 완전한 성공 view와 compact 오류 metadata를 분리한다. `--view --asset-activation` 조합은 기존 smoke fixture/JSONL을 재사용해 같은 세션의 source 변경→실제 새 present→old charge 회수를 검증할 예정이다. 아직 실행 결과가 아니며 별도 batch PNG를 실제 창의 변경 픽셀 증거로 쓰지 않는다.
+
+실제 desktop 픽셀 검사를 위해 local computer-use skill(`/Users/danny/.agents/skills/computer-use/SKILL.md`)을 읽었다. 두 환경 override가 없어 선택한 `orca skills get computer-use` 실행은 exit127, `zsh:1: command not found: orca`로 실패했다. 지침의 “If the selected executable cannot run, report its exact error and stop”에 따라 이 경로를 중단했다. tool 응답에 오류가 남아 있으며 별도 raw 실행 로그를 만들었다고 하지 않는다. 다른 executable로 우회하지 않았고 native 창 픽셀 검증은 열린 상태다. SDK 실제 창 실행·CLI 연결·전체 workspace/managed·CI/package와 P03/D1/D2/D3는 계속 미완료다.
+
+문서 검사 첫 시도 `p03-host-public-api-docs-root-attempt01.log`는 이 local skill 절대 경로를 repository link로 쓴 탓에 실패했다(SHA-256 `99db214e5759221db02f7a2400d7f3754d7b826b88d5aa0da4a83fc781f77b0a`). 재현 환경 설명의 코드 경로로 바꾸고 후속 검사를 별도 실행한다.
+
+수정 뒤 `p03-host-public-api-docs-root-attempt02.log`는 exit0·SHA-256 `135632fd8e4ade9df7ebcebcc8c32895de7c966e841dd57a022d29393805bcba`다. 문서 검사는 source compile/제품 인수 근거와 구분한다.
+
+실제 SDK 실행 전 root source 리뷰는 두 추가 오류를 발견했다. window 성공 후 poisoned host status를 session1의 가짜 Failed status로 바꾸던 경로는 owner 반환 뒤 typed status_poisoned 오류로 고치도록 요청했다. 또 managed 창은 같은 packet을 매 redraw마다 새 present sequence로 보고하지만 host가 첫 ACK 뒤 pending publication을 지워 후속 정상 재표시를 unknown으로 처리할 수 있었다. 마지막 신뢰 token/key 하나를 작은 metadata로 보존하고 정확한 identity를 검증하는 계약을 추가했다. 큰 frame/source pin·새 publication·재전송으로 우회하지 않는다. 실제 SDK 실행은 수정/집중 검사 뒤로 미루고 Manual publication을500ms 더 관측하도록 검증 계획을 바꿨다. 이 발견은 source 근거이며 아직 실행 실패/수정 성공으로 보고하지 않는다.
+
+A의 CLI/protocol/Python source가 동결된 뒤 D의 host 수정 동안 C의 비어 있는 검증 lease를 잠시 넘겨받아 root가 Python 전체 discovery를 실행했다. `p03-host-python-root-attempt01.log`는72통과/0실패·unittest11.948초/runner12.118초·SHA-256 `d0d892e53a8dec4b91065f58b48f8b9debbdc504578629837d3b343ae9d979b4`다. 실제 CLI/GPU가 아닌 stub process·schema·기존 package/docs 검사를 포함한다. Cargo/hardware와 겹치지 않았고 종료 후 C에게 lease를 반환했다. 이 실행을 native source 교체 통과로 세지 않는다.
+
+같은 대기 구간에 C가 의존 없는 기존 bridge/managed 회귀를 실행했고 root가 원본을 대조했다. locked bridge build, pinned .NET10.0.402 Release build(경고0/오류0), 실제 Rust-backed self-test, native round-trip/module lifecycle 두 integration scenario가 모두 통과했다. 순서대로 `p03-host-managed-{bridge,release,selftest,integration}-luna-attempt01.log`의 SHA-256은 `a99a9156df136850d9d7fe6899965e5649370108c659a6f277c44fa8975feca6`/`586056b53e62fd953ecbe48d39613bcc9ed8c2b350d74b7d668ece6233f93850`/`c3aa500c113c9f3b28631633b19f4c470bfb2c95236c69880a0b96aedd64c9b8`/`9cf2f020c293a928130e8c2e0f716925477246ef50f6ac64f1b0381a1f63ab4f`다. managed/bridge/runtime source를 바꾸지 않았으며 새 native host의 C# attach 인수는 아니다. 관련 source 변경이 없으면 이 회귀를 다시 실행하지 않는다.
+
+추가 host 리뷰는 close 요청을 실제 ViewClosed로 선보고하던 경로와 initial GPU Ready가 ViewRunning을 덮어쓰는 상태 보고 오류도 수정 대상으로 찾았다. 요청 intent와 실제 channel Closed/run_view 반환을 분리하고, 첫 실제 표시 뒤 실행 상태를 보존하도록 Luna에 배정했다. 또 ResultMailbox는 delivered flag를 slot 잠금 전에만 확인해, 그 사이 consumer가 기존 payload를 take한 뒤 producer가 두 번째 payload를 넣을 수 있었다. 같은 nonwaiting slot guard 안에서 delivered를 재확인해 관측 ACK 전 용량1 예약을 지키도록 요청했다. can_publish/fully-acknowledged도 같은 stale precheck를 점검한다. 이 항목들은 source 감사 결과이며 후속 결정적/통합 검사 전 성공으로 기록하지 않는다.
+
+CLI adapter의 오류 변환도 추가 검토했다. window outcome Ok·actor StopRequested만으로 exit0을 반환하면 host coordinator/CPU failure를 report에 기록하고도 성공할 수 있었다. 최종 report 보존 뒤 실제 host code/message로 비영 종료하도록 계약을 명시하고 A의 해당 파일만 잠시 재개방했다. C가 CLI를 컴파일하기 전에 다시 동결한다. read-only live-capture 감사는 현재 managed window의 실제 metadata/SurfaceTexture를 재사용하되 새 readback·image credit·artifact 수명이 필요함을 확인했다. 기존 capture 문서를 현재 host 소유권에 맞췄고 live_capture=false/픽셀 미검증 상태는 유지한다.
+
+
+## 공개 native host의 집중 인수와 실제 창 실행
+
+Luna source를 동결한 뒤 root가 raw completion/footer와 SHA-256을 대조했다. 기본 feature의 host는4 unit+3 외부 public API=7통과, window 포함은14 unit+3 public API=17통과다. feature별 수를 합산하지 않는다. GPU owner 반환·후보 Busy 시나리오는 window 전용으로 제한했으므로 앞선 기본10통과 기록과 시험 설정이 다르다. 양쪽 all-target strict Clippy도 통과했다. 마지막 두 identity 비교 helper의 인수 개수 lint에는 field를 명시적으로 검증하는 이유를 붙인 함수 범위 허용만 적용했으며 비교 로직은 유지했다.
+
+| 집중 검사 | raw log (`dist/project-evidence/`) | SHA-256 |
+| --- | --- | --- |
+| host 기본7통과 | `p03-host-test-default-luna-attempt02.log` | `29f1cc360795419bf1288a4957d76704e935ca52b41eb44f66a0f906ffbdd139` |
+| host window17통과 | `p03-host-test-window-luna-attempt03.log` | `1bceaeeb4a9c5ae868a27c85cda4511d290f375db86b2edb25e1157e31758d3b` |
+| host 기본 strict | `p03-host-clippy-default-luna-attempt04.log` | `204c89b4e8348944af0c4d69809f858b9d9c3302bb508f8bbedaba7431185338` |
+| host window strict | `p03-host-clippy-window-luna-attempt03.log` | `3adc3f8f782e6f71677243daba34f0e24d7da7e334af9628dddd1161937963ae` |
+| CLI 기본35통과 | `p03-host-cli-default-test-luna-attempt01.log` | `d441725fa08a5b4562f2f0537f186174c69ce0b52df179a58bcf2ffec2264368` |
+| CLI 기본 strict | `p03-host-cli-default-clippy-luna-attempt01.log` | `a3300dac6c99808e9eb76358eaca0a314dfae2a0e3c278a02b71e8af009399b7` |
+
+실패 시도도 보존했다. 기본 strict02는 필수 초기 collect_bindings까지 cfg로 숨긴 오류·조건부 필드 접근·unused import,03은 수명 유지 lease와 window 전용 owner signal의 dead-code를 드러냈다. raw `p03-host-clippy-default-luna-attempt02.log`/`03.log`의 hash는 `c19b38d82bc27388b4d11caad7a418321ab05541fe6e660eb9135c0511e9553f`/`ec099ff76bba5e334c130d983e38cfcddd9beaa8bc577209e9096cf3be8c1fe2`다. window test02는 ManagedPresentedView/Summary 타입 연결과 private test helper 범위 때문에 compile에 실패했다(`67dc2355b4ef3326e2b3ccf25f6e2adb9825a9992e5d9b55d299fc3bde96e080`). window strict02의 두 인수 개수 진단 raw hash는 `4e07db361b4440f8a37f0a555bf05a2a0e4cf26679a4aeab6d253d51b27e435d`다. 해당 source 수정 후 위 성공 실행을 얻었으며 실패를 runtime 실패로 바꾸어 해석하지 않는다.
+
+공개 SDK `native_host_smoke --observe-ms 500`의 첫 실행은 링크 중 `ld: write() failed, errno=28 (No space left on device)`로 종료했다. 실행 당시 Luna가 확인한 여유 공간은145MiB였으며 example 자체는 실행되지 않았다. raw `p03-host-native-sdk-luna-attempt01.log` hash는 `024b4e9a8ff809ec3fdb50f568ac8c698ca7f90d9fcf943287c05428705d0ca6`다. root가 이후12GiB 여유를 확인했고 별도 삭제 없이 새로운 시도만 허가했다. Luna는 compiler 경쟁이 없고 공간이 유지되는 것을 확인한 뒤 단 한 번 새 raw로 실행했다.
+
+`p03-host-native-sdk-luna-attempt02.log`는 exit0·11.301초·SHA-256 `e11383af6cc0be086d9aadb89b2cda6ebb02709eb54e2e526725fab01258d27c`다. 기존 외부 model-runtime-project의 실제 session1/tick0/publication1/authority snapshot1/generation1, source digest `sha256:e6fa43a687b25ce65829dd0e958dd39b11f60137aa47e52d5ef3314cab694d52`, present sequence60과1280×720을 관측했다. 창을 닫은 뒤 같은 Manual authority의 Step이 tick0→1로 진행했고 닫힌 consumer의 Stage는 `asset_activation_unavailable`로 거부했다. 종료 보고는 stopped/StopRequested/final tick1이었다. 실제 창·반복 표시 metadata·동일 authority 생존·종료의 근거다. 실제 창 이미지의 픽셀 정확성·144fps·실행 중 새 세대 교체를 증명하지 않는다. 추가 오디오 실행은 하지 않았다.
+
+후속 CLI all-feature test01은 WireResult에 Debug를 요구한 expect_err와 불필요한 mut 진단으로 compile에 실패했다. raw `p03-host-cli-allfeatures-test-luna-attempt01.log` hash는 `e269711801ff5fab60cc0097652bcdd58731d4379ed15c0123cb777a1ecd18e5`다. Luna가 assertion을 match로 유지하고 mut만 제거해 해당 파일을 다시 동결했으며, 집중 재검증을 이어간다. CLI 실제 source 교체·live capture·전체 workspace/CI/두 package 인수와 P03/D1/D2/D3는 계속 미완료다.
+
+
+CLI 수정 후 all-feature50/50통과(`p03-host-cli-allfeatures-test-luna-attempt02.log`, SHA-256 `65627f3bc29aa722350c286eb832fc02b95190dc1122eda24b87488458e8d72f`)를 확인했다. 이어진 strict01은 default 생성 뒤 field 재할당 lint로 실패했고 raw hash는 `8eb9e329f384d9ab4f8bc77cf384208cae75adce5b22e096928dc7edec840aad`다. Luna가 같은 값의 struct initializer로 정리한 뒤 all-target/all-feature strict02와 build01이 모두 통과했다. 두 raw `p03-host-cli-allfeatures-{clippy-luna-attempt02,build-luna-attempt01}.log`의 hash는 `ff1b1e23795a540479846e375311960f71b98148f9bd1c6ef3620d4b85853fa6`/`4c53cf7bb5ec4bdef661186ca4665e27d0e0a6f7803bd68520d24b95cf972892`다. 실제 debug CLI hash는 `ac6fcdea7adc9ccc96d3d7b5244fedf7821a432d9e8f63012d4db7e8c330ebcf`이며 새 실제 CLI 교체 smoke/전체 workspace/CI/package 인수는 아직 실행 전이다.
+
+공통 host·manifest·lock·공개 SDK example과 그 집중 근거를 `de92a53`에 별도 commit해 작업 branch에 push했다. CLI adapter/control/Python smoke source는 통합 검증 전 working tree에 남겼다. 엔진 main 인수·전체 P03/D1/D2/D3 완료로 보고하지 않는다. 이 상태 기록은 현재 하위 gate와 제품 목표를 구분해 사용자에게 진행 상황을 설명하기 위한 것이다.
+
+
+## 사용자 요청에 따른 저장소 정리
+
+사용자가 저장소 정리를 요청했다. source·설계·현재 CLI·공개 에셋·기존 성공/실패 증거는 보존하고, 재생성 가능한 오래된 증분 캐시만 정리했다. 사전 조사에서 저장소 약25GiB 중 target이약24GiB였고 증분 캐시는약13GiB였다. `.git`은약3.5MiB이며 생성물/로그는 추적되지 않았다. 다른 프로젝트·전역 Cargo cache·branch/history·release tag는 건드리지 않았다.
+
+활성 compiler/runtime과 작업 agent가 없고 Cargo lease가 반환된 것을 확인한 뒤, 그룹 내부 최신 mtime이24시간보다 오래된 `target/debug/incremental`의274개 그룹을 제거하고189개는 유지했다. 삭제 대상의 파일별 할당량 합계 추정은6,190,133,248byte였으며 공유 block/hardlink와 시스템 활동 때문에 이를 실제 확보 공간으로 계산하지 않는다. `df -k`의 Available은11,586,124→15,987,596KiB로 관측되어 약4.20GiB 늘었다. 삭제 뒤 증분 캐시는7,615,108KiB, target 전체는20,824,980KiB였다. 의존성 object·현재 CLI·release 산출물은 유지했다.
+
+`repo-cleanup-incremental-root-attempt01.log`는 exit0·9.303초·SHA-256 `4d22a75a04fe63fd8c706d2f4e64cf533d2bdff6a1822cfb96ba52fa30e8d71d`다. 원본718개 evidence 파일과259개 추적/미추적 source 파일의 SHA-256, CLI `ac6fcdea7adc9ccc96d3d7b5244fedf7821a432d9e8f63012d4db7e8c330ebcf`, Git porcelain이 정리 전후 모두 같았다. 보존 검사를 통과한 뒤에만 이 Markdown과 관리 기준을 수정했다.
+
+사전 manifest `repo-cleanup-baseline-root-attempt01.json`의 SHA-256은 `6ca775fd1f760259e1e17d4f80a286e96b32ad9dbd56a43f16bc41a134035c35`, 사후 `repo-cleanup-preservation-root-attempt01.json`은 `c0af4d0a835b7c56318636fe6b8f728ce0d1fa0f09f85e9fd3799a932c7eccdf`다. 모두 `dist/project-evidence/`에 있으며 기존 raw를 덮어쓰지 않았다.
+
+
+이전 집중 검사를 통과한 CLI adapter/control·Python smoke6파일은 별도 기능 checkpoint로 보존한다. source hash가 위 성공 근거와 같은지 대조했으며 정리 때문에 전체 Cargo/GPU/audio 검사를 다시 실행하지 않는다. 실제 CLI 에셋 교체 smoke·전체 workspace/CI/package·화면 픽셀/성능·D1/D2/D3 인수는 계속 남아 있다. 이번 완료 대상은 저장소 정리와 변경 보존이다.
+
+
+CLI6파일은 `f16ea4e`의 별도 checkpoint commit으로 보존했다. Luna의 read-only 감사에서도 engine-only 변경 범위와 생성 에셋·비밀·바이너리 미포함을 확인했다. Python 두 파일은72통과 당시 hash와 같고, CLI50통과 뒤 마지막 activation struct initializer만 의미를 유지해 변경했다. 현재 정확한 activation bytes는 그 뒤 strict/build로 확인했으며50개 테스트가 그 마지막 bytes에서 다시 실행됐다고 주장하지 않는다. native SDK 창 실행 근거와 실제 CLI managed-view 교체 smoke는 서로 다른 검사다.
+
+정리 후 문서 검사 `repo-cleanup-docs-root-attempt01.log`와 workspace fmt 검사 `repo-cleanup-fmt-root-attempt01.log`도 exit0이다. SHA-256은 각각 `b2e96accbae47fd7cc58e92d2c73a276b1c17d023cf007050b001ab775182a4f`/`0c8fcef0bb6a707dd0954bfcad3a58509e24398d9e7f61bbfe2b974fa09aedbd`다. 이번 관리 기준은 기존 개발 파이프라인 문서에 추가해 별도 도구나 중복 설계 문서를 늘리지 않았다.

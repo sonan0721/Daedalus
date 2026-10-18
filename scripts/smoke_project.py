@@ -563,6 +563,120 @@ def _write_asset_preparation_view_project(directory: Path) -> None:
     scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
+def _write_managed_activation_view_project(directory: Path) -> None:
+    """Build one model-and-sprite scene with an authored orthographic camera."""
+
+    _write_asset_project(directory)
+    manifest_path = directory / "daedalus.project.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["name"] = "offline-managed-activation-view-smoke"
+    manifest_path.write_text(
+        json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+    atlas_colors = (
+        (230, 30, 20, 255),
+        (20, 210, 40, 255),
+        (25, 50, 235, 160),
+        (250, 220, 30, 0),
+    )
+    atlas_pixels = bytearray()
+    for y in range(16):
+        for x in range(16):
+            quadrant = (0 if y < 8 else 2) + (0 if x < 8 else 1)
+            atlas_pixels.extend(atlas_colors[quadrant])
+    (directory / "images" / "atlas.png").write_bytes(
+        _png_rgba_pixels(16, 16, bytes(atlas_pixels))
+    )
+
+    scene_path = directory / "scene.json"
+    scene = json.loads(scene_path.read_text(encoding="utf-8"))
+    scene["entities"] = [
+        {
+            "id": "entity:managed-activation-camera",
+            "name": "Managed Activation Orthographic Camera",
+            "components": [
+                {
+                    "id": "component:managed-camera-transform",
+                    "type_id": "daedalus.transform",
+                    "data": {
+                        "translation": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                },
+                {
+                    "id": "component:managed-camera-2d",
+                    "type_id": "daedalus.camera_2d",
+                    "asset_refs": [],
+                    "data": {"vertical_size": 10.0, "near": 0.1, "far": 100.0},
+                },
+            ],
+        },
+        {
+            "id": ENTITY_ID,
+            "name": "Managed Activation Textured Model",
+            "components": [
+                {
+                    "id": "component:managed-model-transform",
+                    "type_id": "daedalus.transform",
+                    "data": {
+                        "translation": [-1.5, 0.0, -3.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                },
+                {
+                    "id": "component:managed-model-renderer",
+                    "type_id": "daedalus.model_renderer",
+                    "asset_refs": ["asset:model-external"],
+                    "data": {"model": "asset:model-external"},
+                },
+            ],
+        },
+        {
+            "id": SPRITE_ENTITY_ID,
+            "name": "Managed Activation Atlas Sprite",
+            "components": [
+                {
+                    "id": "component:managed-sprite-transform",
+                    "type_id": "daedalus.transform",
+                    "data": {
+                        "translation": [1.5, 0.0, -5.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                        "scale": [1.0, 1.0, 1.0],
+                    },
+                },
+                {
+                    "id": "component:managed-sprite-renderer",
+                    "type_id": "daedalus.sprite_renderer",
+                    "asset_refs": ["asset:sprite-atlas"],
+                    "data": {
+                        "atlas": "asset:sprite-atlas",
+                        "region": "sprite:stone",
+                        "tint": [1.0, 1.0, 1.0, 1.0],
+                        "sorting_layer": 0,
+                        "order_in_layer": 0,
+                    },
+                },
+            ],
+        },
+    ]
+    scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    atlas_path = directory / "atlases" / "sprites.json"
+    atlas = json.loads(atlas_path.read_text(encoding="utf-8"))
+    atlas["regions"] = [
+        {
+            "id": "sprite:stone",
+            "rect": [0, 0, 16, 16],
+            "pivot": [0.5, 0.5],
+            "pixels_per_unit": 16.0,
+        }
+    ]
+    atlas_path.write_text(json.dumps(atlas, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
 def _write_sprite_view_project(directory: Path) -> None:
     """Build a small offline atlas scene with an authority-owned orthographic camera."""
 
@@ -3046,7 +3160,14 @@ def _asset_activation_apply_authority_transform(
     session: str,
     command_id: str,
     timeout: float,
+    initial_transform: dict[str, Any] | None = None,
+    target_transform: dict[str, Any] = TRANSFORM_AFTER_COMMAND,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    expected_initial_transform = initial_transform or {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0],
+    }
     initial = _asset_activation_get_transform(
         server,
         "asset-activation-transform-initial",
@@ -3059,12 +3180,7 @@ def _asset_activation_apply_authority_transform(
         and initial_entity.get("stable_id") == ENTITY_ID
         and initial_entity.get("revision") == "0"
         and initial_entity.get("handle", {}).get("session") == session
-        and initial_entity.get("transform")
-        == {
-            "translation": [0.0, 0.0, 0.0],
-            "rotation": [0.0, 0.0, 0.0, 1.0],
-            "scale": [1.0, 1.0, 1.0],
-        },
+        and initial_entity.get("transform") == expected_initial_transform,
         "activation smoke did not start with the authored live entity state",
         initial,
     )
@@ -3079,7 +3195,7 @@ def _asset_activation_apply_authority_transform(
             "target": {"stable_id": ENTITY_ID},
             "command_id": command_id,
             "expected_revision": "0",
-            "transform": TRANSFORM_AFTER_COMMAND,
+            "transform": target_transform,
         },
         timeout=timeout,
     )
@@ -3168,7 +3284,7 @@ def _asset_activation_apply_authority_transform(
         and entity.get("stable_id") == ENTITY_ID
         and entity.get("handle") == handle
         and entity.get("revision") == "1"
-        and entity.get("transform") == TRANSFORM_AFTER_COMMAND,
+        and entity.get("transform") == target_transform,
         "live transform state did not survive the authority Step",
         state,
     )
@@ -3183,6 +3299,7 @@ def _asset_activation_prepare_candidate(
     project: Path,
     session: str,
     timeout: float,
+    entity_count: int = 1,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     active_status, _ = _asset_activation_status(
         server,
@@ -3234,7 +3351,7 @@ def _asset_activation_prepare_candidate(
         session=session,
         active_source_digest=active_source_digest,
         active_cooked_accounted_bytes=active_cooked_bytes,
-        entity_count=1,
+        entity_count=entity_count,
         timeout=timeout,
         active_generation=active_generation,
     )
@@ -4742,6 +4859,11 @@ def _validate_native_view_report(
     latest_frame: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _expect(report.get("command") == "project_view", "native report is from another command", report)
+    _expect(
+        report.get("input_source") == "protocol",
+        "automated native project view did not report protocol-only input routing",
+        report,
+    )
     _expect(report.get("session") == expected_session, "native report belongs to another session", report)
     _expect(
         report.get("source_digest") == expected_source_digest,
@@ -4863,14 +4985,20 @@ def _project_view_command(
     report: Path,
     *,
     seconds: int,
+    input_source: str = "protocol",
     asset_preparation: bool = False,
+    asset_activation: bool = False,
     audio: bool = False,
 ) -> list[str]:
+    if input_source not in {"native", "protocol"}:
+        raise SmokeError("project view input_source must be 'native' or 'protocol'")
     command = [
         "project",
         "view",
         os.fspath(project),
         "--stdio-control",
+        "--input-source",
+        input_source,
         "--clock",
         "manual",
         "--seconds",
@@ -4886,7 +5014,256 @@ def _project_view_command(
         command.extend(["--audio", "offline"])
     if asset_preparation:
         command.append("--asset-preparation")
+    if asset_activation:
+        command.append("--asset-activation")
     return command
+
+
+_HOST_CPU_STATUS_FIELDS = (
+    "generation_slots_used",
+    "generation_slots_limit",
+    "frame_slots_used",
+    "frame_slots_limit",
+    "prepared_metadata_bytes",
+    "prepared_metadata_reserved_bytes",
+    "legacy_mesh_copy_bytes",
+    "legacy_mesh_copy_reserved_bytes",
+    "frame_bytes",
+    "frame_reserved_bytes",
+    "scratch_current_bytes",
+    "scratch_peak_bytes",
+)
+
+
+def _validate_managed_view_status(
+    status: dict[str, Any],
+    *,
+    expected_session: str | None = None,
+) -> dict[str, Any]:
+    expected_fields = {
+        "lifecycle",
+        "session",
+        "view_started",
+        "view_closed",
+        "active_generation",
+        "active_source_digest",
+        "queued_publication",
+        "last_presented",
+        "cpu",
+        "failure",
+        "live_capture",
+    }
+    _expect(
+        isinstance(status, dict) and set(status) == expected_fields,
+        "managed view_status has an unexpected or missing field",
+        status,
+    )
+    session = status.get("session")
+    generation = status.get("active_generation")
+    digest = status.get("active_source_digest")
+    _expect(
+        isinstance(session, str)
+        and session.isdecimal()
+        and int(session) > 0
+        and (expected_session is None or session == expected_session)
+        and isinstance(generation, str)
+        and generation.isdecimal()
+        and int(generation) > 0
+        and isinstance(digest, str)
+        and digest,
+        "managed view_status has invalid session or active source identity",
+        status,
+    )
+    _expect(
+        status.get("lifecycle")
+        in {
+            "initializing",
+            "initial_preparing",
+            "cpu_prepared",
+            "ready",
+            "view_running",
+            "view_closed",
+            "stopping",
+            "stopped",
+            "failed",
+        }
+        and type(status.get("view_started")) is bool
+        and type(status.get("view_closed")) is bool
+        and status.get("view_closed") <= status.get("view_started")
+        and status.get("live_capture") is False,
+        "managed view_status has invalid lifecycle or capture metadata",
+        status,
+    )
+    cpu = status.get("cpu")
+    _expect(
+        isinstance(cpu, dict)
+        and set(cpu) == set(_HOST_CPU_STATUS_FIELDS)
+        and all(type(cpu.get(field)) is int and cpu[field] >= 0 for field in _HOST_CPU_STATUS_FIELDS),
+        "managed view_status has invalid CPU logical accounting",
+        cpu,
+    )
+
+    queued = status.get("queued_publication")
+    if queued is not None:
+        _validate_host_publication_identity(queued, session=session)
+    presented = status.get("last_presented")
+    if presented is not None:
+        _validate_host_presented_summary(presented, session=session)
+    failure = status.get("failure")
+    _expect(
+        failure is None
+        or (
+            isinstance(failure, dict)
+            and set(failure) == {"code", "message"}
+            and isinstance(failure.get("code"), str)
+            and failure["code"]
+            and len(failure["code"].encode("utf-8")) <= 64
+            and isinstance(failure.get("message"), str)
+            and len(failure["message"].encode("utf-8")) <= 2_048
+        ),
+        "managed view_status has invalid bounded failure metadata",
+        failure,
+    )
+    return status
+
+
+def _validate_host_publication_identity(value: Any, *, session: str) -> dict[str, Any]:
+    fields = {
+        "session",
+        "tick",
+        "sequence",
+        "authority_snapshot_sequence",
+        "project_generation",
+        "source_digest",
+        "scene_revision",
+    }
+    _expect(
+        isinstance(value, dict)
+        and set(value) == fields
+        and value.get("session") == session
+        and all(
+            isinstance(value.get(field), str) and value[field].isdecimal()
+            for field in ("tick", "sequence", "authority_snapshot_sequence", "project_generation", "scene_revision")
+        )
+        and all(int(value[field]) > 0 for field in ("sequence", "project_generation"))
+        and isinstance(value.get("source_digest"), str)
+        and value["source_digest"],
+        "managed queued publication has invalid identity metadata",
+        value,
+    )
+    return value
+
+
+def _validate_host_presented_summary(value: Any, *, session: str) -> dict[str, Any]:
+    fields = {
+        "session",
+        "tick",
+        "sequence",
+        "authority_snapshot_sequence",
+        "project_generation",
+        "source_digest",
+        "present_sequence",
+        "physical_width",
+        "physical_height",
+        "render_view",
+        "view_projection",
+        "actual_view_available",
+    }
+    _expect(
+        isinstance(value, dict)
+        and set(value) == fields
+        and value.get("session") == session
+        and all(
+            isinstance(value.get(field), str) and value[field].isdecimal()
+            for field in ("tick", "sequence", "project_generation", "present_sequence")
+        )
+        and (
+            value.get("authority_snapshot_sequence") is None
+            or (
+                isinstance(value.get("authority_snapshot_sequence"), str)
+                and value["authority_snapshot_sequence"].isdecimal()
+            )
+        )
+        and int(value["sequence"]) > 0
+        and int(value["project_generation"]) > 0
+        and int(value["present_sequence"]) > 0
+        and isinstance(value.get("source_digest"), str)
+        and value["source_digest"]
+        and type(value.get("physical_width")) is int
+        and value["physical_width"] > 0
+        and type(value.get("physical_height")) is int
+        and value["physical_height"] > 0
+        and value.get("render_view") is None
+        and value.get("view_projection") is None
+        and value.get("actual_view_available") is False,
+        "managed last-presented summary has invalid identity or compact-view metadata",
+        value,
+    )
+    return value
+
+
+def _managed_view_status(
+    server: _JsonlProjectServer,
+    request_id: str,
+    *,
+    timeout: float,
+    expected_session: str | None = None,
+) -> dict[str, Any] | None:
+    response = server.request(
+        request_id,
+        {"op": "view_status"},
+        timeout=timeout,
+        allow_error=True,
+    )
+    if response.get("ok") is False:
+        error = response.get("error")
+        if isinstance(error, dict) and error.get("code") == "view_status_busy":
+            _expect(error.get("retryable") is True, "view_status_busy is not marked retryable", response)
+            return None
+        raise SmokeError(f"managed view_status failed: {json.dumps(response, sort_keys=True)}")
+    result = response.get("result")
+    _expect(
+        isinstance(result, dict) and result.get("kind") == "view_status",
+        "direct view_status returned another result kind",
+        response,
+    )
+    data = result.get("data")
+    _expect(isinstance(data, dict), "direct view_status omitted bounded status data", result)
+    return _validate_managed_view_status(data, expected_session=expected_session)
+
+
+def _wait_managed_view_status(
+    server: _JsonlProjectServer,
+    request_prefix: str,
+    predicate: Callable[[dict[str, Any]], bool],
+    *,
+    timeout: float,
+    expected_session: str,
+) -> dict[str, Any]:
+    duration = min(timeout, server.timeout)
+    deadline = time.monotonic() + duration
+    for attempt in range(int(duration * 100) + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        status = _managed_view_status(
+            server,
+            f"{request_prefix}-{attempt}",
+            timeout=remaining,
+            expected_session=expected_session,
+        )
+        if status is not None:
+            if status["lifecycle"] in {"failed", "stopped"}:
+                raise SmokeError(
+                    f"managed view reached {status['lifecycle']} before {request_prefix}: "
+                    f"{json.dumps(status, sort_keys=True)}"
+                )
+            if predicate(status):
+                return status
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.01, remaining))
+    raise SmokeError(f"timed out waiting for managed view status condition {request_prefix!r}")
 
 
 def _run_native_project_view(
@@ -5530,6 +5907,484 @@ def _run_native_project_close(
     return report
 
 
+def _validate_native_activation_view_report(
+    report: dict[str, Any],
+    *,
+    session: str,
+    source_digest: str,
+    generation: str,
+    tick: str,
+    status_presented: dict[str, Any],
+) -> dict[str, Any]:
+    _expect(
+        report.get("command") == "project_view"
+        and report.get("report_version") == 2
+        and report.get("presentation_mode") == "managed_activation",
+        "activation view wrote another report contract",
+        report,
+    )
+    _expect(
+        report.get("input_source") == "protocol",
+        "automated activation view did not report protocol-only input routing",
+        report,
+    )
+    _expect(
+        "accepted_packet" not in report
+        and report.get("session") == session
+        and report.get("source_digest") == source_digest
+        and report.get("source_entity_count") == 3
+        and report.get("authority_final_tick") == tick
+        and report.get("host_shutdown") == "stopped",
+        "activation report did not retain the committed host/session state",
+        report,
+    )
+    queued = report.get("queued_publication")
+    _validate_host_publication_identity(queued, session=session)
+    _expect(
+        queued.get("project_generation") == generation
+        and queued.get("source_digest") == source_digest
+        and int(queued["sequence"]) >= int(status_presented["sequence"]),
+        "activation report queued identity differs from the committed source/presentation",
+        {"queued_publication": queued, "status_presented": status_presented},
+    )
+    presented = report.get("last_presented")
+    presented_sequence = presented.get("present_sequence") if isinstance(presented, dict) else None
+    status_present_sequence = status_presented.get("present_sequence")
+    _expect(
+        isinstance(presented, dict)
+        and presented.get("session") == session
+        and presented.get("tick") == tick
+        and presented.get("project_generation") == generation
+        and presented.get("source_digest") == source_digest
+        and presented.get("sequence") == status_presented.get("sequence")
+        and isinstance(presented_sequence, str)
+        and presented_sequence.isdecimal()
+        and isinstance(status_present_sequence, str)
+        and status_present_sequence.isdecimal()
+        and int(presented_sequence) >= int(status_present_sequence)
+        and type(presented.get("physical_width")) is int
+        and presented["physical_width"] > 0
+        and type(presented.get("physical_height")) is int
+        and presented["physical_height"] > 0
+        and presented.get("actual_view_available") is True,
+        "activation report did not match the live actual-present status",
+        {"report_presented": presented, "view_status_presented": status_presented},
+    )
+    projection = presented.get("render_view", {}).get("projection")
+    _expect(
+        isinstance(projection, dict)
+        and projection.get("kind") == "orthographic"
+        and projection.get("vertical_size") == 10.0,
+        "managed activation present did not use the authored orthographic camera",
+        presented,
+    )
+    view_projection = presented.get("view_projection")
+    _expect(
+        isinstance(view_projection, list)
+        and len(view_projection) == 16
+        and all(type(value) in (int, float) and math.isfinite(value) for value in view_projection),
+        "managed activation report omitted the finite actual view-projection matrix",
+        presented,
+    )
+    window = report.get("window")
+    _expect(
+        isinstance(window, dict)
+        and type(window.get("rendered_frames")) is int
+        and window["rendered_frames"] > 0,
+        "managed activation window did not report any presented surface frames",
+        window,
+    )
+    _expect(
+        isinstance(report.get("resources"), dict)
+        and isinstance(report.get("asset_resources"), dict)
+        and isinstance(report.get("coordinator"), dict)
+        and report["coordinator"].get("protocol_detach_reason") is None,
+        "managed activation report omitted native resource or coordinator evidence",
+        report,
+    )
+    host_status = _validate_managed_view_status(report.get("host"), expected_session=session)
+    final_presented = report["last_presented"]
+    _expect(
+        host_status["active_generation"] == generation
+        and host_status["active_source_digest"] == source_digest
+        and isinstance(host_status.get("last_presented"), dict)
+        and host_status["last_presented"].get("sequence") == final_presented.get("sequence")
+        and host_status["last_presented"].get("present_sequence")
+        == final_presented.get("present_sequence"),
+        "final report host snapshot differs from live direct view_status",
+        {"report_host": host_status, "report_presented": final_presented},
+    )
+    return report
+
+
+def _run_native_asset_activation_view(
+    binary: Path,
+    *,
+    root: Path,
+    cwd: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    project = root / "managed-activation-view-project"
+    _write_managed_activation_view_project(project)
+    validate_args = ["project", "validate", os.fspath(project)]
+    validated = _json_output(_run_cli(binary, validate_args, cwd=cwd, timeout=timeout), validate_args)
+    _expect(
+        validated.get("valid") is True
+        and validated.get("entity_count") == 3
+        and validated.get("asset_count") == 6,
+        "managed activation fixture did not validate with its model, orthographic camera, sprite, and four formats",
+        validated,
+    )
+    initial_digest = validated.get("source_digest")
+    _expect(isinstance(initial_digest, str) and initial_digest, "managed activation fixture has no source digest", validated)
+
+    report_path = root / "managed-activation-view-report.json"
+    command = _project_view_command(
+        project,
+        report_path,
+        seconds=NATIVE_VIEW_SECONDS,
+        asset_activation=True,
+    )
+    server = _JsonlProjectServer(
+        binary,
+        project,
+        cwd=cwd,
+        timeout=timeout,
+        command=command,
+        protocol_version=VIEW_PROTOCOL_VERSION,
+        process_label="project view --asset-activation",
+    )
+    with server:
+        capabilities = server.request("managed-view-capabilities", {"op": "capabilities"})
+        cap_data = capabilities.get("result", {}).get("data")
+        _expect(
+            isinstance(cap_data, dict)
+            and cap_data.get("view_status") is True
+            and cap_data.get("asset_activation_enabled") is True
+            and "view_status" not in cap_data.get("operations", []),
+            "managed activation view did not expose only its direct view_status capability",
+            capabilities,
+        )
+
+        info = _asset_preparation_project_info(
+            server,
+            timeout=timeout,
+            request_prefix="managed-activation-project-info-initial",
+        )
+        session = info.get("session")
+        _expect(
+            isinstance(session, str)
+            and session.isdecimal()
+            and int(session) > 0
+            and info.get("source_digest") == initial_digest
+            and info.get("entity_count") == 3
+            and {item.get("source_id") for item in info.get("source_files", []) if isinstance(item, dict)}
+            == set(ASSET_PREPARATION_SOURCE_PATHS),
+            "managed activation host did not load the same complete four-format project",
+            info,
+        )
+        initial_activation_status, _ = _asset_activation_status(
+            server,
+            "managed-activation-status-initial",
+            timeout=timeout,
+        )
+        _asset_activation_validate_status(
+            initial_activation_status,
+            session=session,
+            active_generation="1",
+            active_source_digest=initial_digest,
+        )
+        _expect(
+            initial_activation_status.get("state") == "idle",
+            "managed activation host did not start with an idle replacement ledger",
+            initial_activation_status,
+        )
+
+        initial_view_status = _wait_managed_view_status(
+            server,
+            "managed-view-initial-present",
+            lambda value: value["view_started"]
+            and isinstance(value["last_presented"], dict)
+            and value["last_presented"].get("project_generation") == "1"
+            and value["last_presented"].get("source_digest") == initial_digest,
+            timeout=timeout,
+            expected_session=session,
+        )
+        initial_presented = initial_view_status["last_presented"]
+        _expect(
+            initial_view_status["lifecycle"] == "view_running"
+            and initial_presented["tick"] == "0",
+            "initial managed view did not present generation one at tick zero",
+            initial_view_status,
+        )
+
+        authored_transform = {
+            "translation": [-1.5, 0.0, -3.0],
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+            "scale": [1.0, 1.0, 1.0],
+        }
+        live_transform = {
+            "translation": [-1.0, 0.25, -3.0],
+            "rotation": [0.0, 0.0, 0.0, 1.0],
+            "scale": [1.1, 1.0, 1.0],
+        }
+        authority_state, entity_handle, authority_step = _asset_activation_apply_authority_transform(
+            server,
+            session=session,
+            command_id="930001",
+            timeout=timeout,
+            initial_transform=authored_transform,
+            target_transform=live_transform,
+        )
+        authority_view_status = _wait_managed_view_status(
+            server,
+            "managed-view-authority-present",
+            lambda value: isinstance(value["last_presented"], dict)
+            and value["last_presented"].get("project_generation") == "1"
+            and value["last_presented"].get("source_digest") == initial_digest
+            and value["last_presented"].get("tick") == "1"
+            and int(value["last_presented"]["sequence"]) > int(initial_presented["sequence"]),
+            timeout=timeout,
+            expected_session=session,
+        )
+        authority_presented = authority_view_status["last_presented"]
+        authority_frame = _v2_latest_frame(
+            server,
+            timeout=timeout,
+            request_prefix="managed-activation-frame-after-authority-step",
+        )
+        _expect(
+            authority_frame.get("session") == session
+            and authority_frame.get("tick") == "1"
+            and authority_frame.get("project_generation") == "1"
+            and authority_frame.get("source_digest") == initial_digest
+            and authority_frame.get("authority_snapshot_sequence")
+            == authority_presented.get("authority_snapshot_sequence"),
+            "native host authority frame and actual present diverged before replacement",
+            {"authority_frame": authority_frame, "view_status": authority_view_status},
+        )
+
+        # Change source image pixels, model node placement, atlas pixels, and sprite region
+        # metadata together. The same host then prepares, device-stages, and commits this
+        # candidate while its existing model pose, orthographic camera, and session stay live.
+        (project / "images" / "base.png").write_bytes(_png_rgba(2, 2, (44, 88, 220, 255)))
+        model_path = project / "models" / "external.gltf"
+        model_document = json.loads(model_path.read_text(encoding="utf-8"))
+        model_document["nodes"][0]["translation"] = [0.2, 0.0, 0.0]
+        _write_json(model_path, model_document)
+        changed_atlas_colors = (
+            (18, 32, 224, 255),
+            (240, 160, 24, 255),
+            (90, 18, 210, 160),
+            (20, 220, 90, 0),
+        )
+        changed_pixels = bytearray()
+        for y in range(16):
+            for x in range(16):
+                quadrant = (0 if y < 8 else 2) + (0 if x < 8 else 1)
+                changed_pixels.extend(changed_atlas_colors[quadrant])
+        (project / "images" / "atlas.png").write_bytes(
+            _png_rgba_pixels(16, 16, bytes(changed_pixels))
+        )
+        atlas_path = project / "atlases" / "sprites.json"
+        atlas_document = json.loads(atlas_path.read_text(encoding="utf-8"))
+        atlas_document["regions"][0]["pivot"] = [0.25, 0.75]
+        _write_json(atlas_path, atlas_document)
+
+        _, preparation_status, candidate = _asset_activation_prepare_candidate(
+            server,
+            "managed-activation-source-change",
+            command_id="930002",
+            project=project,
+            session=session,
+            timeout=timeout,
+            entity_count=3,
+        )
+        candidate_digest = candidate.get("source_digest")
+        _expect(
+            isinstance(candidate_digest, str)
+            and candidate_digest
+            and candidate_digest != initial_digest
+            and preparation_status.get("ready_candidate", {}).get("source_digest") == candidate_digest,
+            "image/model/sprite source edits did not produce one ready candidate identity",
+            candidate,
+        )
+        active_before_stage, _ = _asset_activation_status(
+            server,
+            "managed-activation-active-before-stage",
+            timeout=timeout,
+        )
+        _asset_activation_validate_status(
+            active_before_stage,
+            session=session,
+            active_generation="1",
+            active_source_digest=initial_digest,
+        )
+        activation_id, stage_command, staged_status = _asset_activation_stage_candidate(
+            server,
+            "managed-activation-source-change",
+            command_id="930003",
+            candidate=candidate,
+            session=session,
+            expected_active_generation="1",
+            active_source_digest=initial_digest,
+            timeout=timeout,
+        )
+        commit_command, commit_status = _asset_activation_commit_candidate(
+            server,
+            "managed-activation-source-commit",
+            activation_id=activation_id,
+            candidate=candidate,
+            command_id="930004",
+            expected_active_generation="1",
+            session=session,
+            timeout=timeout,
+        )
+        _expect(
+            staged_status.get("state") == "staged"
+            and stage_command.get("outcome", {}).get("kind") == "stage_accepted"
+            and commit_command.get("outcome", {}).get("kind") == "commit_applied"
+            and authority_step.get("tick") == "1"
+            and authority_state.get("observed_tick") == "1",
+            "replacement did not pass device-ready Stage and Commit after the authority pose was applied",
+            {"stage": stage_command, "commit": commit_command},
+        )
+
+        committed_view_status = _wait_managed_view_status(
+            server,
+            "managed-view-committed-present",
+            lambda value: isinstance(value["queued_publication"], dict)
+            and value["queued_publication"].get("project_generation") == "2"
+            and value["queued_publication"].get("source_digest") == candidate_digest
+            and isinstance(value["last_presented"], dict)
+            and value["last_presented"].get("project_generation") == "2"
+            and value["last_presented"].get("source_digest") == candidate_digest
+            and value["last_presented"].get("tick") == "1"
+            and int(value["last_presented"]["sequence"]) > int(authority_presented["sequence"]),
+            timeout=timeout,
+            expected_session=session,
+        )
+        committed_presented = committed_view_status["last_presented"]
+        _expect(
+            int(committed_view_status["queued_publication"]["sequence"])
+            >= int(committed_presented["sequence"]),
+            "managed last queued publication regressed behind the actual presented identity",
+            committed_view_status,
+        )
+
+        retirement_status: dict[str, Any] | None = None
+        retirement_memory: dict[str, Any] | None = None
+        deadline = time.monotonic() + min(timeout, server.timeout)
+        for attempt in range(int(min(timeout, server.timeout) * 100) + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            retirement_status, _ = _asset_activation_status(
+                server,
+                f"managed-activation-retirement-{attempt}",
+                timeout=remaining,
+            )
+            retirement_memory = _asset_activation_validate_status(
+                retirement_status,
+                session=session,
+                active_generation="2",
+                active_source_digest=candidate_digest,
+            )
+            if (
+                retirement_memory["retired_cooked_accounted_bytes"] == 0
+                and retirement_memory["retired_generation_count"] == 0
+            ):
+                break
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.01, remaining))
+        _expect(
+            isinstance(retirement_memory, dict)
+            and retirement_memory.get("retired_cooked_accounted_bytes") == 0
+            and retirement_memory.get("retired_generation_count") == 0,
+            "actual managed present did not release the previous source generation within the bounded wait",
+            retirement_status,
+        )
+
+        final_info = _asset_preparation_project_info(
+            server,
+            timeout=timeout,
+            request_prefix="managed-activation-project-info-final",
+        )
+        final_transform = _asset_activation_get_transform(
+            server,
+            "managed-activation-transform-final",
+            timeout=timeout,
+        )
+        final_entity = final_transform.get("entity")
+        latest_frame = _v2_latest_frame(
+            server,
+            timeout=timeout,
+            request_prefix="managed-activation-latest-frame-final",
+        )
+        _expect(
+            final_info.get("session") == session
+            and final_info.get("source_digest") == candidate_digest
+            and final_info.get("tick") == "1"
+            and final_info.get("entity_count") == 3
+            and final_transform.get("observed_tick") == "1"
+            and isinstance(final_entity, dict)
+            and final_entity.get("stable_id") == ENTITY_ID
+            and final_entity.get("handle") == entity_handle
+            and final_entity.get("revision") == "1"
+            and final_entity.get("transform") == live_transform
+            and latest_frame.get("session") == session
+            and latest_frame.get("tick") == "1"
+            and latest_frame.get("project_generation") == "2"
+            and latest_frame.get("source_digest") == candidate_digest,
+            "source activation changed the existing entity handle/pose/tick or failed to publish the committed source",
+            {"project_info": final_info, "transform": final_transform, "latest_frame": latest_frame},
+        )
+        _expect(
+            int(committed_presented["sequence"]) <= int(latest_frame["sequence"])
+            and int(latest_frame["sequence"])
+            <= int(committed_view_status["queued_publication"]["sequence"]),
+            "actual presented, runtime latest, and queued publication sequence order is inconsistent",
+            {
+                "presented": committed_presented,
+                "latest_frame": latest_frame,
+                "queued": committed_view_status["queued_publication"],
+            },
+        )
+
+        close = server.request("managed-activation-close", {"op": "close"}, allow_error=True)
+        _expect(close.get("ok") is True, "managed activation view rejected Close", close)
+        _expect(server.wait_for_exit(timeout=timeout) == 0, "managed activation view did not exit cleanly", close)
+
+    report = _validate_native_activation_view_report(
+        _read_native_report(report_path),
+        session=session,
+        source_digest=candidate_digest,
+        generation="2",
+        tick="1",
+        status_presented=committed_presented,
+    )
+    return {
+        "invocation_kind": "same_native_window_session_asset_activation",
+        "session": session,
+        "initial_source_digest": initial_digest,
+        "committed_source_digest": candidate_digest,
+        "initial_presented": initial_presented,
+        "authority_presented": authority_presented,
+        "candidate": candidate,
+        "activation": activation_id,
+        "commit_command": commit_command,
+        "committed_view_status": committed_view_status,
+        "retired_source_memory": retirement_memory,
+        "live_entity_handle": entity_handle,
+        "live_transform": live_transform,
+        "latest_frame": latest_frame,
+        "native_report": report,
+        "pixel_capture": None,
+        "pixel_capture_note": "window actual-present identity is verified; the smoke has no live-window pixel readback path",
+    }
+
+
 def _validate_native_liveness_report(
     report: dict[str, Any],
     *,
@@ -5943,6 +6798,7 @@ def run_project_smoke(
             checks.append("native_imported_voice_reaches_backend_completion")
 
         view_results: dict[str, Any] | None = None
+        managed_activation_view_results: dict[str, Any] | None = None
         if view:
             timed_view = _run_native_project_view(
                 binary,
@@ -5998,6 +6854,15 @@ def run_project_smoke(
                 checks.append("asset_preparation_active_view_and_cpu_candidate_share_session_and_source")
             else:
                 asset_preparation_view_results = None
+
+            if asset_activation:
+                managed_activation_view_results = _run_native_asset_activation_view(
+                    binary,
+                    root=root,
+                    cwd=working_directory,
+                    timeout=timeout,
+                )
+                checks.append("managed_activation_view_presents_and_retires_committed_source_in_same_session")
         else:
             asset_preparation_view_results = None
 
@@ -6052,6 +6917,8 @@ def run_project_smoke(
         result["asset_preparation"] = asset_preparation_results
     if asset_activation_results is not None:
         result["asset_activation"] = asset_activation_results
+    if managed_activation_view_results is not None:
+        result["managed_activation_view"] = managed_activation_view_results
     if asset_preparation_view_results is not None:
         result["asset_preparation_view"] = asset_preparation_view_results
     if model_results is not None:
@@ -6067,7 +6934,7 @@ def run_project_smoke(
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view/--models/--sprites add native GPU checks, --audio-native adds a native audio-device check, --asset-preparation exercises CPU asset preparation, and --asset-activation exercises headless CPU source replacement."
+        description="Run bounded CPU project lifecycle checks against an existing Daedalus CLI binary; --view/--models/--sprites add native GPU checks, --audio-native adds a native audio-device check, --asset-preparation exercises CPU asset preparation, and --asset-activation exercises headless CPU source replacement (combine with --view for same-window native activation)."
     )
     parser.add_argument("--cli", type=Path, required=True, help="already-built daedalus executable")
     parser.add_argument(
@@ -6114,7 +6981,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--asset-activation",
         action="store_true",
-        help="also exercise protocol-2 headless CPU project source Stage/Commit, replay, cancellation, and topology rejection",
+        help="also exercise protocol-2 headless CPU source replacement; combine with --view to verify same-window native Stage/Commit and actual presentation",
     )
     return parser.parse_args(argv)
 

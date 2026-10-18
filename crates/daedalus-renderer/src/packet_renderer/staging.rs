@@ -279,6 +279,14 @@ pub(super) struct StageState {
     last_terminal: Option<PacketStageStatus>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StagePanicPoint {
+    GeometryAfterVertex,
+    ImportedTextureAfterTexture,
+    DefaultTextureAfterTexture,
+}
+
 pub(super) struct StageRecord {
     id: PacketStageId,
     input: Option<PacketStageInput>,
@@ -289,6 +297,9 @@ pub(super) struct StageRecord {
     pending_victims: Option<StageVictims>,
     status: PacketStageStatus,
     created: StagedResources,
+    pending_geometry: Option<PendingGeometry>,
+    pending_texture: Option<PendingTexture>,
+    pending_default_texture: Option<PendingDefaultTexture>,
     create_tasks: VecDeque<CreateTask>,
     pending_upload_serial: Option<u64>,
     victims_applied: bool,
@@ -300,6 +311,8 @@ pub(super) struct StageRecord {
     create_calls_completed: usize,
     promoted: bool,
     expected: Option<ExpectedResources>,
+    #[cfg(test)]
+    panic_after_pair_handle: Option<StagePanicPoint>,
 }
 
 #[derive(Default)]
@@ -369,6 +382,35 @@ pub(super) struct StagedGeometry {
     vertex_uploaded_bytes: usize,
     index_uploaded_bytes: usize,
     initialized_serial: Option<u64>,
+}
+
+/// A first geometry buffer remains rooted here if creation of its paired index
+/// buffer unwinds. It is never visible to upload or draw planning.
+pub(super) struct PendingGeometry {
+    key: GeometryKey,
+    vertex: wgpu::Buffer,
+    index: Option<wgpu::Buffer>,
+    vertex_bytes: usize,
+    index_bytes: usize,
+    index_count: u32,
+    mesh_bytes: usize,
+    last_touch: u64,
+}
+
+/// Imported texture creation is retained until its view has also been made.
+pub(super) struct PendingTexture {
+    key: TextureKey,
+    texture: wgpu::Texture,
+    view: Option<wgpu::TextureView>,
+    upload: Arc<ModelTextureUpload>,
+    bytes: usize,
+    last_touch: u64,
+}
+
+pub(super) struct PendingDefaultTexture {
+    texture: wgpu::Texture,
+    view: Option<wgpu::TextureView>,
+    last_touch: u64,
 }
 
 pub(super) struct StagedTexture {
@@ -594,6 +636,48 @@ pub(super) enum CreateTask {
     BindGroup(TextureSamplerKey),
 }
 
+/// Accounts for the shared model/sprite texture layout once while planning a
+/// selected batch. The real task count stays dynamic: after the first pipeline
+/// creates the layout, the next pipeline task observes one fewer actual call.
+#[derive(Clone, Copy)]
+struct StageCreateCallPlanner {
+    shared_layout_missing: bool,
+    shared_layout_scheduled: bool,
+}
+
+impl StageCreateCallPlanner {
+    fn new(shared_layout_missing: bool) -> Self {
+        Self {
+            shared_layout_missing,
+            shared_layout_scheduled: false,
+        }
+    }
+
+    fn calls_for(
+        &mut self,
+        task: CreateTask,
+        actual_calls: usize,
+    ) -> Result<usize, PacketStageError> {
+        let creates_pipeline =
+            matches!(task, CreateTask::ModelPipeline | CreateTask::SpritePipeline);
+        let calls = if creates_pipeline
+            && self.shared_layout_missing
+            && self.shared_layout_scheduled
+            && actual_calls > 0
+        {
+            actual_calls
+                .checked_sub(1)
+                .ok_or(PacketStageError::CounterExhausted)?
+        } else {
+            actual_calls
+        };
+        if creates_pipeline && self.shared_layout_missing && actual_calls > 0 {
+            self.shared_layout_scheduled = true;
+        }
+        Ok(calls)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ProtectedResources {
     pub(super) geometries: HashSet<GeometryKey>,
@@ -615,6 +699,35 @@ impl StageState {
             active: None,
             last_terminal: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_pair_panic_for_test(&mut self, point: StagePanicPoint) {
+        self.active
+            .as_mut()
+            .expect("stage admitted before panic injection")
+            .panic_after_pair_handle = Some(point);
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_incomplete_pair_for_test(&self, point: StagePanicPoint) -> bool {
+        let Some(record) = self.active.as_ref() else {
+            return false;
+        };
+        match point {
+            StagePanicPoint::GeometryAfterVertex => record
+                .pending_geometry
+                .as_ref()
+                .is_some_and(|pending| pending.index.is_none()),
+            StagePanicPoint::ImportedTextureAfterTexture => record
+                .pending_texture
+                .as_ref()
+                .is_some_and(|pending| pending.view.is_none()),
+            StagePanicPoint::DefaultTextureAfterTexture => record
+                .pending_default_texture
+                .as_ref()
+                .is_some_and(|pending| pending.view.is_none()),
+        }
     }
 
     pub(super) fn blocks_ordinary_rendering(&self) -> bool {
@@ -660,6 +773,16 @@ impl StageState {
             .filter(|status| status.id == id)
             .cloned()
             .ok_or(PacketStageError::InvalidStageId)
+    }
+}
+
+#[cfg(test)]
+impl StageRecord {
+    fn panic_after_pair_handle_for_test(&mut self, point: StagePanicPoint) {
+        if self.panic_after_pair_handle == Some(point) {
+            self.panic_after_pair_handle = None;
+            panic!("injected staged resource pair panic after first handle");
+        }
     }
 }
 
@@ -1314,6 +1437,9 @@ impl PacketRenderer {
             pending_victims: (!victims_applied).then_some(victims),
             status,
             created,
+            pending_geometry: None,
+            pending_texture: None,
+            pending_default_texture: None,
             create_tasks,
             pending_upload_serial: None,
             victims_applied,
@@ -1325,6 +1451,8 @@ impl PacketRenderer {
             create_calls_completed: 0,
             promoted: false,
             expected: Some(expected),
+            #[cfg(test)]
+            panic_after_pair_handle: None,
         });
         self.staging_bookkeeping_bytes = stage_bookkeeping_bytes;
         self.asset_stats.bookkeeping_reserved_bytes = reserved_bookkeeping;
@@ -1412,8 +1540,10 @@ impl PacketRenderer {
             create_calls: 0,
             apply_victims: record.pending_victims.is_some(),
         };
+        let mut call_planner =
+            StageCreateCallPlanner::new(self.renderer.model_textures_layout().is_none());
         for task in &record.create_tasks {
-            let calls = self.stage_task_create_calls(*task)?;
+            let calls = self.planned_stage_task_create_calls(&mut call_planner, *task)?;
             let next_calls = batch
                 .create_calls
                 .checked_add(calls)
@@ -1511,8 +1641,10 @@ impl PacketRenderer {
         let mut checked_calls = 0usize;
         let mut sampler_creates = 0u64;
         let mut bind_group_creates = 0u64;
+        let mut call_planner =
+            StageCreateCallPlanner::new(self.renderer.model_textures_layout().is_none());
         for task in record.create_tasks.iter().take(batch.task_count) {
-            let calls = self.stage_task_create_calls(*task)?;
+            let calls = self.planned_stage_task_create_calls(&mut call_planner, *task)?;
             checked_calls = checked_calls
                 .checked_add(calls)
                 .ok_or(PacketStageError::CounterExhausted)?;
@@ -1539,6 +1671,7 @@ impl PacketRenderer {
                         || index_bytes == 0
                         || u32::try_from(mesh.index_count()).is_err()
                         || record.created.geometries.contains_key(key)
+                        || record.pending_geometry.is_some()
                     {
                         return Err(PacketStageError::CounterExhausted);
                     }
@@ -1557,12 +1690,15 @@ impl PacketRenderer {
                     if upload.image.decoded().width() == 0
                         || upload.image.decoded().height() == 0
                         || record.created.textures.contains_key(key)
+                        || record.pending_texture.is_some()
                     {
                         return Err(PacketStageError::CounterExhausted);
                     }
                 }
                 CreateTask::DefaultTexture => {
-                    if record.created.default_texture.is_some() {
+                    if record.created.default_texture.is_some()
+                        || record.pending_default_texture.is_some()
+                    {
                         return Err(PacketStageError::CounterExhausted);
                     }
                 }
@@ -1710,6 +1846,14 @@ impl PacketRenderer {
         Ok(calls)
     }
 
+    fn planned_stage_task_create_calls(
+        &self,
+        planner: &mut StageCreateCallPlanner,
+        task: CreateTask,
+    ) -> Result<usize, PacketStageError> {
+        planner.calls_for(task, self.stage_task_create_calls(task)?)
+    }
+
     fn create_stage_task(
         &mut self,
         id: PacketStageId,
@@ -1732,40 +1876,67 @@ impl PacketRenderer {
                     })
                     .ok_or(PacketStageError::InvalidStageId)?;
                 let (vertex_bytes, index_bytes) = geometry_buffer_bytes(&mesh)?;
-                let vertex = self.renderer.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Daedalus staged packet geometry vertices"),
-                    size: vertex_bytes as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let index = self.renderer.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Daedalus staged packet geometry indices"),
-                    size: index_bytes as u64,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
                 let index_count = u32::try_from(mesh.index_count())
                     .map_err(|_| PacketStageError::CounterExhausted)?;
+                let mesh_bytes = mesh.gpu_bytes();
+                let last_touch = self.touch_serial.saturating_add(1);
                 let record = self
                     .stage_state
                     .active
                     .as_mut()
                     .filter(|record| record.id == id)
                     .ok_or(PacketStageError::InvalidStageId)?;
-                record.created.geometries.insert(
+                if record.pending_geometry.is_some() || record.created.geometries.contains_key(&key)
+                {
+                    return Err(PacketStageError::InvalidStageId);
+                }
+                let vertex = self.renderer.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Daedalus staged packet geometry vertices"),
+                    size: vertex_bytes as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                record.pending_geometry = Some(PendingGeometry {
                     key,
+                    vertex,
+                    index: None,
+                    vertex_bytes,
+                    index_bytes,
+                    index_count,
+                    mesh_bytes,
+                    last_touch,
+                });
+                #[cfg(test)]
+                record.panic_after_pair_handle_for_test(StagePanicPoint::GeometryAfterVertex);
+                let index = self.renderer.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Daedalus staged packet geometry indices"),
+                    size: index_bytes as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let pending = record
+                    .pending_geometry
+                    .as_mut()
+                    .expect("vertex handle retained before index creation");
+                pending.index = Some(index);
+                let pending = record
+                    .pending_geometry
+                    .take()
+                    .expect("complete geometry pair retained");
+                record.created.geometries.insert(
+                    pending.key,
                     StagedGeometry {
                         resource: GeometryResource {
-                            vertex,
-                            index,
-                            index_count,
-                            bytes: mesh.gpu_bytes(),
+                            vertex: pending.vertex,
+                            index: pending.index.expect("geometry pair complete"),
+                            index_count: pending.index_count,
+                            bytes: pending.mesh_bytes,
                             initialization_serial: 0,
                             last_submission: 0,
-                            last_touch: self.touch_serial.saturating_add(1),
+                            last_touch: pending.last_touch,
                         },
-                        vertex_bytes,
-                        index_bytes,
+                        vertex_bytes: pending.vertex_bytes,
+                        index_bytes: pending.index_bytes,
                         vertex_uploaded_bytes: 0,
                         index_uploaded_bytes: 0,
                         initialized_serial: None,
@@ -1790,6 +1961,16 @@ impl PacketRenderer {
                     .ok()
                     .and_then(|count| count.checked_add(1))
                     .ok_or(PacketStageError::CounterExhausted)?;
+                let last_touch = self.touch_serial.saturating_add(1);
+                let record = self
+                    .stage_state
+                    .active
+                    .as_mut()
+                    .filter(|record| record.id == id)
+                    .ok_or(PacketStageError::InvalidStageId)?;
+                if record.pending_texture.is_some() || record.created.textures.contains_key(&key) {
+                    return Err(PacketStageError::InvalidStageId);
+                }
                 let texture = self
                     .renderer
                     .device
@@ -1807,32 +1988,64 @@ impl PacketRenderer {
                         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                         view_formats: &[],
                     });
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                record.pending_texture = Some(PendingTexture {
+                    key,
+                    texture,
+                    view: None,
+                    bytes: upload.byte_len,
+                    upload,
+                    last_touch,
+                });
+                #[cfg(test)]
+                record
+                    .panic_after_pair_handle_for_test(StagePanicPoint::ImportedTextureAfterTexture);
+                let pending = record
+                    .pending_texture
+                    .as_ref()
+                    .expect("texture handle retained before view creation");
+                let view = pending
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                record
+                    .pending_texture
+                    .as_mut()
+                    .expect("pending texture retained")
+                    .view = Some(view);
+                let pending = record
+                    .pending_texture
+                    .take()
+                    .expect("complete texture pair retained");
+                record.created.textures.insert(
+                    pending.key,
+                    StagedTexture {
+                        resource: TextureResource {
+                            _texture: pending.texture,
+                            view: pending.view.expect("texture pair complete"),
+                            bytes: pending.bytes,
+                            initialization_serial: 0,
+                            last_submission: 0,
+                            last_touch: pending.last_touch,
+                        },
+                        upload: Some(pending.upload),
+                        uploaded_bytes: 0,
+                        expected_bytes: pending.bytes,
+                        initialized_serial: None,
+                    },
+                );
+            }
+            CreateTask::DefaultTexture => {
+                let last_touch = self.touch_serial.saturating_add(1);
                 let record = self
                     .stage_state
                     .active
                     .as_mut()
                     .filter(|record| record.id == id)
                     .ok_or(PacketStageError::InvalidStageId)?;
-                record.created.textures.insert(
-                    key,
-                    StagedTexture {
-                        resource: TextureResource {
-                            _texture: texture,
-                            view,
-                            bytes: upload.byte_len,
-                            initialization_serial: 0,
-                            last_submission: 0,
-                            last_touch: self.touch_serial.saturating_add(1),
-                        },
-                        upload: Some(Arc::clone(&upload)),
-                        uploaded_bytes: 0,
-                        expected_bytes: upload.byte_len,
-                        initialized_serial: None,
-                    },
-                );
-            }
-            CreateTask::DefaultTexture => {
+                if record.pending_default_texture.is_some()
+                    || record.created.default_texture.is_some()
+                {
+                    return Err(PacketStageError::InvalidStageId);
+                }
                 let texture = self
                     .renderer
                     .device
@@ -1850,20 +2063,37 @@ impl PacketRenderer {
                         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                         view_formats: &[],
                     });
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                self.stage_state
-                    .active
+                record.pending_default_texture = Some(PendingDefaultTexture {
+                    texture,
+                    view: None,
+                    last_touch,
+                });
+                #[cfg(test)]
+                record
+                    .panic_after_pair_handle_for_test(StagePanicPoint::DefaultTextureAfterTexture);
+                let pending = record
+                    .pending_default_texture
+                    .as_ref()
+                    .expect("default texture retained before view creation");
+                let view = pending
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                record
+                    .pending_default_texture
                     .as_mut()
-                    .filter(|record| record.id == id)
-                    .ok_or(PacketStageError::InvalidStageId)?
-                    .created
-                    .default_texture = Some(TextureResource {
-                    _texture: texture,
-                    view,
+                    .expect("pending default texture retained")
+                    .view = Some(view);
+                let pending = record
+                    .pending_default_texture
+                    .take()
+                    .expect("complete default texture pair retained");
+                record.created.default_texture = Some(TextureResource {
+                    _texture: pending.texture,
+                    view: pending.view.expect("default texture pair complete"),
                     bytes: 4,
                     initialization_serial: 0,
                     last_submission: 0,
-                    last_touch: self.touch_serial.saturating_add(1),
+                    last_touch: pending.last_touch,
                 });
             }
             CreateTask::SpriteUvBuffer => {
@@ -3663,6 +3893,9 @@ mod tests {
                 failure: None,
             },
             created: StagedResources::default(),
+            pending_geometry: None,
+            pending_texture: None,
+            pending_default_texture: None,
             create_tasks: VecDeque::new(),
             pending_upload_serial: None,
             victims_applied: true,
@@ -3674,6 +3907,8 @@ mod tests {
             create_calls_completed: 0,
             promoted: false,
             expected: None,
+            #[cfg(test)]
+            panic_after_pair_handle: None,
         };
         drop(source_pin);
 

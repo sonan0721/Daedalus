@@ -234,6 +234,132 @@ fn imported_project_with_texture_dimensions(
     .expect("stage fixture should import through the public content path")
 }
 
+fn imported_mixed_model_sprite_project() -> daedalus_content::PreparedProject {
+    let mut binary = Vec::new();
+    let position_offset = binary.len();
+    for position in [[-0.6_f32, -0.5, 0.0], [0.6, -0.5, 0.0], [0.0, 0.6, 0.0]] {
+        for component in position {
+            binary.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    let position_bytes = binary.len() - position_offset;
+
+    let normal_offset = binary.len();
+    for _ in 0..3 {
+        for component in [0.0_f32, 0.0, 1.0] {
+            binary.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    let normal_bytes = binary.len() - normal_offset;
+
+    let uv_offset = binary.len();
+    for uv in [[0.0_f32, 0.0], [1.0, 0.0], [0.5, 1.0]] {
+        for component in uv {
+            binary.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    let uv_bytes = binary.len() - uv_offset;
+
+    let index_offset = binary.len();
+    for index in [0_u32, 1, 2] {
+        binary.extend_from_slice(&index.to_le_bytes());
+    }
+    let index_bytes = binary.len() - index_offset;
+
+    let model = serde_json::to_vec(&json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{
+            "attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2},
+            "indices": 3
+        }]}],
+        "buffers": [{"uri": "mesh.bin", "byteLength": binary.len()}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": position_offset, "byteLength": position_bytes},
+            {"buffer": 0, "byteOffset": normal_offset, "byteLength": normal_bytes},
+            {"buffer": 0, "byteOffset": uv_offset, "byteLength": uv_bytes},
+            {"buffer": 0, "byteOffset": index_offset, "byteLength": index_bytes}
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+             "min": [-0.6, -0.5, 0.0], "max": [0.6, 0.6, 0.0]},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
+            {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"},
+            {"bufferView": 3, "componentType": 5125, "count": 3, "type": "SCALAR"}
+        ]
+    }))
+    .expect("mixed model glTF should encode");
+
+    let mut encoded_png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded_png, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .expect("mixed sprite PNG header should encode");
+        writer
+            .write_image_data(&[
+                240, 40, 30, 255, 20, 250, 60, 255, 30, 80, 230, 255, 220, 190, 40, 255,
+            ])
+            .expect("mixed sprite pixels should encode");
+    }
+
+    let scene = serde_json::to_vec(&json!({
+        "schema_version": 1,
+        "revision": 1,
+        "entities": [
+            {"id": "entity:model", "components": [
+                {"id":"component:transform:model", "type_id":"daedalus.transform", "asset_refs":[],
+                 "data":{"translation":[-0.5,0.0,0.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0]}},
+                {"id":"component:model", "type_id":"daedalus.model_renderer", "asset_refs":["asset:model"],
+                 "data":{"model":"asset:model"}}
+            ]},
+            {"id": "entity:camera", "components": [
+                {"id":"component:transform:camera", "type_id":"daedalus.transform", "asset_refs":[],
+                 "data":{"translation":[0.0,0.0,10.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0]}},
+                {"id":"component:camera2d", "type_id":"daedalus.camera_2d", "asset_refs":[],
+                 "data":{"vertical_size":8.0,"near":0.1,"far":100.0}}
+            ]},
+            {"id": "entity:sprite", "components": [
+                {"id":"component:transform:sprite", "type_id":"daedalus.transform", "asset_refs":[],
+                 "data":{"translation":[0.5,0.0,0.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0]}},
+                {"id":"component:sprite", "type_id":"daedalus.sprite_renderer", "asset_refs":["asset:atlas"],
+                 "data":{"atlas":"asset:atlas","region":"region:full","tint":[1.0,1.0,1.0,1.0],"sorting_layer":0,"order_in_layer":0}}
+            ]}
+        ],
+        "assets": [
+            {"id":"asset:model","kind":"daedalus.model","uri":"models/mesh.gltf","metadata":{}},
+            {"id":"asset:image","kind":"daedalus.image","uri":"sprites/sheet.png","metadata":{
+                "schema_version":1,"role":"sprite_atlas_srgb","mip_policy":"none",
+                "sampler":{"min_filter":"nearest","mag_filter":"nearest","mipmap_filter":"none","wrap_u":"clamp_to_edge","wrap_v":"clamp_to_edge"}}},
+            {"id":"asset:atlas","kind":"daedalus.sprite_atlas","uri":"sprites/atlas.json","metadata":{"schema_version":1}}
+        ]
+    }))
+    .expect("mixed project scene should encode");
+    let manifest = br#"{"schema_version":1,"name":"mixed staged bootstrap","scene":"scene.json","presentation":{"clear":[0.02,0.03,0.04,1.0]}}"#;
+    let atlas = br#"{"schema_version":1,"image_asset":"asset:image","filter_policy":"nearest_no_mip_v1","regions":[{"id":"region:full","rect":[0,0,2,2],"pivot":[0.5,0.5],"pixels_per_unit":2.0}]}"#;
+    let mut resolver = ByteMapSourceResolver::from_bytes(BTreeMap::from([
+        ("models/mesh.gltf".to_owned(), model),
+        ("models/mesh.bin".to_owned(), binary),
+        ("sprites/sheet.png".to_owned(), encoded_png),
+        ("sprites/atlas.json".to_owned(), atlas.to_vec()),
+    ]))
+    .expect("mixed fixture source map should be valid");
+    let mut cache = MemoryCookCache::default();
+    prepare_project_with_assets(
+        manifest,
+        &scene,
+        &mut resolver,
+        &mut cache,
+        ImportLimits::default(),
+        &ImportCancellation::never(),
+    )
+    .expect("mixed model and sprite should import through public content path")
+}
+
 fn stage_asset_limits(max_in_flight: usize) -> PacketAssetLimits {
     PacketAssetLimits {
         max_in_flight_submissions: max_in_flight,
@@ -1533,6 +1659,61 @@ fn staged_cold_model_pipeline_group_is_atomic_at_four_creates() {
     let ready = poll_until(&mut renderer, &target, stage, None, PacketStageState::Ready);
     assert!(ready.create_calls_completed() >= 4);
     activate_frame(&mut renderer, &target, stage, frame);
+}
+
+#[test]
+#[ignore = "requires a native wgpu adapter; exercises cold mixed model/sprite staging and its first real frame"]
+fn staged_mixed_model_and_sprite_initial_generation_shares_layout_and_draws() {
+    let project = imported_mixed_model_sprite_project();
+    let session = SessionId::from_raw(41_226);
+    let (_cpu_owner, _generation, input, frame) =
+        cpu_generation_with_limits(&project, 1, session, PacketAssetLimits::default());
+    assert_eq!(input.model_draw_count(), 1);
+    assert_eq!(input.sprite_draw_count(), 1);
+
+    let mut renderer = packet_renderer(3);
+    assert!(renderer.renderer.model_textures_layout().is_none());
+    assert!(renderer.renderer.model_packet_mesh_pipeline().is_none());
+    assert!(renderer.renderer.sprite_packet_pipeline().is_none());
+    assert!(renderer.geometry.is_empty());
+    assert!(renderer.textures.is_empty());
+
+    let (target_texture, target_view) = target(&renderer, 64, 64);
+    let stage = renderer
+        .try_begin_stage(input, PacketStageLimits::default())
+        .expect("actual mixed model/sprite CPU generation should be admitted");
+    let first_pump = pump_once(&mut renderer, &target_view, stage, None)
+        .expect("the first mixed pipeline batch should submit");
+    assert_eq!(
+        first_pump.create_calls_completed(),
+        7,
+        "the cold batch creates two pipeline groups and their one shared texture layout"
+    );
+    assert!(renderer.renderer.model_textures_layout().is_some());
+    assert!(renderer.renderer.model_packet_mesh_pipeline().is_some());
+    assert!(renderer.renderer.sprite_packet_pipeline().is_some());
+
+    let ready = poll_until(
+        &mut renderer,
+        &target_view,
+        stage,
+        None,
+        PacketStageState::Ready,
+    );
+
+    assert!(ready.create_calls_completed() >= first_pump.create_calls_completed());
+    assert_eq!(ready.uploaded_bytes(), ready.total_upload_bytes());
+    assert!(renderer.renderer.model_textures_layout().is_some());
+    assert!(renderer.renderer.model_packet_mesh_pipeline().is_some());
+    assert!(renderer.renderer.sprite_packet_pipeline().is_some());
+
+    activate_frame(&mut renderer, &target_view, stage, frame);
+    assert!(renderer.ready_packet.is_some());
+    assert!(!renderer.geometry.is_empty());
+    assert!(!renderer.textures.is_empty());
+    assert!(renderer.asset_resource_stats().in_flight_submissions > 0);
+    drop(target_view);
+    drop(target_texture);
 }
 
 #[test]

@@ -462,7 +462,7 @@ fn build_report(
         "report_version":2,
         "presentation_mode":"managed_activation",
         "project_name":project.as_ref().map(|page| page.name.as_str()),
-        "source_digest":project.as_ref().map(|page| page.source_digest.as_str()),
+        "source_digest":status.map(NativeProjectHostStatus::active_source_digest),
         "source_schema_version":project.as_ref().map(|page| page.schema_version),
         "source_scene_revision":project.as_ref().map(|page| page.source_scene_revision.to_string()),
         "source_entity_count":project.as_ref().map(|page| page.entity_count),

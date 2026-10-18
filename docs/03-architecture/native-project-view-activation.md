@@ -72,3 +72,8 @@ ProtocolController의 Close는 host control.request_view_close에 연결한다. 
 Luna A는 CLI project_view.rs와 private activation child module/관련 tests, 필요한 최소 protocol helper visibility만 편집한다. D가 host/workspace manifests/Cargo.lock과 focused Cargo lease를 단독 소유한다. CLI dependency/window feature 연결은 D의 manifest phase 이후 조정한다. renderer/window source는 검증한 snapshot에서 동결한다.
 
 CPU 검사는 flag 효과 전 거부·redundant preparation·report v2의 의미와 범위를 확인한다. existing smoke helper에 같은 session의 실제 view 준비→source edit→Stage→Commit→actual pose/pixels/present ACK→회수와 close/stop 검사를 붙인다. fixture·별도 batch capture·CPU ready가 실제 native present를 대체하지 않는다. Rust SDK 공개 소비 검사와 CLI 실제 창 검사를 모두 통과해야 한다. hardware/전체 회귀/CI/package 인수 전 이 계약과 P03/D1/D2/D3는 미완료다.
+
+
+## 2026-10-18 final source identity 정정
+
+실제 교체 후 report v2의 top-level `source_digest`는 최종 host status의 `active_source_digest`를 사용한다. 시작 시 한 번 조회한 ProjectInfo digest를 복사하면 실제 gen2 present/queued/host와 다른 gen1을 보고하므로 올바른 final identity가 아니다. host status를 확보하지 못한 오류 report에서는 final digest를 null로 표시하고 초기 digest로 대체하지 않는다. project name·schema/revision/entity count의 시작 시 descriptive 정보와 최종 active identity의 의미를 구분한다. 실제 source resolver를 다시 읽거나 새 actor/전체 bindings scan으로 값을 계산하지 않는다. 기존 same-window 교체 smoke가 report의 최종 digest를 검사한다.

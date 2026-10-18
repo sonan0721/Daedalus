@@ -636,6 +636,48 @@ pub(super) enum CreateTask {
     BindGroup(TextureSamplerKey),
 }
 
+/// Accounts for the shared model/sprite texture layout once while planning a
+/// selected batch. The real task count stays dynamic: after the first pipeline
+/// creates the layout, the next pipeline task observes one fewer actual call.
+#[derive(Clone, Copy)]
+struct StageCreateCallPlanner {
+    shared_layout_missing: bool,
+    shared_layout_scheduled: bool,
+}
+
+impl StageCreateCallPlanner {
+    fn new(shared_layout_missing: bool) -> Self {
+        Self {
+            shared_layout_missing,
+            shared_layout_scheduled: false,
+        }
+    }
+
+    fn calls_for(
+        &mut self,
+        task: CreateTask,
+        actual_calls: usize,
+    ) -> Result<usize, PacketStageError> {
+        let creates_pipeline =
+            matches!(task, CreateTask::ModelPipeline | CreateTask::SpritePipeline);
+        let calls = if creates_pipeline
+            && self.shared_layout_missing
+            && self.shared_layout_scheduled
+            && actual_calls > 0
+        {
+            actual_calls
+                .checked_sub(1)
+                .ok_or(PacketStageError::CounterExhausted)?
+        } else {
+            actual_calls
+        };
+        if creates_pipeline && self.shared_layout_missing && actual_calls > 0 {
+            self.shared_layout_scheduled = true;
+        }
+        Ok(calls)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ProtectedResources {
     pub(super) geometries: HashSet<GeometryKey>,
@@ -1498,8 +1540,10 @@ impl PacketRenderer {
             create_calls: 0,
             apply_victims: record.pending_victims.is_some(),
         };
+        let mut call_planner =
+            StageCreateCallPlanner::new(self.renderer.model_textures_layout().is_none());
         for task in &record.create_tasks {
-            let calls = self.stage_task_create_calls(*task)?;
+            let calls = self.planned_stage_task_create_calls(&mut call_planner, *task)?;
             let next_calls = batch
                 .create_calls
                 .checked_add(calls)
@@ -1597,8 +1641,10 @@ impl PacketRenderer {
         let mut checked_calls = 0usize;
         let mut sampler_creates = 0u64;
         let mut bind_group_creates = 0u64;
+        let mut call_planner =
+            StageCreateCallPlanner::new(self.renderer.model_textures_layout().is_none());
         for task in record.create_tasks.iter().take(batch.task_count) {
-            let calls = self.stage_task_create_calls(*task)?;
+            let calls = self.planned_stage_task_create_calls(&mut call_planner, *task)?;
             checked_calls = checked_calls
                 .checked_add(calls)
                 .ok_or(PacketStageError::CounterExhausted)?;
@@ -1798,6 +1844,14 @@ impl PacketRenderer {
             CreateTask::SpriteUvBuffer | CreateTask::Sampler(_) | CreateTask::BindGroup(_) => 1,
         };
         Ok(calls)
+    }
+
+    fn planned_stage_task_create_calls(
+        &self,
+        planner: &mut StageCreateCallPlanner,
+        task: CreateTask,
+    ) -> Result<usize, PacketStageError> {
+        planner.calls_for(task, self.stage_task_create_calls(task)?)
     }
 
     fn create_stage_task(

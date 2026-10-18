@@ -275,6 +275,8 @@ strict 검사에서 찾은 큰 dispatch error는 최초 생성한 request를 한
 
 a.3에서는 coordinator·CPU owner·encoder를 각각 다른 source 소유자에게 배정하고, 같은 ignored API artifact의 version/hash를 공유한 뒤 구현한다. 첫 header 리뷰에서 빠진 renderer client·CPU ingress drain·실제 session binding·renderer/encoder readiness 전달을 source 결합 전에 고쳤다. 완료한 API02를 기준으로 독립 source 작업을 진행하고, crate 전체가 동결된 뒤 한 담당자만 Cargo를 실행한다. 이 방식은 재작성·cache/lock 경쟁을 줄이기 위한 조정이며 개발 시간 감소율을 실측한 것은 아니다. [host 작업 기록](../06-worklog/2026-10-18-live-capture-host.md)에 actual PNG/reader/shutdown 결과를 후속 기록한다.
 
+encoder의 최초 source 리뷰에서는 일반 PNG `write_image_data`가 압축 결과 전체를 임시 Vec로 만든다는 pinned 구현을 확인했다. 고정64KiB chunk의 streaming writer로 바꿔 요청·출력 파일 외의 큰 중간 배열을 피하고, output cap/hash를 실제 write마다 적용하도록 했다. source 수정/회귀 중이며 실제 메모리·대기 시간 개선율은 아직 측정하지 않았다. capture를 반복하는 AI 관찰 경로의 최적화이며 빌드 cache 효과와 구분한다.
+
 ## Rust 컴파일 가속 조사와 적용 순서
 
 2026-10-18 사용자의 Ninja/Make와 같은 가속 방법 질문에 따라 현재 source·toolchain·공식 자료를 확인했다. 이 절은 조사와 다음 측정 계약이며 가속 적용/개선 배율의 실측 결과가 아니다. 엔진 구현과 별개로 빌드 환경을 무작정 바꾸지 않고, 기존 Cargo lease 안의 예정된 검사에서 병목을 관찰한다.

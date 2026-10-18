@@ -19,6 +19,8 @@ A가 public/private DTO·constructor·error variants·getter를 먼저 동결하
 
 API02 합의 원본은 ignored `dist/project-evidence/p02-capture-host-api-02.md`, SHA-256 `df1addfb3f068bc75e526c752e4f81c615391ea2ee0082a179c995579d87c82c`다. 앞선 API01도 덮어쓰지 않았다. review에서 실제 session binding·CPU ingress-drain/renderer client·encoder와 renderer 상태 전달·실패 health/실제 종료 구분을 보완한 뒤 세 담당자의 source 착수를 확정했다. 이 artifact는 통신 중 가정을 맞추기 위한 header이며 실행 증거가 아니다.
 
+source 리뷰 뒤 private ingress는 borrowed pending-slot transaction으로 바뀌었고, CPU는 keyed encoder queued/active/result query로 중단된 submit을 대조한다. API02는 초기 합의 이력이며 최종 source의 hash·검증 범위는 동결 후 별도로 기록한다. 공개 capture API는 이 private 소유권 보완으로 바뀌지 않는다.
+
 ## 동결한 핵심 경계
 
 - capture opt-in default off, 기존 service/actor/consumer를 확장한다. actual renderer와 encoder bootstrap이 Ready인 뒤만 runtime Ready다.
@@ -31,6 +33,10 @@ API02 합의 원본은 ignored `dist/project-evidence/p02-capture-host-api-02.md
 - public native reader는 strong capability+immutable binding을 유지한다. registry는 weak interest+work만 유지하며 reader-held ACK/shutdown을 명시한다.
 
 ## 인수 상태
+
+초기 source 리뷰에서 CPU의 try API 뒤에 연결된 blocking metrics lock, 삭제할 entry를 IO 전에 local로 꺼내며 생긴 unwind 수명 공백, encoder 종료만으로 capture Stopped를 게시하는 조건을 발견했다. 각각 encoder 쪽 계측/CPU try 경계, 삭제 성공까지 durable ledger 유지, CPU의 전체 capture-drained 신호로 보완하도록 요청했다. renderer/encoder submit 직전 panic과 수락 뒤 panic도 실제 keyed state로 구분해야 하므로 nonwaiting reconciliation과 주입 회귀를 추가한다. 아직 수정 후 실행을 통과했다는 기록은 아니다.
+
+PNG 경로는 pinned `png0.18.1/src/encoder.rs`를 직접 대조했다. `write_image_data`는 압축된 image 전체를 Vec로 만든 뒤 writer에 전달하므로 capped writer만 두어도 그 임시 할당은 남는다. [공식 streaming API](https://docs.rs/png/0.18.1/png/struct.Writer.html#method.stream_writer_with_size)로 고정64KiB chunk를 사용하도록 수정 중이다. 실제 쓰인 bytes의 증분 hash·상한과 partial 정리는 유지한다. 확인한 registry source SHA-256은 `787f6f8922588a74436c76a3b2c2b5689206f7ed13a19a36227b8809710812ce`이며 access2026-10-18이다. 이는 source 기반 메모리 경로 보완이고 RSS/시간 감소율은 미측정이다.
 
 | Gate | 상태 |
 | --- | --- |

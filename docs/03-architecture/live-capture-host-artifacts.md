@@ -134,7 +134,7 @@ public capture Stopped도 encoder thread 종료만으로 게시하지 않는다.
 | Private 경계 | 고정할 소유권/호출 조건 |
 | --- | --- |
 | `RoutedCapture` | 원래 `Box<CaptureRequest>`와 coordinator가 실제 generation record에서 찾은 `ManagedStageKey`를 함께 전달. ingress Busy는 같은 struct/Box 반환. CPU가 generation 숫자로 stage key를 재구성하지 않음 |
-| `CaptureIngress` | 시작 전 만든 공유 slot1·OOB transfer fence. `try_send/try_take`는 nonwaiting. `close_transfer_fence`는 coordinator가 take한 요청의 transfer/typed 처분 뒤만 호출. `is_drained`는 fence closed AND slot empty이며 lock Busy는 false |
+| `CaptureIngress` | 시작 전 만든 공유 slot1·OOB transfer fence. coordinator는 `try_send_pending(&mut Option<Box<CaptureRequest>>, actual_key)`로 모든 fence/lock/capacity 검증 뒤만 원래 request를 take해 이동. CPU take도 nonwaiting. `close_transfer_fence`는 coordinator가 take한 요청의 transfer/typed 처분 뒤만 호출. `is_drained`는 fence closed AND slot empty이며 lock Busy는 false |
 | `CapturePublicationRegistry` | 실제 `PacketCpuOwner::status().frame_slots_limit`을 한도로 사용. frame 송신 전 same pointer/opaque identity/key를 idempotent 등록, expired Weak만 prune. selected lookup은 readback read/cleanup 전에 수행하고 Busy는 원래 handle 보존 |
 | `EncodeJob` | actual publication·**actual present_sequence**·view·format/encoding·ID·weak interest·독립 work lease와 move된 RGBA Vec. strong request/capability/responder를 encoder에 넘기지 않음 |
 | encoder client/owner | capacity1 job/result·Starting/Ready/Stopping/Stopped/Failed 상태. submit Busy는 같은 job/Vec 반환. request_stop은 OOB, owner try_finish는 is_finished 뒤만 join |
@@ -147,6 +147,8 @@ capture 모드의 renderer channel은 `NativeProjectHost::start`에서 CPU worke
 renderer client는 CPU owner 단독 소유다. CPU는 그 실제 상태를 runtime-neutral `CaptureHandoffState`로 변환해 기존 작은 pipeline status의 `renderer_state`에 nonwaiting 게시한다. Busy에는 최신 작은 상태를 유지해 재시도한다. coordinator는 같은 status에서 encoder/renderer 상태를 함께 읽고 양쪽 Ready를 확인해 runtime handoff를 연다. 별도 renderer client 복제나 또 하나의 status mailbox를 만들지 않는다. pipeline 시작은 실제 `SessionId`에도 묶으며, artifact registry가 비어 있을 때도 다른 session의 capability를 거부한다.
 
 partial/unpublished 파일은 실패 시 interest가 살아 있어도 삭제한다. CPU의 pending request 자체가 strong capability를 보유하기 때문에 weak interest 소멸만 기다리면 실패 cleanup이 자기 자신을 기다릴 수 있다. encoder는 partial path·work lease·정리 상태를 per-job catch 바깥에 설치하고, 실제 삭제 뒤만 work lease를 해제한다. 성공해 공개된 파일만 weak interest 소멸을 기다린다. responder Busy는 같은 completion을 재시도하며 다시 encode하지 않는다. responder Closed/timeout 뒤 request를 처분해도 독립 cleanup work lease는 실제 GPU/파일 정리까지 남는다.
+
+CPU submit 중 unwind로 수락 여부가 불확실하면 renderer의 실제 keyed cell과 encoder의 keyed queued/active/result 상태를 nonwaiting 조회해 구분한다. 빈 lane을 작업 중으로 영원히 기다리거나, 실제 수락한 작업의 work lease를 먼저 반환하지 않는다. encoder는 active ID/stage도 RGBA 이동 전에 durable record로 보관한다. 성공/실패 compact completion을 처음 확정한 뒤 responder Busy에는 같은 값을 유지하며 timeout·취소에 대한 최종 판정은 runtime도 계속 수행한다.
 
 host startup 오류에도 fence가 열린 채 CPU owner를 남기지 않는다. coordinator spawn 이전 실패는 transfer를 소유한 startup guard가 detach/이미 취득한 요청 처분/transfer-fence close를 마감한다. encoder thread 생성 뒤 다른 초기화가 실패한 경우에도 encoder stop·private spool 정리 ownership을 남긴다. 이 경계는 constructor 성공 경로와 별도로 회귀한다. source/actual publication 비교는 public session/generation/digest getter를 사용하는 host의 한 helper로 통일하며 runtime private matcher의 visibility를 추측해 호출하지 않는다.
 

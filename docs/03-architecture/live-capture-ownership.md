@@ -12,13 +12,15 @@ source 감사는 현재 `RequestProgress`가 terminal result와 normal credit을
 
 기존 `NativeProjectActivationService::start_with_render_consumer(options, config)`를 유지한다. sibling `start_with_render_consumer_and_capture(options, config)`는 같은 private start_mode·한 번 읽은 initial PreparedProject에서 `(service, generation_consumer_port, capture_handoff_port)`를 만든다. 기존 factory와 capture sink 없는 session은 CaptureUnavailable이며 Ready를 위조하지 않는다.
 
-`SessionOperation::CaptureFrame { at_least_tick, timeout }`은 normal ticket으로 Queued→Terminal을 진행한다. world command/CommandId/AuthorityAccepted가 아니다. 기존 normal ticket reserve와 별도 image slot을 둘 다 얻어야 수락한다. image ceiling은 session당1개이며 Step reserved lane과 독립이다. default5초/max30초와 pixel/raw/PNG ceiling은 전체 계약을 따른다. 실제 session·source generation/digest에 admission 시 bind하고 actor/renderer에서도 currentness를 재검사한다.
+`SessionOperation::CaptureFrame { at_least_tick: Option<Tick>, timeout: Option<Duration> }`은 normal ticket으로 Queued→Terminal을 진행한다. world command/CommandId/AuthorityAccepted가 아니다. 기존 normal ticket reserve와 별도 image slot을 둘 다 얻어야 queue에 수락한다. image ceiling은 session당1개이며 Step reserved lane과 독립이다. timeout의 None은5초, 0/30초 초과는 거부한다. pixel/raw/PNG ceiling은 전체 계약을 따른다.
 
-정확한 public type signature와 exhaustive match 변경 목록은 runtime 소유자가 공유하고 root가 동결한 뒤 작성한다. 아래 type 이름은 이 수명 계약의 예정 이름이며 아직 source API가 아니다.
+**Queue admission과 capture dispatch의 bind 시점을 구분한다.** `try_submit`은 actor 밖에서 실행되며 현재 authoritative generation/digest를 일관되게 읽는 기존 경계가 없다. 따라서 queue admission은 ID·deadline·normal/image reserve와 readiness를 고정하고, actor가 요청을 handoff로 dispatch하는 한 turn에서 자신의 실제 active generation/digest를 bind한다. `at_least_tick=None`의 floor는 그 turn의 실제 authority tick이다. explicit floor는 해당 최소 tick을 기다리며 actor를 막거나 Manual Step을 자동 실행하지 않는다. renderer 선택과 actor completion에서 source/currentness를 다시 검사한다. 오래된 latest-frame/render mailbox나 초기 ProjectInfo에서 source를 추측하지 않는다. 이는 client enqueue 시 source를 bind하려던 앞선 제안을 source 감사 뒤 수정한 것이다.
+
+runtime 소유자의 읽기 전용 API 제안을 root가 검토했다. 아래 경계와 factory/op/result의 형태로 첫 runtime 구현에 착수하며, renderer/host backend의 dependent source 작성 전 최종 type signature를 다시 공유한다. 아래 이름은 source 작성 전 계약이고 아직 구현된 public API가 아니다.
 
 | Type | 소유권과 공개 범위 |
 | --- | --- |
-| `CaptureArtifactId` | runtime이 admission 시 session/request sequence에서 발급하는 opaque ID. 실패 뒤에도 sequence를 재사용하지 않음. public constructor 없음. |
+| `CaptureArtifactId` | runtime이 admission 시 **전체 RequestTicketId(session/client/sequence)**에서 발급하는 opaque ID. sequence는 attachment별 값이므로 client를 생략하지 않음. 실패 뒤에도 ID를 재사용하지 않으며 public constructor 없음. |
 | `CaptureImageLease`/`CaptureWorkLease` | 하나의 image reserve를 공유하는 구체적인 작은 token. clone은 새 slot을 만들지 않고 마지막 실제 소유자까지 반환을 늦춤. 임의 Drop callback 없음. |
 | `CaptureArtifactCapability` | private `Arc<ArtifactInterest>`를 가진 Clone capability. interest가 image lease를 유지. ID/session getter만 제공하며 path/PNG payload/host type을 담지 않음. |
 | `CaptureInterestWeak` | capability가 만든 concrete weak 관측자. 살아 있는 interest 확인과 동일 capability 검증만 제공. 임의 upgrade/공개 생성/콜백으로 새 소유권을 만들지 않음. |
@@ -27,6 +29,10 @@ source 감사는 현재 `RequestProgress`가 terminal result와 normal credit을
 | `CaptureFrameResult` | exact selected frame/view/format·bounded PNG metadata·opaque capability. normal1MiB result에 image bytes/base64/임의 path를 넣지 않음. |
 
 `SessionRequestResult`의 기존 Clone/Debug/PartialEq 성질을 무심코 깨지 않는다. capability 비교는 identity를 비교하되, reader 획득의 검증은 실제 interest/registry binding도 확인한다. debug 출력은 PNG bytes·사용자 경로·큰 backing을 덤프하지 않는다. compact result의 실제 byte ceiling과 정상/Step/image reserve rollback은 새 variant에서도 검증한다.
+
+첫 `CaptureHandoffPort`는 `try_status`·`try_report_ready`·`try_report_unsupported`·`try_detach`·`try_take_request`의 nonwaiting 경계를 제공한다. Starting→Ready/Unsupported의 초기 보고는 한 번이며 Detached는 terminal이다. runtime native port는 신뢰 consumer 경계이며 CPU test의 Ready 보고를 실제 장치 capability로 보고하지 않는다. 실제 COPY_SRC/format 확인은 후속 renderer 소유다. responder loss는 private completion slot의 sender-interest 소멸로 actor가 감지해 typed terminal failure로 마감한다. UI callback에서 ticket cell mutex를 직접 호출하지 않는다.
+
+순서는 capability/clock/limits→queue 여유→normal session/client reserve→image reserve→enqueue/ticket counter 고갈 확인→성공 enqueue다. 거부의 RAII rollback과 ID 비소비를 검증하며, full ID를 발급한 성공 admission 뒤에는 재사용하지 않는다. capture는 inspect 권한을 사용하며 기존 public `SessionCapabilities` 구조체/default를 바꾸지 않는다. 최소 CLI exhaustive-result arm은 컴파일/compact metadata만 연결하고 wire capture parser·artifact path·live_capture=true는 backend/실제 PNG 전까지 추가하지 않는다.
 
 ## Cycle 없는 image·file 수명
 

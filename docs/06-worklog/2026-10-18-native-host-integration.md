@@ -138,3 +138,17 @@ strict/protected contexts3개와 제품 절차5개를 구분해 확인하고 rea
 ## 후속 capture 소유권 동결
 
 별도 branch에서 [capture 소유권 문서](../03-architecture/live-capture-ownership.md)를 추가했다. 만든 이유는 기존 RequestProgress reader·GPU map·encoder·file이 ticket ACK/timeout과 다른 수명을 가져 image credit이 조기에 반환되거나 registry가 strong capability를 영구 보유하는 문제를 설계 단계에서 막기 위해서다. Luna read-only 감사와 root source 대조로 strong capability/weak interest·독립 work lease·worker backstop을 정리했다. public signature의 최종 source 대조를 먼저 배정했으며 runtime/renderer/host/CLI capture 구현·실제 PNG는 아직 없다.
+
+## Main 실행 파일의 로컬 보관
+
+main push의 docs/managed/Rust/release workflow도 성공했다. [main package run39085195367](https://github.com/sonan0721/Daedalus/actions/runs/39085195367)은 두 package 성공·Publish skipped다. main checkout/dirty=false의 Mac archive를 `dist/local/daedalus-0.1.0-aarch64-apple-darwin-261812a0048f-clean-ci39085195367/`에 보관하고 기존 검사기로 checksum/manifest/notices/inventory를 검증했다. 실제 실행 파일은 그 아래 `extracted/daedalus`다.
+
+manifest의 exact_commit은 main261812a이며 binary hash는 위 PR artifact와 같은 `ad3be34919e3eb88aa4bd7683bf1f399dbe06c77127a4874c3723958b955942d`다. 두 extracted binary의 `cmp -s`도exit0이었다. 검증한72 native 결과를 바이트가 같은 main 실행 파일에 연결하고, 새 compile·같은 하드웨어/오디오 반복은 하지 않았다. archive/build ID와 commit metadata는 달라질 수 있으므로 archive 전체가 동일하다고 보고하지 않는다.
+
+추가 raw는 `p03-main261812a-mac-download-root-attempt01.log`·SHA-256 `56702f133fd6a9d523c8f4a1f31f7be2325af4f463c97528ee912e585edaabfe`, `p03-main261812a-mac-verify-root-attempt01.log`·`e0f7c9c780a02b417232a06d42cda57beec1b539fc67350b6ae78b53960b2567`, `p03-main261812a-binary-compare-root-attempt01.log`·`432cf1023ebb94957b2933ad1afbe9cfc8ace2480434e58376ab4022664b0880`다. 로컬 보관은 공개 tag/Release 발행이나 엔진 제품 인수를 뜻하지 않는다.
+
+## Runtime capture foundation 착수 계약
+
+Luna의 runtime API 제안을 검토해 첫 source 작업을 배정했다. `RequestTicketId.sequence`가 client별 값임을 source에서 확인해 artifact ID는 session/client/sequence 전체를 감싼다. client try_submit에는 현재 source의 일관된 관측 경계가 없고 latest frame이 commit 뒤에도 old generation일 수 있으므로, source bind는 actor의 한 dispatch turn으로 정정했다. queue admission은 normal/image reserve·ID·deadline/readiness만 고정하며 None tick floor는 dispatch 당시 authority tick이다. 근거 없이 새 atomic source 복제·추가 ledger를 만들지 않는다.
+
+runtime의 session_capture 새 module·기존 control/preparation/exports와 CLI의 최소 exhaustive result/error arm만 첫 소유권이다. existing public struct/factory/default를 유지하고 wire Capture parsing·artifact path·live_capture=true는 포함하지 않는다. source 동결 전 Cargo/장치 검사를 병행하지 않는다. renderer/host는 다음 API/owner return 검토만 진행하며 아직 source 작성하지 않는다. [체크리스트](../04-plan/implementation-checklist.md)의 a.1~a.4는 모두 열린 상태다.

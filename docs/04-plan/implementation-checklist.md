@@ -109,6 +109,10 @@ P01.1의 분담은 content/runtime/CLI-projection으로 나누고 Cargo.lock은 
 - [x] P02.2b: 불변 loaded generation의 CPU/GPU resource 재사용과 transform-only update 계측. 실제 source watch/reload·asset generation 교체는 P01.2/P03로 남는다.
 - [ ] P02.3: live capture/조건/입력·실제 MCP·SDK attach·trace, 필요한 2D/UI/서버 연결까지 제품 인수.
 - [ ] P02.3a: [같은 frame의 비동기 capture](../03-architecture/live-capture-and-artifacts.md), 공통 ticket·유한 artifact·실제 PNG/authority 대조. [구체 소유권](../03-architecture/live-capture-ownership.md)과 runtime API를 선행 동결하며 아직 구현/실제 PNG 전.
+- [ ] P02.3a.1: 기존 service/actor factory의 additive handoff·normal/image credit·typed capture ticket·actor source binding·timeout/cancel·capability/work lease의 runtime foundation. backend Ready/실제 pixels와 구분해 CPU 수명 검증.
+- [ ] P02.3a.2: 실제 COPY_SRC/format handshake·같은 acquired surface frame의 draw/overlay→copy→present·nonwaiting map·readback drain pin. 실제 GPU known-pixel/크기/색/close 회귀.
+- [ ] P02.3a.3: 기존 native host와 durable capture/encoder worker·opaque artifact registry/reader·ACK/reader/GPU/file 회수·panic/Drop/shutdown backstop. 새 Engine·ticket ledger 금지.
+- [ ] P02.3a.4: 기존 protocol2/CLI/helper 연결·같은 실제 창 mutation→Step→capture→PNG/authority/identity 대조→ACK→다음 capture와 두 package/다섯 CI 인수. batch PNG나 metadata만으로 통과하지 않음.
 
 P02.1a/b의 native library 로컬 검증은 수정 후 workspace CPU 158건·check/fmt/strict Clippy와 별도 기존 JSONL·managed·fixture window 회귀로 확인한다. 첫 PR CI의 회수 경쟁 수정과 재검사는 worklog에 별도 기록하며, 실패한 head를 병합하지 않는다. 그 P02.1 시점에는 legacy count-only result guard가 남아 있었다. 후속 P02.1c는 common credit lease와 FIFO 호환·unknown failure를 실제 구현하고 workspace CPU 200건으로 검증했다. 그 158건은 frontend 연결 전 근거이며 P02.2의 실제 창/JSONL 검증은 worklog에 별도로 둔다. MCP/SDK·P02 전체/D1은 계속 열려 있다. [구체 근거](../06-worklog/2026-10-16-product-readiness-audit.md).
 

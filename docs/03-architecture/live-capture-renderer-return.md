@@ -25,6 +25,29 @@ ManagedCaptureClient::try_take_return()
 
 이 header는 역할을 동결하는 표기다. 정확한 Rust type 이름·visibility·error shape는 구현 소유자가 source 작성 전 consumer에게 공유한다. 공개 request에는 scalar key·generation identity·tick floor·deadline·작은 취소 신호만 담는다. runtime ticket/responder/image lease·artifact capability·파일 path는 host에 남긴다.
 
+## 2026-10-18 source 착수용 header 동결
+
+runtime a.1은 `f3880d7`에서 로컬 통합 인수했다. Luna가 정확한 renderer header를 공유하고 root가 아래 additive 경계를 검토한 뒤 a.2 source 작성에 착수한다. 이름이 source에 생기는 것과 실제 GPU 인수는 구분한다.
+
+| Public type/API | 동결한 의미 |
+| --- | --- |
+| `ManagedCaptureKey` | NonZeroU64, 채널별 성공 admission 뒤 strictly increasing, Busy/거부는 원래 key 비소비 |
+| `ManagedCaptureSource::new` / `from_presented` | host가 실제 stage routing에서 얻은 stage key/session/generation/digest로 checked 생성. 기존 `valid_source_digest`와 같은 optional `sha256:` 규칙, exact bytes 보존. private `ManagedGenerationIdentity::new`를 추측해 호출하거나 첫 present까지 source bind를 늦추지 않음 |
+| `ManagedCaptureRequest::new` | validated source·resolved Tick floor·deadline을 받아 `Result<Box<Self>, RequestError>` 반환. 한 번 할당한 Box를 `try_submit` rejection tuple로 그대로 반환하며 Busy 재시도 중 재할당하지 않음 |
+| `ManagedCaptureClient` | readiness 전용 `try_status() -> Result<State, EndpointError>`, 원래 request 보존 submit, keyed cancel, idempotent OOB detach. ReadyInfo는 format/max getter 제공 |
+| `register_worker` | 창 시작 전 non-Clone worker 한 번 등록. 중복은 AlreadyRegistered. durable worker 참조가 수락보다 먼저 존재해야 함 |
+| `ManagedCaptureWorker` | `try_take_return() -> Result<Option<Return>, WorkerError>`와 keyed cell progress. readiness와 queue/map progress를 혼동하지 않음 |
+| `ManagedCaptureReturn` | Submitted(readback) / Cleanup(cleanup) / Failed(key, fixed failure). 한 return reserve이며 큰 inline payload는 쓰지 않음 |
+| `ManagedCaptureReadback` | actual view/format getter, borrowed `try_read_rgba8()`는 Pending(None)/Busy/typed production failure/성공 pixels. 성공 후 재호출은 InvalidState. `into_cleanup(self)`가 같은 cell을 옮겨 실패에도 정리 소유권 보존 |
+| `ManagedCaptureCleanup` | borrowed `try_finish()`는 실제 Released 뒤에만 true. Pending/Busy/DevicePollFailed 등을 성공으로 바꾸지 않음 |
+| `ManagedCapturePixels::into_parts` | key·actual view·format·RGBA Vec를 move해 host가 전달 때문에 큰 복사를 한 번 더 하지 않음 |
+
+Cancel Accepted는 CopyMayBeSubmitted 전이다. AlreadySubmitted는 cleanup 요청이며 successful pixels/rollback 보장이 아니다. Unknown은 현재 key와 일치하지 않아 영향이 없다. surface format4개·typed unsupported·source/timeout/크기/copy/map/poll 실패·Busy/poison/wrong-key를 구분한다.
+
+worker Drop과 readback/cleanup handle Drop은 abandon 신호만 보낸다. after-close GPU owner fallback은 worker endpoint가 detach되고 별도 single-consumer 상태로 **outstanding handle이 없음을 확인했을 때만** Buffer를 정리한다. client/callback/renderer도 Arc를 보유하므로 Arc count를 reader 존재 판정으로 쓰지 않는다. live handle이 있으면 drain은 Pending이다.
+
+CPU checkpoint→window 연결/main-thread opt-in harness 순서로 구현한다. macOS event loop를 보통의 parallel Cargo test thread에서 실행하지 않는다. root가 source/CPU 검사를 확인한 뒤 실제 창 proof를 요청하며, 이 header 동결 자체는 장치 인수가 아니다.
+
 Ready는 실제 surface의 COPY_SRC와 허용 format 확인 뒤 한 번만 게시한다. format과 최대 축/pixel ceiling을 담고, resize한 현재 크기로 덮어쓰지 않는다. 실제 physical 크기는 선택된 `ManagedPresentedView`에서 고정한다. 미지원이면 normal presentation을 유지하며 Unsupported로 보고한다.
 
 ## 예약된 return cell

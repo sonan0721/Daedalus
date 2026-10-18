@@ -67,6 +67,7 @@
 | [Native host 실제 통합 기록](06-worklog/2026-10-18-native-host-integration.md) | 혼합 모델·스프라이트의 실제 CLI 창/세대 교체에서 발견한 결함과 수정·인수 범위를 추적 |
 | [Live capture runtime 작업 기록](06-worklog/2026-10-18-live-capture-foundation.md) | 다음 capture ticket·독립 image credit·capability/worker 수명과 public SDK/CPU 검증을 실제 backend와 구분해 추적 |
 | [Live capture renderer 반환](03-architecture/live-capture-renderer-return.md) | UI panic 전후의 buffer 반환 슬롯·실제 queue fence·worker final drop을 source 구현 전에 고정 |
+| [Live capture renderer 작업 기록](06-worklog/2026-10-18-live-capture-renderer.md) | CPU handoff 검증과 실제 surface 픽셀·닫힘/자원 회수 증거를 분리해 추적 |
 | [Native renderer owner 수명](03-architecture/native-renderer-owner-lifecycle.md) | device/packet 부분 초기화·paired create panic·managed 창 반환·worker final drop의 구현 전 소유권 계약 |
 | [Managed packet 창](03-architecture/managed-packet-window.md) | resource-only 초기 loading·유한 stage/frame 전달·OOB 취소·실제 present ACK·오류에도 owner를 반환하는 기존 창 확장 계약 |
 | [CLI view activation](03-architecture/native-project-view-activation.md) | host를 유일한 실행 owner로 소비하는 CLI 경계·flag·report v2·실제 표시/종료 관측과 기존 경로 호환 계약 |
